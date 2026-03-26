@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Cargo lock (keep for binaries, omit for libraries — this is a binary workspace)
+# Cargo.lock  # intentionally tracked
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ROM and firmware files (if you don't want them tracked)
+# *.bin
+
+# Environment / secrets
+.env
+.env.local
+

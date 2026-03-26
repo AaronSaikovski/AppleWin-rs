@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/apple2-core",
+    "crates/apple2-audio",
+    "crates/apple2-video",
+    "crates/apple2-debugger",
+    "crates/applewin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/AaronSaikovski/AppleWin-rs"
+
+[workspace.dependencies]
+# Shared dependencies — version-pinned here, referenced with `workspace = true` in crates
+apple2-core     = { path = "crates/apple2-core" }
+apple2-audio    = { path = "crates/apple2-audio" }
+apple2-video    = { path = "crates/apple2-video" }
+apple2-debugger = { path = "crates/apple2-debugger" }
+
+bitflags         = { version = "2", features = ["serde"] }
+thiserror        = "1"
+tracing          = "0.1"
+serde            = { version = "1", features = ["derive"] }
+serde_yaml       = "0.9"
+serde_bytes      = "0.11"

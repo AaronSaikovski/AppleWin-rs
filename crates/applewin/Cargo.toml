@@ -1,0 +1,35 @@
+[package]
+name = "applewin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AppleWin — cross-platform Apple II emulator (Rust rewrite)"
+
+[[bin]]
+name = "applewin"
+path = "src/main.rs"
+
+[dependencies]
+apple2-core     = { workspace = true }
+apple2-audio    = { workspace = true }
+apple2-video    = { workspace = true }
+apple2-debugger = { workspace = true }
+
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+serde      = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Platform I/O — optional at build time for headless / CI builds
+eframe = { version = "0.23", optional = true }
+rfd    = { version = "0.12", optional = true }
+cpal   = { version = "0.15", optional = true }
+gilrs  = { version = "0.10", optional = true }
+toml   = { version = "0.8",  optional = true }
+# eframe 0.23 transitively needs these winapi features on Windows
+winapi = { version = "0.3", features = ["winuser", "windef"], optional = true }
+
+[features]
+default  = ["gui"]
+gui      = ["dep:eframe", "dep:rfd", "dep:cpal", "dep:gilrs", "dep:toml", "dep:winapi"]
+headless = []

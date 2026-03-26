@@ -1,0 +1,11 @@
+[package]
+name = "apple2-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Apple II audio synthesis: Speaker, AY8910, SSI263"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+serde     = { workspace = true }

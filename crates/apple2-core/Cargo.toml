@@ -1,0 +1,14 @@
+[package]
+name = "apple2-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Apple II core emulation: CPU, memory bus, card trait, disk — no OS dependencies"
+
+[dependencies]
+bitflags    = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+serde       = { workspace = true }
+serde_bytes = { workspace = true }
+apple2-audio = { path = "../apple2-audio" }
