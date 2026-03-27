@@ -29,6 +29,9 @@ toml   = { version = "0.8",  optional = true }
 # eframe 0.23 transitively needs these winapi features on Windows
 winapi = { version = "0.3", features = ["winuser", "windef"], optional = true }
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
 [features]
 default  = ["gui"]
 gui      = ["dep:eframe", "dep:rfd", "dep:cpal", "dep:gilrs", "dep:toml", "dep:winapi"]

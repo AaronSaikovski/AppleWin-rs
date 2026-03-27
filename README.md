@@ -1,9 +1,18 @@
 # AppleWin-rs
 
-A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows.
+![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
+![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
+![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
+
+A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
 > **Original project:** [https://github.com/AppleWin/AppleWin](https://github.com/AppleWin/AppleWin)
 > **This port:** [https://github.com/AaronSaikovski/AppleWin-rs](https://github.com/AaronSaikovski/AppleWin-rs)
+
+## Downloads
+
+Pre-built binaries for Windows, macOS, and Linux are available on the [Releases](https://github.com/AaronSaikovski/AppleWin-rs/releases) page.
 
 ---
 
@@ -78,15 +87,14 @@ AppleWin-rs/
 
 ### Prerequisites
 
-- Rust toolchain: **1.85+** (edition 2024 workspace)
-- On Windows, MSVC build tools or the `x86_64-pc-windows-msvc` target
-- On Linux/macOS, standard C toolchain (`gcc`/`clang`) for native audio/GUI crate build scripts
-
-Install Rust via [rustup](https://rustup.rs):
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
+- Rust toolchain: **1.85+** (edition 2024 workspace) — install via [rustup](https://rustup.rs)
+- **Windows:** MSVC build tools (`x86_64-pc-windows-msvc` target)
+- **Linux:** system packages for audio and GUI:
+  ```sh
+  sudo apt-get install libasound2-dev libgtk-3-dev \
+      libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+  ```
+- **macOS:** standard Xcode command-line tools
 
 ### Standard (GUI) Build
 
@@ -129,26 +137,6 @@ Or run the compiled binary directly and optionally pass a disk image:
 |---|---|---|
 | `gui` | yes | Enables the full egui/eframe GUI, audio (cpal), gamepad (gilrs), and file dialogs (rfd) |
 | `headless` | no | Strips all GUI/audio/I/O for pure emulation builds |
-
----
-
-## Workspace Dependencies
-
-All shared dependency versions are pinned in the root `Cargo.toml` and referenced with `workspace = true` in each crate:
-
-| Crate | Version |
-|---|---|
-| `bitflags` | 2.x (with `serde` feature) |
-| `thiserror` | 1.x |
-| `tracing` | 0.1 |
-| `serde` | 1.x (with `derive` feature) |
-| `serde_yaml` | 0.9 |
-| `serde_bytes` | 0.11 |
-| `eframe` / `egui` | 0.23 (GUI only) |
-| `cpal` | 0.15 (GUI only) |
-| `gilrs` | 0.10 (GUI only) |
-| `rfd` | 0.12 (GUI only) |
-| `toml` | 0.8 (GUI only) |
 
 ---
 

@@ -102,6 +102,7 @@ mod gui {
     static BMP_DEBUG: &[u8] = include_bytes!("../icons/DEBUG.BMP");
     static BMP_SETUP: &[u8] = include_bytes!("../icons/SETUP.BMP");
     static BMP_LOGO:  &[u8] = include_bytes!("../icons/ApplewinLogo.bmp");
+    static ICO_APP:   &[u8] = include_bytes!("../icons/Applewin.ico");
 
     /// Decode a Windows indexed-colour BMP (4bpp or 8bpp) to RGBA8888 pixels.
     ///
@@ -192,6 +193,122 @@ mod gui {
             }
         }
         Some((w, h, rgba))
+    }
+
+    /// Decode the largest image from a .ico file to RGBA8888 pixels.
+    ///
+    /// Supports 4bpp, 8bpp, 24bpp, and 32bpp BMP images embedded in the ICO
+    /// container. PNG-encoded entries (uncommon at toolbar sizes) are skipped.
+    fn decode_ico_rgba(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+        if data.len() < 6 { return None; }
+        if u16::from_le_bytes([data[0], data[1]]) != 0 { return None; }
+        if u16::from_le_bytes([data[2], data[3]]) != 1 { return None; }
+        let count = u16::from_le_bytes([data[4], data[5]]) as usize;
+
+        // Pick the largest image by area.
+        let mut best: Option<(usize, usize, usize)> = None; // (w, h, offset)
+        for i in 0..count {
+            let e = 6 + i * 16;
+            if e + 16 > data.len() { break; }
+            let w = if data[e]   == 0 { 256usize } else { data[e]   as usize };
+            let h = if data[e+1] == 0 { 256usize } else { data[e+1] as usize };
+            let offset = u32::from_le_bytes(data[e+12..e+16].try_into().ok()?) as usize;
+            if best.is_none_or(|(bw, bh, _)| w * h > bw * bh) {
+                best = Some((w, h, offset));
+            }
+        }
+        let (_, _, offset) = best?;
+        let img = &data[offset..];
+
+        // Skip PNG-encoded entries (start with PNG magic).
+        if img.starts_with(b"\x89PNG\r\n\x1a\n") { return None; }
+
+        // Parse embedded DIB (BITMAPINFOHEADER, no "BM" file header).
+        if img.len() < 40 { return None; }
+        let dib_w    = u32::from_le_bytes(img[4..8].try_into().ok()?)  as usize;
+        let dib_h    = u32::from_le_bytes(img[8..12].try_into().ok()?) as usize;
+        let bpp      = u16::from_le_bytes(img[14..16].try_into().ok()?);
+        let actual_h = dib_h / 2; // ICO DIB height counts XOR rows + AND mask rows
+
+        let colors_used = u32::from_le_bytes(img[32..36].try_into().ok()?) as usize;
+        let num_colors: usize = match bpp {
+            4 => if colors_used > 0 { colors_used } else { 16 },
+            8 => if colors_used > 0 { colors_used } else { 256 },
+            _ => 0,
+        };
+        let pal_start   = 40usize;
+        let pixel_start = pal_start + num_colors * 4;
+        if img.len() < pixel_start { return None; }
+
+        match bpp {
+            32 => {
+                let row_bytes = dib_w * 4;
+                let mut rgba = vec![0u8; dib_w * actual_h * 4];
+                for row in 0..actual_h {
+                    let src = pixel_start + (actual_h - 1 - row) * row_bytes;
+                    let dst = row * dib_w * 4;
+                    for x in 0..dib_w {
+                        let s = src + x * 4;
+                        rgba[dst + x*4]     = *img.get(s+2)?; // R
+                        rgba[dst + x*4 + 1] = *img.get(s+1)?; // G
+                        rgba[dst + x*4 + 2] = *img.get(s)?;   // B
+                        rgba[dst + x*4 + 3] = *img.get(s+3)?; // A
+                    }
+                }
+                Some((dib_w as u32, actual_h as u32, rgba))
+            }
+            24 => {
+                let row_bytes = (dib_w * 3 + 3) & !3;
+                let mut rgba = vec![255u8; dib_w * actual_h * 4];
+                for row in 0..actual_h {
+                    let src = pixel_start + (actual_h - 1 - row) * row_bytes;
+                    let dst = row * dib_w * 4;
+                    for x in 0..dib_w {
+                        let s = src + x * 3;
+                        rgba[dst + x*4]     = *img.get(s+2)?;
+                        rgba[dst + x*4 + 1] = *img.get(s+1)?;
+                        rgba[dst + x*4 + 2] = *img.get(s)?;
+                    }
+                }
+                Some((dib_w as u32, actual_h as u32, rgba))
+            }
+            4 | 8 => {
+                let mut palette = [(0u8, 0u8, 0u8); 256];
+                for (i, entry) in palette.iter_mut().enumerate().take(num_colors) {
+                    let p = pal_start + i * 4;
+                    *entry = (*img.get(p+2)?, *img.get(p+1)?, *img.get(p)?);
+                }
+                let xor_row_bytes = match bpp {
+                    4 => (dib_w.div_ceil(2) + 3) & !3,
+                    8 => (dib_w             + 3) & !3,
+                    _ => unreachable!(),
+                };
+                let and_row_bytes = dib_w.div_ceil(32) * 4;
+                let and_start = pixel_start + actual_h * xor_row_bytes;
+                let mut rgba = vec![0u8; dib_w * actual_h * 4];
+                for row in 0..actual_h {
+                    let src_row = actual_h - 1 - row;
+                    let src     = pixel_start + src_row * xor_row_bytes;
+                    let and_src = and_start   + src_row * and_row_bytes;
+                    let dst     = row * dib_w * 4;
+                    for x in 0..dib_w {
+                        let idx = match bpp {
+                            4 => { let b = *img.get(src + x/2)?; (if x%2==0 { b>>4 } else { b&0xF }) as usize }
+                            8 => *img.get(src + x)? as usize,
+                            _ => unreachable!(),
+                        };
+                        let (r, g, b) = palette[idx];
+                        let transparent = (*img.get(and_src + x/8)? >> (7 - x%8)) & 1;
+                        rgba[dst + x*4]     = r;
+                        rgba[dst + x*4 + 1] = g;
+                        rgba[dst + x*4 + 2] = b;
+                        rgba[dst + x*4 + 3] = if transparent == 1 { 0 } else { 255 };
+                    }
+                }
+                Some((dib_w as u32, actual_h as u32, rgba))
+            }
+            _ => None,
+        }
     }
 
     // ── Audio ─────────────────────────────────────────────────────────────────
@@ -2523,6 +2640,9 @@ mod gui {
             (Some(egui::vec2(win_w, win_h)), pos)
         };
 
+        let icon_data = decode_ico_rgba(ICO_APP)
+            .map(|(w, h, rgba)| eframe::IconData { rgba, width: w, height: h });
+
         let options = eframe::NativeOptions {
             initial_window_size: initial_size,
             initial_window_pos:  initial_pos,
@@ -2538,6 +2658,7 @@ mod gui {
             // which fights our own initial_window_size and prevents the window
             // from starting in the correct maximized state.
             persist_window: false,
+            icon_data,
             ..Default::default()
         };
         eframe::run_native(
