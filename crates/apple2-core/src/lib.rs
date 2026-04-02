@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod emulator;
 pub mod error;
 pub mod model;
+pub mod prodos;
 
 pub use emulator::Emulator;
 pub use error::Error;

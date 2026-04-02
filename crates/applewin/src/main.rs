@@ -891,6 +891,10 @@ mod gui {
             let mut act_eject_hdd2    = false;
             let mut act_recent_disk: Option<String> = None;
             let mut act_recent_hdd: Option<String> = None;
+            // (is_blank, is_dos33, size_bytes)
+            let mut act_new_disk: Option<(bool, bool, usize)> = None;
+            // (is_dos33, path)
+            let mut act_format_disk: Option<(bool, std::path::PathBuf)> = None;
 
             // ── Menu bar ──────────────────────────────────────────────────────
             egui::TopBottomPanel::top("menubar")
@@ -915,6 +919,74 @@ mod gui {
                             if ui.add_enabled(d2_loaded, egui::Button::new("Eject Disk 2")).clicked() {
                                 act_eject_disk2 = true; ui.close_menu();
                             }
+                            ui.separator();
+                            // ── New Disk submenu ──────────────────────────────
+                            ui.menu_button("New Disk\u{2026}", |ui| {
+                                ui.label(egui::RichText::new("ProDOS").strong());
+                                if ui.button("ProDOS 5.25\" 140 KB (.po)").clicked() {
+                                    act_new_disk = Some((false, false, 143360)); ui.close_menu();
+                                }
+                                if ui.button("ProDOS 5.25\" 160 KB (.po)").clicked() {
+                                    act_new_disk = Some((false, false, 163840)); ui.close_menu();
+                                }
+                                if ui.button("ProDOS 3.5\" 800 KB (.po)").clicked() {
+                                    act_new_disk = Some((false, false, 819200)); ui.close_menu();
+                                }
+                                if ui.button("ProDOS Hard 32 MB (.hdv)").clicked() {
+                                    act_new_disk = Some((false, false, 33554432)); ui.close_menu();
+                                }
+                                ui.separator();
+                                ui.label(egui::RichText::new("DOS 3.3").strong());
+                                if ui.button("DOS 3.3 5.25\" 140 KB (.dsk)").clicked() {
+                                    act_new_disk = Some((false, true, 143360)); ui.close_menu();
+                                }
+                                if ui.button("DOS 3.3 5.25\" 160 KB (.dsk)").clicked() {
+                                    act_new_disk = Some((false, true, 163840)); ui.close_menu();
+                                }
+                                ui.separator();
+                                ui.label(egui::RichText::new("Blank").strong());
+                                if ui.button("Blank 5.25\" 140 KB (.po)").clicked() {
+                                    act_new_disk = Some((true, false, 143360)); ui.close_menu();
+                                }
+                                if ui.button("Blank 5.25\" 160 KB (.po)").clicked() {
+                                    act_new_disk = Some((true, false, 163840)); ui.close_menu();
+                                }
+                                if ui.button("Blank 3.5\" 800 KB (.po)").clicked() {
+                                    act_new_disk = Some((true, false, 819200)); ui.close_menu();
+                                }
+                                if ui.button("Blank Hard 32 MB (.hdv)").clicked() {
+                                    act_new_disk = Some((true, false, 33554432)); ui.close_menu();
+                                }
+                                ui.separator();
+                                ui.label(egui::RichText::new("Copy options (ProDOS only)").weak().italics());
+                                ui.checkbox(&mut self.config.new_disk_copy_prodos,     "ProDOS 2.4.3");
+                                ui.checkbox(&mut self.config.new_disk_copy_basic,      "BASIC.SYSTEM");
+                                ui.checkbox(&mut self.config.new_disk_copy_bitsy_boot, "BITSY.BOOT");
+                                ui.checkbox(&mut self.config.new_disk_copy_bitsy_bye,  "QUIT.SYSTEM");
+                            });
+                            // ── Format Disk submenu ───────────────────────────
+                            ui.menu_button("Format Disk\u{2026}", |ui| {
+                                ui.label(egui::RichText::new("Pick a disk image to reformat").weak());
+                                if ui.button("Format as ProDOS\u{2026}").clicked() {
+                                    if let Some(path) = open_disk_dialog(
+                                        "Select Disk to Format as ProDOS",
+                                        self.config.last_disk_dir.as_deref(),
+                                    ) {
+                                        act_format_disk = Some((false, path));
+                                    }
+                                    ui.close_menu();
+                                }
+                                if ui.button("Format as DOS 3.3\u{2026}").clicked() {
+                                    if let Some(path) = open_disk_dialog(
+                                        "Select Disk to Format as DOS 3.3",
+                                        self.config.last_disk_dir.as_deref(),
+                                    ) {
+                                        act_format_disk = Some((true, path));
+                                    }
+                                    ui.close_menu();
+                                }
+                            });
+                            ui.separator();
                             // ── Recent Disks submenu ──────────────────────────
                             ui.menu_button("Recent Disks", |ui| {
                                 if self.config.recent_disks.is_empty() {
@@ -1966,6 +2038,80 @@ mod gui {
                     self.config.save();
                 }
             }
+            // ── New disk creation ──────────────────────────────────────────────
+            if let Some((is_blank, is_dos33, size)) = act_new_disk {
+                use apple2_core::prodos::{
+                    create_prodos_disk, create_dos33_disk, create_blank_disk, ProDosCreateOptions,
+                };
+                let ext = if is_dos33 { "dsk" } else if size > 1_000_000 { "hdv" } else { "po" };
+                let kind = if is_blank { "blank" } else if is_dos33 { "dos33" } else { "prodos" };
+                let size_kb = size / 1024;
+                let suggested = format!("{kind}_{size_kb}k.{ext}");
+                let start_dir = self.config.last_disk_dir.as_deref();
+                if let Some(path) = save_disk_dialog("Save New Disk Image As", &suggested, start_dir) {
+                    let result = if is_blank {
+                        create_blank_disk(&path, size)
+                    } else if is_dos33 {
+                        create_dos33_disk(&path, size)
+                    } else {
+                        let opts = ProDosCreateOptions {
+                            volume_name:        "BLANK".to_string(),
+                            copy_prodos:        self.config.new_disk_copy_prodos,
+                            copy_basic:         self.config.new_disk_copy_basic,
+                            copy_bitsy_boot:    self.config.new_disk_copy_bitsy_boot,
+                            copy_bitsy_bye:     self.config.new_disk_copy_bitsy_bye,
+                        };
+                        create_prodos_disk(&path, size, &opts)
+                    };
+                    match result {
+                        Ok(()) => {
+                            if let Ok(data) = std::fs::read(&path) {
+                                let ext_str = path.extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("")
+                                    .to_lowercase();
+                                self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext_str);
+                                let path_str = path.to_string_lossy().into_owned();
+                                self.config.add_recent_disk(&path_str);
+                                self.config.last_disk1 = Some(path_str);
+                                self.config.last_disk_dir = path.parent()
+                                    .map(|p| p.to_string_lossy().into_owned());
+                                self.disk1 = Some(path);
+                                self.config.save();
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to create disk image: {e}"),
+                    }
+                }
+            }
+            // ── Format existing disk ───────────────────────────────────────────
+            if let Some((is_dos33, path)) = act_format_disk {
+                use apple2_core::prodos::{format_prodos_disk, format_dos33_disk};
+                let result = if is_dos33 {
+                    format_dos33_disk(&path)
+                } else {
+                    format_prodos_disk(&path)
+                };
+                match result {
+                    Ok(()) => {
+                        // Reload if this file is currently in a drive
+                        if self.disk1.as_deref() == Some(path.as_path()) {
+                            if let Ok(data) = std::fs::read(&path) {
+                                let ext_str = path.extension()
+                                    .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext_str);
+                            }
+                        } else if self.disk2.as_deref() == Some(path.as_path()) {
+                            if let Ok(data) = std::fs::read(&path) {
+                                let ext_str = path.extension()
+                                    .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext_str);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to format disk: {e}"),
+                }
+            }
             // Load disk from recent list into drive 1
             if let Some(path_str) = act_recent_disk {
                 let path = PathBuf::from(&path_str);
@@ -2423,6 +2569,18 @@ mod gui {
             d = d.set_directory(dir);
         }
         d.pick_file()
+    }
+
+    fn save_disk_dialog(title: &str, default_name: &str, start_dir: Option<&str>) -> Option<PathBuf> {
+        let mut d = rfd::FileDialog::new()
+            .set_title(title)
+            .set_file_name(default_name)
+            .add_filter("Apple II Disk Images", &["po", "dsk", "hdv", "do"])
+            .add_filter("All Files", &["*"]);
+        if let Some(dir) = start_dir {
+            d = d.set_directory(dir);
+        }
+        d.save_file()
     }
 
     // ── 3D sunken bevel (Windows 9x "SunkenBox" look) ─────────────────────────
