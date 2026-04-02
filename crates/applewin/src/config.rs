@@ -207,6 +207,16 @@ pub struct Config {
     /// Up to 5 most-recently-used HDD image paths.
     pub recent_hdds:  Vec<String>,
 
+    // ── New-disk copy options ─────────────────────────────────────────────────
+    /// Embed ProDOS 2.4.3 when creating a new ProDOS disk (mirrors C++ REGVALUE_PREF_NEW_DISK_COPY_PRODOS_SYS).
+    pub new_disk_copy_prodos:     bool,
+    /// Embed BASIC.SYSTEM 1.7 when creating a new ProDOS disk.
+    pub new_disk_copy_basic:      bool,
+    /// Embed BITSY.BOOT when creating a new ProDOS disk.
+    pub new_disk_copy_bitsy_boot: bool,
+    /// Embed QUIT.SYSTEM when creating a new ProDOS disk.
+    pub new_disk_copy_bitsy_bye:  bool,
+
     // ── Per-card options ──────────────────────────────────────────────────────
     /// Mockingboard: enable SSI263 speech chips (default false).
     pub mockingboard_has_speech: bool,
@@ -260,6 +270,10 @@ impl Default for Config {
             last_hdd2:            None,
             recent_disks:         Vec::new(),
             recent_hdds:          Vec::new(),
+            new_disk_copy_prodos:     false,
+            new_disk_copy_basic:      false,
+            new_disk_copy_bitsy_boot: false,
+            new_disk_copy_bitsy_bye:  false,
             mockingboard_has_speech: false,
             phasor_native_mode:   true,
             saturn_ram_kb:        128,
