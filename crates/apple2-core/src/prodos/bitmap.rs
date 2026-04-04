@@ -15,13 +15,13 @@ pub fn bitmap_offset(bitmap_block: u16) -> usize {
 /// Total number of blocks in a disk image of `disk_size` bytes.
 #[inline]
 pub fn block_count(disk_size: usize) -> usize {
-    (disk_size + BLOCK_SIZE - 1) / BLOCK_SIZE
+    disk_size.div_ceil(BLOCK_SIZE)
 }
 
 /// Number of bitmap bytes needed to cover all blocks in the image.
 #[inline]
 fn bitmap_byte_count(disk_size: usize) -> usize {
-    (block_count(disk_size) + 7) / 8
+    block_count(disk_size).div_ceil(8)
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ pub fn init_free(image: &mut [u8], disk_size: usize, bitmap_block: u16, total_bl
 /// Callers use this to know how many bitmap blocks to allocate after calling `init_free`.
 pub fn bitmap_block_count(disk_size: usize) -> usize {
     let size = bitmap_byte_count(disk_size);
-    (size + BLOCK_SIZE - 1) / BLOCK_SIZE
+    size.div_ceil(BLOCK_SIZE)
 }
 
 /// Scan the bitmap for the first free (bit = 1) block and return its block number.

@@ -62,6 +62,7 @@ impl Default for ProDosCreateOptions {
 
 // ── File-metadata helpers ─────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn sys_meta(name: &str, aux: u16, cur_ver: u8, min_ver: u8,
             cdate: u16, ctime: u16, mdate: u16, mtime: u16) -> FileMeta {
     let access = (Access::B | Access::R).bits();
@@ -284,7 +285,7 @@ mod tests {
         let base = 2 * 512 + 4;
         let kind_byte = image[base];
         assert_eq!((kind_byte >> 4) & 0xF, 0xF, "Root kind byte expected");
-        assert_eq!((kind_byte >> 0) & 0xF, 8,   "Name length = 8 (TESTDISK)");
+        assert_eq!(kind_byte & 0xF, 8,   "Name length = 8 (TESTDISK)");
 
         // Volume name bytes 1..9 should be "TESTDISK"
         let name = &image[base + 1..base + 9];

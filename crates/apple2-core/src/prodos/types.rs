@@ -212,23 +212,30 @@ pub fn copy_upper(dst: &mut [u8], src: &str) -> usize {
 pub fn get_volume_header(image: &[u8], block: u32) -> VolumeHeader {
     let base = block as usize * BLOCK_SIZE + 4;
     let kind_len = image[base];
-    let mut h = VolumeHeader::default();
-    h.kind = (kind_len >> 4) & 0xF;
-    h.len  = (kind_len >> 0) & 0xF;
-    for i in 0..MAX_FILENAME + 1 { h.name[i] = 0; }
-    for i in 0..(h.len as usize) { h.name[i] = image[base + 1 + i]; }
-    for i in 0..8 { h.pad8[i] = image[base + 16 + i]; }
-    h.date       = get_u16(image, base + 24);
-    h.time       = get_u16(image, base + 26);
-    h.cur_ver    = image[base + 28];
-    h.min_ver    = image[base + 29];
-    h.access     = image[base + 30];
-    h.entry_len  = image[base + 31];
-    h.entry_num  = image[base + 32];
-    h.file_count = get_u16(image, base + 33);
-    h.bitmap_block = get_u16(image, base + 35);
-    h.total_blocks = get_u16(image, base + 37);
-    h
+    let len = kind_len & 0xF;
+    let mut name = [0u8; MAX_FILENAME + 1];
+    for i in 0..(len as usize) { name[i] = image[base + 1 + i]; }
+    let mut pad8 = [0u8; 8];
+    for i in 0..8 { pad8[i] = image[base + 16 + i]; }
+    VolumeHeader {
+        kind: (kind_len >> 4) & 0xF,
+        len,
+        name,
+        pad8,
+        date:         get_u16(image, base + 24),
+        time:         get_u16(image, base + 26),
+        cur_ver:      image[base + 28],
+        min_ver:      image[base + 29],
+        access:       image[base + 30],
+        entry_len:    image[base + 31],
+        entry_num:    image[base + 32],
+        file_count:   get_u16(image, base + 33),
+        bitmap_block: get_u16(image, base + 35),
+        total_blocks: get_u16(image, base + 37),
+        parent_block: 0,
+        parent_entry_num: 0,
+        parent_entry_len: 0,
+    }
 }
 
 /// Write a `VolumeHeader` into `image` at the given block.
@@ -253,26 +260,28 @@ pub fn set_volume_header(image: &mut [u8], h: &VolumeHeader, block: u32) {
 
 /// Read a `FileHeader` from `image` at byte offset `off`.
 pub fn get_file_header(image: &[u8], off: usize) -> FileHeader {
-    let mut f = FileHeader::default();
     let kind_len = image[off];
-    f.kind = (kind_len >> 4) & 0xF;
-    f.len  = (kind_len >> 0) & 0xF;
-    for i in 0..MAX_FILENAME + 1 { f.name[i] = 0; }
-    for i in 0..(f.len as usize) { f.name[i] = image[off + 1 + i]; }
-    f.file_type = image[off + 16];
-    f.inode     = get_u16(image, off + 17);
-    f.blocks    = get_u16(image, off + 19);
-    f.size      = get_u24(image, off + 21);
-    f.date      = get_u16(image, off + 24);
-    f.time      = get_u16(image, off + 26);
-    f.cur_ver   = image[off + 28];
-    f.min_ver   = image[off + 29];
-    f.access    = image[off + 30];
-    f.aux       = get_u16(image, off + 31);
-    f.mod_date  = get_u16(image, off + 33);
-    f.mod_time  = get_u16(image, off + 35);
-    f.dir_block = get_u16(image, off + 37);
-    f
+    let len = kind_len & 0xF;
+    let mut name = [0u8; MAX_FILENAME + 1];
+    for i in 0..(len as usize) { name[i] = image[off + 1 + i]; }
+    FileHeader {
+        kind:      (kind_len >> 4) & 0xF,
+        len,
+        name,
+        file_type: image[off + 16],
+        inode:     get_u16(image, off + 17),
+        blocks:    get_u16(image, off + 19),
+        size:      get_u24(image, off + 21),
+        date:      get_u16(image, off + 24),
+        time:      get_u16(image, off + 26),
+        cur_ver:   image[off + 28],
+        min_ver:   image[off + 29],
+        access:    image[off + 30],
+        aux:       get_u16(image, off + 31),
+        mod_date:  get_u16(image, off + 33),
+        mod_time:  get_u16(image, off + 35),
+        dir_block: get_u16(image, off + 37),
+    }
 }
 
 /// Write a `FileHeader` into `image` at byte offset `off`.

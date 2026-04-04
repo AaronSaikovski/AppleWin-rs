@@ -200,16 +200,14 @@ fn find_opcode(mnemonic: &str, mode: AddrMode) -> Option<(u8, AddrMode)> {
         return Some((entry.opcode, entry.mode));
     }
     // For branch instructions: if mode is ZeroPage or Absolute, try Relative
-    if matches!(mode, AddrMode::ZeroPage | AddrMode::Absolute) {
-        if let Some(entry) = ASM_TABLE.iter().find(|e| e.mnemonic == mnemonic && e.mode == AddrMode::Relative) {
-            return Some((entry.opcode, entry.mode));
-        }
+    if matches!(mode, AddrMode::ZeroPage | AddrMode::Absolute)
+        && let Some(entry) = ASM_TABLE.iter().find(|e| e.mnemonic == mnemonic && e.mode == AddrMode::Relative) {
+        return Some((entry.opcode, entry.mode));
     }
     // If mode is ZeroPage but only Absolute exists, try Absolute
-    if mode == AddrMode::ZeroPage {
-        if let Some(entry) = ASM_TABLE.iter().find(|e| e.mnemonic == mnemonic && e.mode == AddrMode::Absolute) {
-            return Some((entry.opcode, entry.mode));
-        }
+    if mode == AddrMode::ZeroPage
+        && let Some(entry) = ASM_TABLE.iter().find(|e| e.mnemonic == mnemonic && e.mode == AddrMode::Absolute) {
+        return Some((entry.opcode, entry.mode));
     }
     None
 }

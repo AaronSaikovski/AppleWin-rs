@@ -1941,31 +1941,30 @@ mod gui {
                                                 && addr < bp.address.saturating_add(bp.length));
                                         let marker = if addr == pc { ">" } else if has_bp { "*" } else { " " };
 
-                                        if let Some(kind) = markup_kind {
-                                            if kind != markup::MarkupKind::Code {
-                                                // Render as data
-                                                let region = self.debugger.markup.region_at(addr);
-                                                let remaining = region.map(|r| {
-                                                    let end = r.start.wrapping_add(r.length);
-                                                    end.wrapping_sub(addr)
-                                                }).unwrap_or(1);
-                                                let (data_lines, consumed) = markup::format_data_region(
-                                                    addr, kind, remaining,
-                                                    |a| self.emu.bus.read_raw(a),
+                                        if let Some(kind) = markup_kind
+                                            && kind != markup::MarkupKind::Code {
+                                            // Render as data
+                                            let region = self.debugger.markup.region_at(addr);
+                                            let remaining = region.map(|r| {
+                                                let end = r.start.wrapping_add(r.length);
+                                                end.wrapping_sub(addr)
+                                            }).unwrap_or(1);
+                                            let (data_lines, consumed) = markup::format_data_region(
+                                                addr, kind, remaining,
+                                                |a| self.emu.bus.read_raw(a),
+                                            );
+                                            for line in &data_lines {
+                                                let text = format!("{} {}", marker, line);
+                                                let color = Color32::from_rgb(0x80, 0xC0, 0xFF);
+                                                let resp = ui.selectable_label(
+                                                    addr == self.debugger.cursor,
+                                                    RichText::new(text).monospace().color(color),
                                                 );
-                                                for line in &data_lines {
-                                                    let text = format!("{} {}", marker, line);
-                                                    let color = Color32::from_rgb(0x80, 0xC0, 0xFF);
-                                                    let resp = ui.selectable_label(
-                                                        addr == self.debugger.cursor,
-                                                        RichText::new(text).monospace().color(color),
-                                                    );
-                                                    if resp.clicked() { cursor_update = Some(addr); }
-                                                    lines_shown += 1;
-                                                }
-                                                addr = addr.wrapping_add(consumed.max(1));
-                                                continue;
+                                                if resp.clicked() { cursor_update = Some(addr); }
+                                                lines_shown += 1;
                                             }
+                                            addr = addr.wrapping_add(consumed.max(1));
+                                            continue;
                                         }
 
                                         // Normal code disassembly
@@ -2046,12 +2045,11 @@ mod gui {
                                     .desired_width(60.0)
                                     .font(FontId::monospace(12.0));
                                 ui.add(te);
-                                if ui.button("Go").clicked() {
-                                    if let Ok(addr) = u16::from_str_radix(
+                                if ui.button("Go").clicked()
+                                    && let Ok(addr) = u16::from_str_radix(
                                         self.debugger_mem_input.trim().trim_start_matches('$'), 16
                                     ) {
-                                        self.debugger.mem_dump_addr = addr;
-                                    }
+                                    self.debugger.mem_dump_addr = addr;
                                 }
                             });
                             egui::ScrollArea::vertical()
@@ -3078,27 +3076,25 @@ mod gui {
                 self.config.save();
             }
             // ── Cassette actions ──────────────────────────────────────────────
-            if act_load_cassette {
-                if let Some(path) = open_cassette_dialog() {
-                    if let Ok(raw) = std::fs::read(&path) {
-                        let ext = path.extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        // For .wav files, extract raw PCM; otherwise treat as raw 8-bit unsigned PCM.
-                        let pcm = if ext == "wav" {
-                            decode_wav_to_u8pcm(&raw).unwrap_or(raw)
-                        } else {
-                            raw
-                        };
-                        let len = pcm.len();
-                        self.emu.bus.load_cassette(pcm, self.emu.cpu.cycles);
-                        let name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("cassette");
-                        self.set_status_msg(format!("Cassette loaded: {name} ({len} bytes)"));
-                    }
-                }
+            if act_load_cassette
+                && let Some(path) = open_cassette_dialog()
+                && let Ok(raw) = std::fs::read(&path) {
+                let ext = path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                // For .wav files, extract raw PCM; otherwise treat as raw 8-bit unsigned PCM.
+                let pcm = if ext == "wav" {
+                    decode_wav_to_u8pcm(&raw).unwrap_or(raw)
+                } else {
+                    raw
+                };
+                let len = pcm.len();
+                self.emu.bus.load_cassette(pcm, self.emu.cpu.cycles);
+                let name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("cassette");
+                self.set_status_msg(format!("Cassette loaded: {name} ({len} bytes)"));
             }
             if act_eject_cassette {
                 self.emu.bus.eject_cassette();
@@ -3395,7 +3391,7 @@ mod gui {
     /// Returns the path on success.
     fn save_screenshot(pixels: &[u8], w: usize, h: usize) -> Option<PathBuf> {
         let path = screenshot_path();
-        let Some(path) = path else { return None };
+        let path = path?;
         let row_stride = (w * 3).div_ceil(4) * 4;
         let pixel_bytes = row_stride * h;
         let file_size = (14 + 40 + pixel_bytes) as u32;
@@ -3548,7 +3544,7 @@ mod gui {
             }
             pos += 8 + chunk_size;
             // Chunks are word-aligned
-            if chunk_size % 2 != 0 { pos += 1; }
+            if !chunk_size.is_multiple_of(2) { pos += 1; }
         }
         None
     }

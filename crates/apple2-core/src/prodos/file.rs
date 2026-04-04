@@ -81,7 +81,7 @@ pub fn add_file(
 
     // ── Calculate storage kind and block counts ────────────────────────────
     let file_size    = file_data.len();
-    let n_data_blks  = (file_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let n_data_blks  = file_size.div_ceil(BLOCK_SIZE);
     let n_data_blks  = n_data_blks.max(1); // at least 1 block even for empty files
 
     let (kind, n_index_blks) = if file_size <= BLOCK_SIZE {

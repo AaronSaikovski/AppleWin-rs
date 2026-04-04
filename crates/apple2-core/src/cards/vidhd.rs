@@ -152,7 +152,7 @@ impl Card for VidHdCard {
         // Simulate VBlank toggling (~60Hz)
         self.vblank_counter = self.vblank_counter.wrapping_add(1);
         // Toggle VBlank roughly every 4 update ticks (~60Hz at ~17ms per update)
-        if self.vblank_counter % 4 == 0 {
+        if self.vblank_counter.is_multiple_of(4) {
             self.status ^= SHR_STATUS_VBLANK;
         }
     }

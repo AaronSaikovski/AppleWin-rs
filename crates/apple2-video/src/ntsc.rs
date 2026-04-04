@@ -950,8 +950,8 @@ mod tests {
         let mut main_ram = [0u8; 65536];
         let aux_ram = [0u8; 65536];
         // Set hires page 1 to all white (0x7F = 7 pixels on, hi-bit clear)
-        for i in 0x2000..0x4000 {
-            main_ram[i] = 0x7F;
+        for byte in &mut main_ram[0x2000..0x4000] {
+            *byte = 0x7F;
         }
         let mode = MemMode::MF_GRAPHICS | MemMode::MF_HIRES;
 
@@ -983,7 +983,7 @@ mod tests {
 
         // Row 20 in text is at framebuffer y = 20*16 = 320.
         // With our all-on char ROM, the 'A' glyph should produce white pixels.
-        let px = fb.pixels()[320 * FB_WIDTH + 0];
+        let px = fb.pixels()[320 * FB_WIDTH];
         assert_eq!(px, 0xFFFFFFFF, "mixed mode text area should have white fg");
     }
 

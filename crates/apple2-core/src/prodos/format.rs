@@ -68,7 +68,7 @@ pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) 
 
         let off = blk as usize * BLOCK_SIZE;
         // Write prev/next pointers: prev = previous block, next = 0 (filled in later)
-        put_u16(image, off + 0, prev_dir_block);
+        put_u16(image, off, prev_dir_block);
         put_u16(image, off + 2, 0);
 
         if i > 0 {
@@ -89,14 +89,16 @@ pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) 
     }
 
     // Build and write volume header
-    let mut vh = VolumeHeader::default();
-    vh.kind        = ProDosKind::Root as u8;
-    vh.entry_len   = 0x27; // 39 bytes per entry
-    vh.entry_num   = (BLOCK_SIZE / 0x27) as u8; // 13
-    vh.file_count  = 0;
-    vh.bitmap_block = bitmap_block;
-    vh.total_blocks = total_blocks;
-    vh.access = (Access::D | Access::N | Access::B | Access::W | Access::R).bits();
+    let mut vh = VolumeHeader {
+        kind: ProDosKind::Root as u8,
+        entry_len: 0x27, // 39 bytes per entry
+        entry_num: (BLOCK_SIZE / 0x27) as u8, // 13
+        file_count: 0,
+        bitmap_block,
+        total_blocks,
+        access: (Access::D | Access::N | Access::B | Access::W | Access::R).bits(),
+        ..VolumeHeader::default()
+    };
 
     // Strip leading '/' and uppercase the volume name
     let vname = volume_name.trim_start_matches('/');
@@ -115,7 +117,7 @@ pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) 
 fn dos33_set_track_sector_usage(vtoc: &mut [u8], track: usize, bitmask: u16) {
     let off = 0x38 + track * 4;
     vtoc[off]     = ((bitmask >> 8) & 0xFF) as u8;
-    vtoc[off + 1] = ((bitmask >> 0) & 0xFF) as u8;
+    vtoc[off + 1] = (bitmask & 0xFF) as u8;
     vtoc[off + 2] = 0x00;
     vtoc[off + 3] = 0x00;
 }
@@ -136,7 +138,7 @@ pub fn format_dos33_filesystem(image: &mut [u8], disk_size: usize, vtoc_track: u
     }
 
     // Last catalog sector has no link (sector $1)
-    let off = vtoc_track * TRACK_DENIBBLIZED_SIZE + 1 * DSK_SECTOR_SIZE;
+    let off = vtoc_track * TRACK_DENIBBLIZED_SIZE + DSK_SECTOR_SIZE;
     image[off + 1] = 0;
     image[off + 2] = 0;
 
@@ -183,14 +185,14 @@ pub fn format_dos33_filesystem(image: &mut [u8], disk_size: usize, vtoc_track: u
 /// Mirrors `Util_ProDOS_ForwardSectorInterleave` with `INTERLEAVE_DOS33_ORDER`.
 pub fn forward_sector_interleave(image: &mut [u8], disk_size: usize) {
     let n_tracks = disk_size / TRACK_DENIBBLIZED_SIZE;
-    if disk_size % TRACK_DENIBBLIZED_SIZE != 0 || n_tracks == 0 { return; }
+    if !disk_size.is_multiple_of(TRACK_DENIBBLIZED_SIZE) || n_tracks == 0 { return; }
 
     let source = image[..disk_size].to_vec();
     let mut offset = 0;
 
     for _ in 0..n_tracks {
-        for sector in 0..16 {
-            let src = INTERLEAVE_DSK[sector] * DSK_SECTOR_SIZE;
+        for (sector, &interleaved) in INTERLEAVE_DSK.iter().enumerate() {
+            let src = interleaved * DSK_SECTOR_SIZE;
             let dst = sector * DSK_SECTOR_SIZE;
             image[offset + dst..offset + dst + DSK_SECTOR_SIZE]
                 .copy_from_slice(&source[offset + src..offset + src + DSK_SECTOR_SIZE]);
@@ -205,15 +207,15 @@ pub fn forward_sector_interleave(image: &mut [u8], disk_size: usize) {
 /// Mirrors `Util_ProDOS_ReverseSectorInterleave` with `INTERLEAVE_DOS33_ORDER`.
 pub fn reverse_sector_interleave(image: &mut [u8], disk_size: usize) {
     let n_tracks = disk_size / TRACK_DENIBBLIZED_SIZE;
-    if disk_size % TRACK_DENIBBLIZED_SIZE != 0 || n_tracks == 0 { return; }
+    if !disk_size.is_multiple_of(TRACK_DENIBBLIZED_SIZE) || n_tracks == 0 { return; }
 
     let source = image[..disk_size].to_vec();
     let mut offset = 0;
 
     for _ in 0..n_tracks {
-        for sector in 0..16 {
+        for (sector, &interleaved) in INTERLEAVE_DSK.iter().enumerate() {
             let src = sector * DSK_SECTOR_SIZE;
-            let dst = INTERLEAVE_DSK[sector] * DSK_SECTOR_SIZE;
+            let dst = interleaved * DSK_SECTOR_SIZE;
             image[offset + dst..offset + dst + DSK_SECTOR_SIZE]
                 .copy_from_slice(&source[offset + src..offset + src + DSK_SECTOR_SIZE]);
         }

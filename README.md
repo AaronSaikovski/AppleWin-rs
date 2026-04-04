@@ -31,20 +31,22 @@ Pre-built binaries for Windows, macOS, and Linux are available on the [Releases]
 ## Peripheral Cards & Add-on Hardware
 
 - Mockingboard, Phasor and SAM sound cards
-- Disk II interface for floppy disk drives
-- Hard disk controller
-- Super Serial Card (SSC)
+- SSI-263 speech synthesis chip (phoneme playback with IRQ)
+- Disk II interface for floppy disk drives (DSK/DO/PO/NIB/WOZ v1 & v2)
+- Hard disk controller (HDV/PO/2MG)
+- Super Serial Card (SSC) with 6551 ACIA emulation
 - Parallel printer card
 - Mouse interface
 - Apple IIe Extended 80-Column Text Card and RamWorks III (8MB)
 - RGB cards: Apple's Extended 80-Column Text/AppleColor Adaptor Card and 'Le Chat Mauve' Féline
 - CP/M SoftCard (Z80)
-- Uthernet I and II (ethernet cards)
+- Uthernet I (CS8900A) and Uthernet II (W5100) ethernet cards
 - Language Card and Saturn 64/128K
 - 4Play and SNES MAX joystick cards
-- VidHD card (IIgs Super Hi-Res video modes)
+- VidHD card (IIgs Super Hi-Res video modes with status register emulation)
 - No Slot Clock (NSC)
 - Game I/O Connector copy protection dongles
+- Cassette tape I/O (WAV file loading)
 
 ---
 
@@ -68,8 +70,8 @@ AppleWin-rs/
 | Crate | Purpose | Key Dependencies |
 |---|---|---|
 | `apple2-core` | 6502/65C02 CPU, memory bus, 19 expansion card implementations | `bitflags`, `thiserror`, `tracing`, `serde` |
-| `apple2-audio` | AY8910 PSG synthesis, SSI263 speech, speaker emulation | `thiserror`, `tracing`, `serde` |
-| `apple2-video` | Framebuffer, NTSC signal chain, all video mode rendering | `apple2-core`, `thiserror`, `tracing`, `serde` |
+| `apple2-audio` | AY8910 PSG synthesis, SSI263 speech, speaker emulation (sub-sample interpolation, DC removal) | `thiserror`, `tracing`, `serde` |
+| `apple2-video` | Framebuffer, NTSC signal chain, all video mode rendering (text, lo-res, hi-res, double hi-res, double lo-res) | `apple2-core`, `thiserror`, `tracing`, `serde` |
 | `apple2-debugger` | Disassembler, breakpoint manager, symbol table loader | `apple2-core`, `thiserror`, `tracing`, `serde` |
 | `applewin` | GUI (egui/eframe), audio output (cpal), gamepad (gilrs), config (toml) | all above + `eframe`, `cpal`, `gilrs`, `rfd`, `winapi` |
 
@@ -80,6 +82,7 @@ AppleWin-rs/
 - **`applewin`** is the only crate with platform and GUI dependencies.
 - **ROMs are embedded at compile time** via `include_bytes!` — no runtime file loading required.
 - **Headless mode** is available (no GUI/audio dependencies) for testing and CI.
+- **Comprehensive test suite** — 297 tests covering CPU instructions, memory soft-switches, expansion cards, and integration scenarios.
 
 ---
 
@@ -137,6 +140,47 @@ Or run the compiled binary directly and optionally pass a disk image:
 |---|---|---|
 | `gui` | yes | Enables the full egui/eframe GUI, audio (cpal), gamepad (gilrs), and file dialogs (rfd) |
 | `headless` | no | Strips all GUI/audio/I/O for pure emulation builds |
+
+### Testing
+
+```sh
+cargo test
+```
+
+Runs 297 tests across all crates:
+
+| Crate | Tests | Coverage |
+|---|---|---|
+| `apple2-core` | 247 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, expansion cards |
+| `apple2-core` (integration) | 9 | Boot sequence, program execution, snapshots, Fibonacci |
+| `apple2-audio` | 9 | Speaker interpolation, DC filter, amplitude |
+| `apple2-video` | 14 | NTSC tables, text/lores/hires/dlores rendering, mixed mode |
+| `apple2-debugger` | 18 | Disassembly, breakpoints, assembler |
+
+---
+
+## Disk Image Support
+
+| Format | Extension | Description |
+|---|---|---|
+| DOS 3.3 | `.dsk`, `.do` | 140K floppy, 6+2 GCR encoding |
+| ProDOS | `.po` | 140K floppy, ProDOS sector order |
+| Nibble | `.nib` | Raw nibblized tracks |
+| WOZ v1/v2 | `.woz` | Flux-level bitstream with weak bit support for copy-protected disks |
+| DOS 3.2 | `.d13` | 113K floppy, 5+3 GCR encoding (13-sector) |
+| Hard disk | `.hdv`, `.po`, `.2mg` | ProDOS block device |
+
+---
+
+## Features
+
+- **Drag-and-drop** disk image loading
+- **Clipboard** copy/paste (Ctrl+C copies text screen, Ctrl+V pastes as keystrokes)
+- **Screenshot** capture (F12, saves BMP)
+- **Cassette tape** I/O (load WAV files for tape-based software)
+- **Symbolic debugger** with disassembler, breakpoints, and single-step
+- **Save/restore** emulator state
+- **TOML configuration** with platform-standard paths
 
 ---
 

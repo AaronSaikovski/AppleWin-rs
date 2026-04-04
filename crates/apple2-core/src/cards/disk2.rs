@@ -88,10 +88,9 @@ impl WozTrack {
         let bit_idx = 7 - (pos % 8);
 
         // Check if this is a weak bit
-        if self.has_weak_bits && byte_idx < self.weak_mask.len() {
-            if (self.weak_mask[byte_idx] >> bit_idx) & 1 != 0 {
-                return rng.next_bit();
-            }
+        if self.has_weak_bits && byte_idx < self.weak_mask.len()
+            && (self.weak_mask[byte_idx] >> bit_idx) & 1 != 0 {
+            return rng.next_bit();
         }
 
         (self.bits[byte_idx] >> bit_idx) & 1
@@ -1189,8 +1188,8 @@ fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
     // Scan for runs of 3+ consecutive 0x00 bytes
     let mut run_start: Option<usize> = None;
 
-    for i in 0..byte_len {
-        if bits[i] == 0x00 {
+    for (i, &byte) in bits.iter().enumerate().take(byte_len) {
+        if byte == 0x00 {
             if run_start.is_none() {
                 run_start = Some(i);
             }
@@ -1199,10 +1198,10 @@ fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
                 let run_len = i - start;
                 if run_len >= 3 {
                     // Mark all bits in this run as weak
-                    for j in start..i {
+                    for (j, mask) in weak_mask.iter_mut().enumerate().take(i).skip(start) {
                         // Only mark bits within valid bit_count
                         if (j as u32) * 8 < bit_count {
-                            weak_mask[j] = 0xFF;
+                            *mask = 0xFF;
                             has_any = true;
                         }
                     }
@@ -1215,9 +1214,9 @@ fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
     if let Some(start) = run_start {
         let run_len = byte_len - start;
         if run_len >= 3 {
-            for j in start..byte_len {
+            for (j, mask) in weak_mask.iter_mut().enumerate().take(byte_len).skip(start) {
                 if (j as u32) * 8 < bit_count {
-                    weak_mask[j] = 0xFF;
+                    *mask = 0xFF;
                     has_any = true;
                 }
             }
@@ -1367,13 +1366,13 @@ mod tests {
         let trks_chunk_start = img.len() + 8; // position right after TRKS chunk header
         let descs_end = trks_chunk_start + 1280;
         // Round up to next 512-byte block
-        let data_block_start = (descs_end + 511) / 512;
+        let data_block_start = descs_end.div_ceil(512);
         let data_file_offset = data_block_start * 512;
         // Padding needed between descs and first data block
         let padding = data_file_offset - descs_end;
 
         // Calculate block count: ceil(track_bits.len() / 512)
-        let block_count = ((track_bits.len() + 511) / 512) as u16;
+        let block_count = track_bits.len().div_ceil(512) as u16;
 
         // Build descriptors: only index 0 is used
         let mut descs = vec![0u8; 1280];

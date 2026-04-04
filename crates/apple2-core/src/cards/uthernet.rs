@@ -112,8 +112,7 @@ impl Cs8900a {
                 val
             }
             0x01 => {
-                let val = self.packet_page[(self.pp_ptr as usize | 1) & (PP_SIZE - 1)];
-                val
+                self.packet_page[(self.pp_ptr as usize | 1) & (PP_SIZE - 1)]
             }
             // PacketPage Pointer low
             0x0A => (self.pp_ptr & 0xFF) as u8,

@@ -123,7 +123,7 @@ impl Speaker {
 
                 // Accumulate the fraction of this sample at the current level.
                 let frac = (tc - seg_start) / cycles_per_sample;
-                accumulated += frac as f64 * self.level() as f64;
+                accumulated += frac * self.level() as f64;
 
                 // Perform the toggle.
                 self.state = !self.state;
@@ -134,7 +134,7 @@ impl Speaker {
             // Remaining fraction of the sample after the last toggle (or the
             // entire sample if there were no toggles).
             let frac = (sample_end - seg_start) / cycles_per_sample;
-            accumulated += frac as f64 * self.level() as f64;
+            accumulated += frac * self.level() as f64;
 
             let raw = accumulated as f32;
 

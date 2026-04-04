@@ -84,12 +84,11 @@ impl MarkupMap {
 
     /// Get the markup region containing `addr`, if any.
     pub fn region_at(&self, addr: u16) -> Option<&MarkupRegion> {
-        for (&start, region) in self.regions.range(..=addr).rev() {
+        if let Some((&start, region)) = self.regions.range(..=addr).next_back() {
             let end = start.wrapping_add(region.length);
             if addr >= start && addr < end {
                 return Some(region);
             }
-            break;
         }
         None
     }
