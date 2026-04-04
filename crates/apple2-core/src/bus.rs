@@ -179,6 +179,12 @@ pub struct Bus {
     /// 16 KB heap allocation on every bank switch.
     lc_swap_buf: Box<[u8; 16384]>,
 
+    /// Language Card: prewrite flag — set on first read of an odd LC switch.
+    /// A second consecutive read of the same switch enables WRITERAM.
+    lc_prewrite: bool,
+    /// Language Card: last LC soft-switch register accessed (lower 4 bits).
+    lc_last_access: u8,
+
     /// CPU cycle at which the current video frame began.
     ///
     /// Used to compute the within-frame cycle offset without a modulo operation:
@@ -208,6 +214,8 @@ impl Bus {
             ann:                [false; 4],
             irq_line:           false,
             lc_swap_buf:        Box::new([0u8; 16384]),
+            lc_prewrite:        false,
+            lc_last_access:     0,
             frame_start_cycles: 0,
         };
         bus.rebuild_page_tables();
@@ -274,6 +282,27 @@ impl Bus {
             };
         }
 
+        // 80STORE overrides: when active, PAGE2 routes display pages to aux
+        if self.mode.contains(MemMode::MF_80STORE) {
+            let page2 = self.mode.contains(MemMode::MF_PAGE2);
+            if page2 {
+                // Text page 1 ($0400–$07FF) → aux
+                for page in 0x04u16..=0x07 {
+                    let base = page << 8;
+                    self.pages_r[page as usize] = PageSrc::Aux(base);
+                    self.pages_w[page as usize] = PageDst::Aux(base);
+                }
+            }
+            if page2 && self.mode.contains(MemMode::MF_HIRES) {
+                // HiRes page 1 ($2000–$3FFF) → aux
+                for page in 0x20u16..=0x3F {
+                    let base = page << 8;
+                    self.pages_r[page as usize] = PageSrc::Aux(base);
+                    self.pages_w[page as usize] = PageDst::Aux(base);
+                }
+            }
+        }
+
         // Page 0xC0: I/O
         self.pages_r[0xC0] = PageSrc::Io;
         self.pages_w[0xC0] = PageDst::Inhibit;
@@ -319,7 +348,8 @@ impl Bus {
                 self.pages_w[page as usize] = if writeram { PageDst::Aux(base) } else { PageDst::Inhibit };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
-                self.pages_w[page as usize] = PageDst::Inhibit;
+                // Write to LC RAM even while ROM is being read (same as $D000–$DFFF)
+                self.pages_w[page as usize] = if writeram { PageDst::Aux(base) } else { PageDst::Inhibit };
             }
         }
     }
@@ -718,57 +748,77 @@ impl Bus {
 
     /// Language card soft-switch logic (simplified).
     /// Full implementation in `source/LanguageCard.cpp`.
+    /// Language Card READ handler ($C080–$C08F).
+    ///
+    /// Implements the prewrite state machine matching real Apple II hardware:
+    /// - Even addresses ($C080/2/4/6/8/A/C/E): clear prewrite, disable WRITERAM
+    /// - Odd addresses ($C081/3/5/7/9/B/D/F): enable WRITERAM only after two
+    ///   consecutive reads of the same register; first read sets prewrite flag
     fn lc_read(&mut self, reg: u8) -> u8 {
-        // Lower two bits of reg encode bank/write-enable state
-        self.lc_switch(reg);
-        self.floating_bus
-    }
-
-    fn lc_write(&mut self, reg: u8) {
-        self.lc_switch(reg);
-    }
-
-    fn lc_switch(&mut self, reg: u8) {
-        // Apple II Language Card soft-switch register map ($C080–$C08F).
-        // Bits [1:0] of offset from $C080 (= reg & 0x03):
-        //   00 ($C080/4/8/C) → read RAM,  write-protect  (HIGHRAM=1, WRITERAM=0)
-        //   01 ($C081/5/9/D) → read ROM,  write-enable   (HIGHRAM=0, WRITERAM=1)
-        //   10 ($C082/6/A/E) → read ROM,  write-protect  (HIGHRAM=0, WRITERAM=0)
-        //   11 ($C083/7/B/F) → read RAM,  write-enable   (HIGHRAM=1, WRITERAM=1)
-        // Bit 3 (0x08) selects bank: 0 = bank2 ($C080–$C087), 1 = bank1 ($C088–$C08F)
         let sel   = reg & 0x03;
         let bank2 = (reg & 0x08) == 0;
+        let reg4  = reg & 0x0F;
 
+        // WRITERAM logic: only odd-addressed reads can enable it
+        if sel & 1 == 0 {
+            // Even: clear prewrite, disable WRITERAM
+            self.lc_prewrite = false;
+            self.mode.remove(MemMode::MF_WRITERAM);
+        } else {
+            // Odd: need two consecutive reads of same register
+            if self.lc_prewrite && self.lc_last_access == reg4 {
+                self.mode.insert(MemMode::MF_WRITERAM);
+            } else {
+                self.lc_prewrite = true;
+            }
+        }
+
+        // HIGHRAM (read-from-RAM vs read-from-ROM)
         match sel {
-            0x00 => {
-                // Read RAM, write-protect
-                self.mode.insert(MemMode::MF_HIGHRAM);
-                self.mode.remove(MemMode::MF_WRITERAM);
-            }
-            0x01 => {
-                // Read ROM, write-enable
-                self.mode.remove(MemMode::MF_HIGHRAM);
-                self.mode.insert(MemMode::MF_WRITERAM);
-            }
-            0x02 => {
-                // Read ROM, write-protect
-                self.mode.remove(MemMode::MF_HIGHRAM);
-                self.mode.remove(MemMode::MF_WRITERAM);
-            }
-            0x03 => {
-                // Read RAM, write-enable
-                self.mode.insert(MemMode::MF_HIGHRAM);
-                self.mode.insert(MemMode::MF_WRITERAM);
-            }
+            0x00 | 0x03 => self.mode.insert(MemMode::MF_HIGHRAM),
+            0x01 | 0x02 => self.mode.remove(MemMode::MF_HIGHRAM),
             _ => unreachable!(),
         }
 
-        if bank2 {
-            self.mode.insert(MemMode::MF_BANK2);
-        } else {
-            self.mode.remove(MemMode::MF_BANK2);
+        // Bank selection
+        if bank2 { self.mode.insert(MemMode::MF_BANK2); }
+        else     { self.mode.remove(MemMode::MF_BANK2); }
+
+        self.lc_last_access = reg4;
+        self.rebuild_page_tables();
+        self.floating_bus
+    }
+
+    /// Language Card WRITE handler ($C080–$C08F).
+    ///
+    /// Writes always clear the prewrite flag and never enable WRITERAM.
+    /// Even-addressed writes also disable WRITERAM; odd-addressed writes
+    /// leave WRITERAM unchanged.  HIGHRAM and BANK2 update normally.
+    fn lc_write(&mut self, reg: u8) {
+        let sel   = reg & 0x03;
+        let bank2 = (reg & 0x08) == 0;
+        let reg4  = reg & 0x0F;
+
+        // Any write clears prewrite
+        self.lc_prewrite = false;
+
+        // Writes NEVER enable WRITERAM; even writes also disable it
+        if sel & 1 == 0 {
+            self.mode.remove(MemMode::MF_WRITERAM);
+        }
+        // Odd writes: WRITERAM unchanged
+
+        // HIGHRAM and BANK2 still update normally
+        match sel {
+            0x00 | 0x03 => self.mode.insert(MemMode::MF_HIGHRAM),
+            0x01 | 0x02 => self.mode.remove(MemMode::MF_HIGHRAM),
+            _ => unreachable!(),
         }
 
+        if bank2 { self.mode.insert(MemMode::MF_BANK2); }
+        else     { self.mode.remove(MemMode::MF_BANK2); }
+
+        self.lc_last_access = reg4;
         self.rebuild_page_tables();
     }
 
