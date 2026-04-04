@@ -185,6 +185,17 @@ pub struct Bus {
     /// `frame_offset = cycles - frame_start_cycles`.  Updated lazily inside the
     /// `$C019` (VBLANK) soft-switch read and by `advance_frame()`.
     frame_start_cycles: u64,
+
+    // ── Cassette tape I/O ────────────────────────────────────────────────────
+
+    /// Raw cassette audio data (8-bit unsigned PCM, ~11025 Hz).
+    /// When `Some`, the $C060 soft switch returns bit 7 from this data stream.
+    pub cassette_input: Option<Vec<u8>>,
+    /// Current read position (byte index) in the cassette data.
+    pub cassette_byte_pos: usize,
+    /// CPU cycle at which cassette playback started — used to derive the
+    /// current sample position from the cycle count.
+    cassette_start_cycle: u64,
 }
 
 impl Bus {
@@ -209,6 +220,9 @@ impl Bus {
             irq_line:           false,
             lc_swap_buf:        Box::new([0u8; 16384]),
             frame_start_cycles: 0,
+            cassette_input:       None,
+            cassette_byte_pos:    0,
+            cassette_start_cycle: 0,
         };
         bus.rebuild_page_tables();
         bus
@@ -562,8 +576,29 @@ impl Bus {
             // $C05E/$C05F: DHIRESON/DHIRESOFF — read also acts as write (same as $C050-$C057)
             0x5E => { self.mode.insert(MemMode::MF_DHIRES); self.floating_bus }
             0x5F => { self.mode.remove(MemMode::MF_DHIRES); self.floating_bus }
-            // $C060: cassette input — always 0 (no tape support)
-            0x60 => 0x00,
+            // $C060: cassette input — bit 7 reflects the cassette audio waveform.
+            // When no cassette is loaded, returns 0 (high-impedance / silence).
+            0x60 => {
+                if let Some(ref data) = self.cassette_input {
+                    // Derive sample position from CPU cycles elapsed since playback
+                    // started.  Cassette audio is 11025 Hz; CPU is ~1.023 MHz.
+                    // sample = (cycles - start) * 11025 / 1023000
+                    const CASSETTE_RATE: u64 = 11025;
+                    const CPU_RATE: u64 = 1_023_000;
+                    let elapsed = cycles.saturating_sub(self.cassette_start_cycle);
+                    let sample_pos = (elapsed * CASSETTE_RATE / CPU_RATE) as usize;
+                    self.cassette_byte_pos = sample_pos;
+                    if sample_pos < data.len() {
+                        // Unsigned 8-bit PCM: 128 = silence.  Return bit 7 based
+                        // on whether the sample is above or below the midpoint.
+                        if data[sample_pos] >= 128 { 0x80 } else { 0x00 }
+                    } else {
+                        0x00 // past end of tape
+                    }
+                } else {
+                    0x00
+                }
+            }
             // $C07E: RDIOUDES — bit 7 = 1 when IOUDIS is set; $C07D: alternate read
             0x7D | 0x7E => self.flag_byte(MemMode::MF_IOUDIS),
             // $C07F: RDDHIRES — bit 7 = 1 when double hi-res is active
@@ -770,6 +805,30 @@ impl Bus {
         }
 
         self.rebuild_page_tables();
+    }
+
+    // ── Cassette helpers ──────────────────────────────────────────────────────
+
+    /// Load raw unsigned 8-bit PCM cassette audio data (assumed 11025 Hz mono).
+    ///
+    /// Resets the playback position so the next $C060 read starts from the
+    /// beginning of the data.  Pass the current CPU cycle count so the
+    /// cycle-to-sample mapping starts correctly.
+    pub fn load_cassette(&mut self, data: Vec<u8>, current_cycles: u64) {
+        self.cassette_input = Some(data);
+        self.cassette_byte_pos = 0;
+        self.cassette_start_cycle = current_cycles;
+    }
+
+    /// Eject the cassette (stop providing data on $C060).
+    pub fn eject_cassette(&mut self) {
+        self.cassette_input = None;
+        self.cassette_byte_pos = 0;
+    }
+
+    /// Returns true if a cassette tape is loaded.
+    pub fn cassette_loaded(&self) -> bool {
+        self.cassette_input.is_some()
     }
 
     // ── Disk helpers ─────────────────────────────────────────────────────────

@@ -355,6 +355,11 @@ mod gui {
         debugger_bp_input: String,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
+        /// Transient status message shown in the status bar (e.g. "Screenshot saved").
+        /// Cleared after a few seconds.
+        status_msg:        Option<String>,
+        /// Frame number at which the status message was set; cleared after ~180 frames (~3 s).
+        status_msg_frame:  u32,
     }
 
     impl EmulatorApp {
@@ -454,6 +459,8 @@ mod gui {
                 debugger:          apple2_debugger::DebuggerState::new(),
                 debugger_bp_input: String::new(),
                 slot_options_open: [false; 8],
+                status_msg:        None,
+                status_msg_frame:  0,
             }
         }
 
@@ -482,6 +489,68 @@ mod gui {
             } else {
                 emu.bus.eject_disk(slot, drive);
             }
+        }
+
+        /// Set a transient status message that will be shown in the status bar
+        /// for approximately 3 seconds (~180 frames at 60 Hz).
+        fn set_status_msg(&mut self, msg: impl Into<String>) {
+            self.status_msg = Some(msg.into());
+            self.status_msg_frame = self.frame_no;
+        }
+
+        /// Read the Apple II text screen ($0400-$07FF) and return it as a
+        /// plain ASCII string.  Screen codes are converted to printable ASCII.
+        fn copy_text_screen(&self) -> String {
+            // Apple II text screen layout: 24 lines, each 40 columns.
+            // The screen is stored in a non-linear layout across $0400-$07FF.
+            // Group of 8 lines starts at $0400, $0480, $0500 (each +$80).
+            // Within a group, lines are at offsets 0, $28, $50, $78, $A0, $C8, $F0, $118.
+            let line_bases: [u16; 24] = [
+                0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780,
+                0x0428, 0x04A8, 0x0528, 0x05A8, 0x0628, 0x06A8, 0x0728, 0x07A8,
+                0x0450, 0x04D0, 0x0550, 0x05D0, 0x0650, 0x06D0, 0x0750, 0x07D0,
+            ];
+            let mut result = String::with_capacity(24 * 41); // 24 lines + newlines
+            for base in line_bases {
+                let mut line = String::with_capacity(40);
+                for col in 0..40u16 {
+                    let byte = self.emu.bus.main_ram[(base + col) as usize];
+                    // Convert Apple II screen code to ASCII:
+                    // $00-$1F = inverse uppercase (A-Z + symbols) → map to ASCII
+                    // $20-$3F = inverse symbols/digits → map to ASCII
+                    // $40-$5F = flashing uppercase → map to ASCII
+                    // $60-$7F = flashing symbols/digits → map to ASCII
+                    // $80-$9F = normal uppercase (with high bit) → A-Z + symbols
+                    // $A0-$BF = normal symbols/digits → map to ASCII
+                    // $C0-$DF = normal uppercase → A-Z + symbols
+                    // $E0-$FF = normal lowercase (//e) → a-z + symbols
+                    let ascii = match byte {
+                        0x00..=0x1F => byte + 0x40,       // inverse uppercase
+                        0x20..=0x3F => byte,              // inverse symbols/digits
+                        0x40..=0x5F => byte,              // flashing uppercase
+                        0x60..=0x7F => byte - 0x20,       // flashing symbols → same as 0x40 range
+                        0x80..=0x9F => byte - 0x40,       // normal: high-bit set uppercase
+                        0xA0..=0xBF => byte - 0x80,       // normal: high-bit set symbols
+                        0xC0..=0xDF => byte - 0x80,       // normal uppercase
+                        0xE0..=0xFF => byte - 0x80,       // normal lowercase (//e)
+                    };
+                    let ch = if (0x20..=0x7E).contains(&ascii) {
+                        ascii as char
+                    } else {
+                        ' '
+                    };
+                    line.push(ch);
+                }
+                // Trim trailing spaces from each line
+                let trimmed = line.trim_end();
+                result.push_str(trimmed);
+                result.push('\n');
+            }
+            // Remove trailing blank lines
+            while result.ends_with("\n\n") {
+                result.pop();
+            }
+            result
         }
 
         fn disk_display_name(path: &Option<PathBuf>) -> &str {
@@ -706,6 +775,14 @@ mod gui {
             let mut paste_text:     Option<String>   = None;
             let mut take_screenshot: bool            = false;
             let mut video_shortcut: Option<VideoType> = None;
+            let mut copy_screen:    bool             = false;
+
+            // ── Drag-and-drop detection ──────────────────────────────────────
+            let dropped_files: Vec<PathBuf> = ctx.input(|i| {
+                i.raw.dropped_files.iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect()
+            });
 
             // Only process Event::Key with repeat:false — this fires exactly once
             // per physical key-down, never for OS auto-repeat.  Event::Text is
@@ -748,7 +825,8 @@ mod gui {
                                 // Ctrl+V is intercepted for host paste (Event::Paste above).
                                 let c: Option<u8> = match key {
                                     Key::A => Some(0x01), Key::B => Some(0x02),
-                                    Key::C => Some(0x03), Key::D => Some(0x04),
+                                    Key::C => { copy_screen = true; None },
+                                    Key::D => Some(0x04),
                                     Key::E => Some(0x05), Key::F => Some(0x06),
                                     Key::G => Some(0x07), Key::H => Some(0x08),
                                     Key::I => Some(0x09), Key::J => Some(0x0A),
@@ -802,6 +880,57 @@ mod gui {
                 }
             }
 
+            // Ctrl+C: copy the Apple II text screen to the system clipboard.
+            if copy_screen && !in_logo_mode {
+                let text = self.copy_text_screen();
+                ctx.output_mut(|o| o.copied_text = text.clone());
+                self.set_status_msg("Text screen copied to clipboard");
+            }
+
+            // ── Drag-and-drop disk image loading ─────────────────────────────
+            if !dropped_files.is_empty() {
+                let valid_exts = ["dsk", "do", "po", "nib", "woz", "hdv", "2mg", "img"];
+                for path in &dropped_files {
+                    let ext = path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if !valid_exts.contains(&ext.as_str()) {
+                        self.set_status_msg(format!(
+                            "Unrecognized file type: .{ext}"
+                        ));
+                        continue;
+                    }
+                    if let Ok(data) = std::fs::read(path) {
+                        // Load into Drive 1 if empty, otherwise Drive 2
+                        let drive = if self.disk1.is_none() { 0 } else { 1 };
+                        self.emu.bus.load_disk(self.disk_slot, drive, &data, &ext);
+                        self.emu.bus.set_disk_path(self.disk_slot, drive, path.clone());
+                        let path_str = path.to_string_lossy().into_owned();
+                        self.config.add_recent_disk(&path_str);
+                        let name = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("disk");
+                        if drive == 0 {
+                            self.config.last_disk1 = Some(path_str);
+                            self.disk1 = Some(path.clone());
+                            self.set_status_msg(format!("Drive 1: {name}"));
+                        } else {
+                            self.config.last_disk2 = Some(path_str);
+                            self.disk2 = Some(path.clone());
+                            self.set_status_msg(format!("Drive 2: {name}"));
+                        }
+                        self.config.last_disk_dir = path.parent()
+                            .map(|p| p.to_string_lossy().into_owned());
+                        self.config.save();
+                        // If we were in logo mode, start the emulator
+                        if in_logo_mode {
+                            self.reset(true);
+                        }
+                    }
+                }
+            }
+
             if !in_logo_mode {
                 for k in key_queue { self.emu.bus.key_press(k); }
 
@@ -837,7 +966,12 @@ mod gui {
             // Screenshot: save framebuffer as BMP (triggered by F12).
             if take_screenshot && !in_logo_mode {
                 self.render_apple2(); // ensure latest frame
-                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+                if let Some(path) = save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H) {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("screenshot");
+                    self.set_status_msg(format!("Screenshot saved: {name}"));
+                }
             }
 
             if do_hard_reset { self.reset(true); }
@@ -891,6 +1025,8 @@ mod gui {
             let mut act_eject_hdd2    = false;
             let mut act_recent_disk: Option<String> = None;
             let mut act_recent_hdd: Option<String> = None;
+            let mut act_load_cassette = false;
+            let mut act_eject_cassette = false;
 
             // ── Menu bar ──────────────────────────────────────────────────────
             egui::TopBottomPanel::top("menubar")
@@ -977,6 +1113,17 @@ mod gui {
                                     }
                                 }
                             });
+                            ui.separator();
+                            // ── Cassette tape ────────────────────────────────
+                            {
+                                let cassette_loaded = self.emu.bus.cassette_loaded();
+                                if ui.button("Load Cassette Tape…").clicked() {
+                                    act_load_cassette = true; ui.close_menu();
+                                }
+                                if ui.add_enabled(cassette_loaded, egui::Button::new("Eject Cassette")).clicked() {
+                                    act_eject_cassette = true; ui.close_menu();
+                                }
+                            }
                             ui.separator();
                             if ui.button("Screenshot       F12").clicked() {
                                 act_screenshot = true; ui.close_menu();
@@ -1091,7 +1238,19 @@ mod gui {
                             );
                         }
                         ui.separator();
-                        if in_logo_mode {
+                        // Show transient status message or normal status
+                        let status_active = self.status_msg.is_some()
+                            && self.frame_no.wrapping_sub(self.status_msg_frame) < 180;
+                        if !status_active {
+                            self.status_msg = None;
+                        }
+                        if let Some(ref msg) = self.status_msg {
+                            ui.label(
+                                RichText::new(msg.as_str())
+                                    .small()
+                                    .color(Color32::from_rgb(0, 100, 0)),
+                            );
+                        } else if in_logo_mode {
                             ui.label(RichText::new("AppleWin-rs — Press any key to start").small());
                         } else {
                             ui.label(RichText::new(format!("PC:${pc:04X}")).small().monospace());
@@ -2044,6 +2203,33 @@ mod gui {
                 self.config.last_hdd2 = None;
                 self.config.save();
             }
+            // ── Cassette actions ──────────────────────────────────────────────
+            if act_load_cassette {
+                if let Some(path) = open_cassette_dialog() {
+                    if let Ok(raw) = std::fs::read(&path) {
+                        let ext = path.extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        // For .wav files, extract raw PCM; otherwise treat as raw 8-bit unsigned PCM.
+                        let pcm = if ext == "wav" {
+                            decode_wav_to_u8pcm(&raw).unwrap_or(raw)
+                        } else {
+                            raw
+                        };
+                        let len = pcm.len();
+                        self.emu.bus.load_cassette(pcm, self.emu.cpu.cycles);
+                        let name = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("cassette");
+                        self.set_status_msg(format!("Cassette loaded: {name} ({len} bytes)"));
+                    }
+                }
+            }
+            if act_eject_cassette {
+                self.emu.bus.eject_cassette();
+                self.set_status_msg("Cassette ejected");
+            }
             if let Some(path_str) = act_recent_hdd {
                 let path = PathBuf::from(&path_str);
                 if let Ok(data) = std::fs::read(&path) {
@@ -2070,7 +2256,12 @@ mod gui {
             // Screenshot from menu or F12 key
             if act_screenshot && !in_logo_mode {
                 self.render_apple2();
-                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+                if let Some(path) = save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H) {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("screenshot");
+                    self.set_status_msg(format!("Screenshot saved: {name}"));
+                }
             }
 
             // F11 fullscreen shortcut (supplement to the action already handled above)
@@ -2327,9 +2518,10 @@ mod gui {
     // ── Screenshot ────────────────────────────────────────────────────────────
 
     /// Save `pixels` (RGBA8888, row-major) as a 24bpp BMP file.
-    fn save_screenshot(pixels: &[u8], w: usize, h: usize) {
+    /// Returns the path on success.
+    fn save_screenshot(pixels: &[u8], w: usize, h: usize) -> Option<PathBuf> {
         let path = screenshot_path();
-        let Some(path) = path else { return };
+        let Some(path) = path else { return None };
         let row_stride = (w * 3).div_ceil(4) * 4;
         let pixel_bytes = row_stride * h;
         let file_size = (14 + 40 + pixel_bytes) as u32;
@@ -2372,8 +2564,12 @@ mod gui {
             while !written.is_multiple_of(4) { data.push(0); written += 1; }
         }
 
-        let _ = std::fs::write(&path, &data);
-        eprintln!("Screenshot saved: {}", path.display());
+        if std::fs::write(&path, &data).is_ok() {
+            eprintln!("Screenshot saved: {}", path.display());
+            Some(path)
+        } else {
+            None
+        }
     }
 
     /// Returns a timestamped path in %APPDATA%\applewin-rs\screenshots\ (Windows)
@@ -2423,6 +2619,82 @@ mod gui {
             d = d.set_directory(dir);
         }
         d.pick_file()
+    }
+
+    fn open_cassette_dialog() -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_title("Load Cassette Tape")
+            .add_filter("Cassette Audio", &["wav", "raw", "bin"])
+            .add_filter("All Files", &["*"])
+            .pick_file()
+    }
+
+    /// Minimal WAV decoder: extracts audio data as unsigned 8-bit PCM.
+    ///
+    /// Supports only uncompressed PCM WAV files (format tag 1).
+    /// Converts 16-bit signed PCM to 8-bit unsigned on the fly.
+    /// Returns `None` if the file is not a valid WAV.
+    fn decode_wav_to_u8pcm(data: &[u8]) -> Option<Vec<u8>> {
+        // Minimum WAV header: RIFF(4) + size(4) + WAVE(4) + fmt chunk(24) + data chunk header(8)
+        if data.len() < 44 { return None; }
+        if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+
+        // Find "fmt " chunk
+        let mut pos = 12usize;
+        let mut fmt_found = false;
+        let mut bits_per_sample: u16 = 8;
+        let mut num_channels: u16 = 1;
+        while pos + 8 <= data.len() {
+            let id = &data[pos..pos + 4];
+            let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
+            if id == b"fmt " {
+                if chunk_size < 16 || pos + 8 + chunk_size > data.len() { return None; }
+                let fmt_data = &data[pos + 8..];
+                let format_tag = u16::from_le_bytes(fmt_data[0..2].try_into().ok()?);
+                if format_tag != 1 { return None; } // only PCM
+                num_channels = u16::from_le_bytes(fmt_data[2..4].try_into().ok()?);
+                bits_per_sample = u16::from_le_bytes(fmt_data[14..16].try_into().ok()?);
+                fmt_found = true;
+            }
+            if id == b"data" && fmt_found {
+                let audio = &data[pos + 8..data.len().min(pos + 8 + chunk_size)];
+                return Some(wav_pcm_to_u8(audio, bits_per_sample, num_channels));
+            }
+            pos += 8 + chunk_size;
+            // Chunks are word-aligned
+            if chunk_size % 2 != 0 { pos += 1; }
+        }
+        None
+    }
+
+    /// Convert raw PCM audio data to unsigned 8-bit mono.
+    fn wav_pcm_to_u8(audio: &[u8], bits: u16, channels: u16) -> Vec<u8> {
+        match bits {
+            8 => {
+                // Already unsigned 8-bit; just take first channel if stereo
+                if channels <= 1 {
+                    audio.to_vec()
+                } else {
+                    audio.chunks(channels as usize)
+                        .map(|ch| ch[0])
+                        .collect()
+                }
+            }
+            16 => {
+                let step = 2 * channels as usize;
+                audio.chunks(step)
+                    .map(|frame| {
+                        // First channel, signed 16-bit LE → unsigned 8-bit
+                        let s = i16::from_le_bytes([frame[0], frame[1]]);
+                        ((s as i32 + 32768) >> 8) as u8
+                    })
+                    .collect()
+            }
+            _ => {
+                // Unsupported bit depth — return silence
+                vec![128; audio.len() / (bits as usize / 8) / channels as usize]
+            }
+        }
     }
 
     // ── 3D sunken bevel (Windows 9x "SunkenBox" look) ─────────────────────────

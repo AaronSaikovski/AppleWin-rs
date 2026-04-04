@@ -9,5 +9,8 @@ pub mod emulator;
 pub mod error;
 pub mod model;
 
+#[cfg(test)]
+mod bus_tests;
+
 pub use emulator::Emulator;
 pub use error::Error;
