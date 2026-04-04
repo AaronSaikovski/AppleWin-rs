@@ -203,6 +203,8 @@ fn lc_c080_read_ram_bank2_write_protect() {
 fn lc_c081_read_rom_write_enable_bank2() {
     let mut bus = make_bus();
     // $C081: read ROM, write-enable, bank 2
+    // WRITERAM requires two consecutive reads of the same odd address
+    bus.read(0xC081, 0);
     bus.read(0xC081, 0);
     assert!(!bus.mode.contains(MemMode::MF_HIGHRAM));
     assert!(bus.mode.contains(MemMode::MF_WRITERAM));
@@ -223,6 +225,8 @@ fn lc_c082_read_rom_write_protect_bank2() {
 fn lc_c083_read_ram_write_enable_bank2() {
     let mut bus = make_bus();
     // $C083: read RAM, write-enable, bank 2
+    // WRITERAM requires two consecutive reads of the same odd address
+    bus.read(0xC083, 0);
     bus.read(0xC083, 0);
     assert!(bus.mode.contains(MemMode::MF_HIGHRAM));
     assert!(bus.mode.contains(MemMode::MF_WRITERAM));
@@ -243,6 +247,8 @@ fn lc_c088_bank1() {
 fn lc_c08b_bank1_readwrite() {
     let mut bus = make_bus();
     // $C08B: read RAM, write-enable, bank 1
+    // WRITERAM requires two consecutive reads of the same odd address
+    bus.read(0xC08B, 0);
     bus.read(0xC08B, 0);
     assert!(bus.mode.contains(MemMode::MF_HIGHRAM));
     assert!(bus.mode.contains(MemMode::MF_WRITERAM));
@@ -282,6 +288,8 @@ fn page_table_highram_on() {
 fn page_table_writeram_on() {
     let mut bus = make_bus();
     // Enable LC RAM writing (read ROM)
+    // WRITERAM requires two consecutive reads of the same odd address
+    bus.read(0xC081, 0);
     bus.read(0xC081, 0); // HIGHRAM off, WRITERAM on, bank 2
     // $D0-$FF should read ROM but write to aux
     assert!(matches!(bus.pages_r[0xD0], PageSrc::Rom(_)));
