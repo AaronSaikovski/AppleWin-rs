@@ -163,6 +163,9 @@ pub struct Ssi263 {
     pub ready_countdown: u64,
     /// True when chip is powered up (CTL bit = 0).
     pub powered: bool,
+    /// IRQ flag — asserted when a phoneme finishes speaking.
+    /// The parent card (e.g. Mockingboard) should check and clear this.
+    pub irq: bool,
 
     // ── synthesis state ──────────────────────────────────────────────────────
     /// Current phoneme index (0-63).
@@ -194,6 +197,7 @@ impl Ssi263 {
             regs: [0u8; 5],
             ready_countdown: 0,
             powered: true,
+            irq: false,
             phoneme: 0,
             samples_remaining: 0,
             phase: 0,
@@ -209,6 +213,25 @@ impl Ssi263 {
     }
 
     // ── register access ───────────────────────────────────────────────────────
+
+    /// Read an SSI263 register.
+    /// Returns status information — only register 0 is meaningfully readable:
+    /// bit 7 = 1 when chip is ready (not speaking), 0 when busy.
+    pub fn read_reg(&mut self, reg: u8) -> u8 {
+        match reg & 0x07 {
+            0 => {
+                // Reading register 0 returns status and clears IRQ
+                let status = if self.is_ready() { 0x80 } else { 0x00 };
+                self.irq = false;
+                status
+            }
+            1 => self.regs[1],
+            2 => self.regs[2],
+            3 => self.regs[3],
+            4 => self.regs[4],
+            _ => 0xFF,
+        }
+    }
 
     /// Write a value to the SSI263.
     /// `reg` = register index (0-4); the caller (mockingboard) already decoded
@@ -281,12 +304,14 @@ impl Ssi263 {
     // ── timing ────────────────────────────────────────────────────────────────
 
     /// Advance time by `delta` CPU cycles. Returns true if READY just fired (IFR CA1).
+    /// Also asserts IRQ when the phoneme finishes speaking.
     pub fn tick(&mut self, delta: u64) -> bool {
         if self.ready_countdown == 0 || !self.powered {
             return false;
         }
         if delta >= self.ready_countdown {
             self.ready_countdown = 0;
+            self.irq = true; // Assert IRQ — phoneme finished
             true // READY fired
         } else {
             self.ready_countdown -= delta;
@@ -366,5 +391,108 @@ impl Ssi263 {
         } else {
             self.samples_remaining -= n as u32;
         }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phoneme_write_starts_speaking() {
+        let mut ssi = Ssi263::new();
+        assert!(ssi.is_ready());
+        // Write phoneme 0x01 (E) with shortest duration (bits 7:6 = 0b11)
+        ssi.write_reg(0, 0xC1);
+        assert!(!ssi.is_ready(), "Should be speaking after phoneme write");
+        assert!(ssi.ready_countdown > 0);
+    }
+
+    #[test]
+    fn test_duration_scaling() {
+        let mut ssi = Ssi263::new();
+        // Phoneme 0x01, longest duration (bits 7:6 = 0b00 → factor 4)
+        ssi.write_reg(0, 0x01);
+        let long_dur = ssi.ready_countdown;
+        // Phoneme 0x01, shortest duration (bits 7:6 = 0b11 → factor 1)
+        ssi.write_reg(0, 0xC1);
+        let short_dur = ssi.ready_countdown;
+        assert!(long_dur > short_dur, "Longer duration factor should produce longer countdown");
+        assert_eq!(long_dur, short_dur * 4, "4x factor vs 1x factor");
+    }
+
+    #[test]
+    fn test_tick_fires_irq() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(0, 0xC1); // short phoneme
+        assert!(!ssi.irq);
+        let countdown = ssi.ready_countdown;
+        // Tick past the entire countdown
+        let fired = ssi.tick(countdown + 1);
+        assert!(fired, "tick should return true when phoneme completes");
+        assert!(ssi.irq, "IRQ should be asserted when phoneme finishes");
+        assert!(ssi.is_ready());
+    }
+
+    #[test]
+    fn test_read_reg_clears_irq() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(0, 0xC1);
+        ssi.tick(ssi.ready_countdown); // finish phoneme
+        assert!(ssi.irq);
+        // Reading register 0 should clear IRQ
+        let status = ssi.read_reg(0);
+        assert_eq!(status & 0x80, 0x80, "Ready bit should be set");
+        assert!(!ssi.irq, "IRQ should be cleared after reading reg 0");
+    }
+
+    #[test]
+    fn test_power_down_via_ctl() {
+        let mut ssi = Ssi263::new();
+        assert!(ssi.powered);
+        // Set CTL bit (reg 3, bit 7) → power down
+        ssi.write_reg(3, 0x80);
+        assert!(!ssi.powered, "CTL=1 should power down");
+        // Clear CTL → power up and re-trigger
+        ssi.write_reg(3, 0x0F); // amplitude = 15, CTL = 0
+        assert!(ssi.powered, "CTL=0 should power up");
+    }
+
+    #[test]
+    fn test_fill_audio_produces_output() {
+        let mut ssi = Ssi263::new();
+        // Set amplitude to max (reg 3 bits 3:0 = 0x0F)
+        ssi.write_reg(3, 0x0F);
+        // Write a voiced phoneme
+        ssi.write_reg(0, 0x01); // phoneme E, longest duration
+        let mut buf = vec![0.0_f32; 1000];
+        ssi.fill_audio(&mut buf, 22050);
+        let has_audio = buf.iter().any(|s| s.abs() > 0.001);
+        assert!(has_audio, "fill_audio should produce non-zero samples for voiced phoneme");
+    }
+
+    #[test]
+    fn test_fill_audio_unvoiced() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(3, 0x0F); // max amplitude
+        // Write an unvoiced phoneme (0x28 = S, fricative)
+        ssi.write_reg(0, 0x28);
+        let mut buf = vec![0.0_f32; 1000];
+        ssi.fill_audio(&mut buf, 22050);
+        let has_audio = buf.iter().any(|s| s.abs() > 0.001);
+        assert!(has_audio, "fill_audio should produce non-zero samples for unvoiced phoneme");
+    }
+
+    #[test]
+    fn test_reset_clears_state() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(0, 0x01);
+        ssi.irq = true;
+        ssi.reset();
+        assert!(ssi.is_ready());
+        assert!(!ssi.irq);
+        assert_eq!(ssi.regs, [0u8; 5]);
     }
 }

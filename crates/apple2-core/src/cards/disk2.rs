@@ -2,6 +2,12 @@
 //!
 //! Implements the Disk II controller as described in "Beneath Apple DOS"
 //! and translated from `source/Disk.cpp` / `source/DiskImageHelper.cpp`.
+//!
+//! WOZ v1/v2 support provides true bit-level disk emulation with:
+//! - Bit-accurate track data (not nibble-converted)
+//! - Cycle-accurate bit timing (~4 CPU cycles per bit at 250 kbit/s)
+//! - Weak/flux bit randomization for copy-protected disks
+//! - Quarter-track positioning via TMAP
 
 use std::io::{Read, Write};
 use crate::card::{Card, CardType};
@@ -57,18 +63,157 @@ const TRANS_5_3: [u8; 32] = [
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiskFormat { Dos33, ProDos, Nib, Woz, Dos32 }
 
+// ── WOZ bit-level structures ─────────────────────────────────────────────────
+
+/// A single track stored as a packed bitstream (MSB-first within each byte).
+#[derive(Clone)]
+struct WozTrack {
+    /// Packed bit stream (MSB-first within each byte).
+    bits: Vec<u8>,
+    /// Number of valid bits in the stream.
+    bit_count: u32,
+    /// Whether this track contains weak/flux bit areas.
+    has_weak_bits: bool,
+    /// Bitmask: 1 = this bit position is a weak bit (randomized on read).
+    /// Only allocated if `has_weak_bits` is true.
+    weak_mask: Vec<u8>,
+}
+
+impl WozTrack {
+    /// Read a single bit at position `pos`.  If it's a weak bit, randomize it.
+    #[inline]
+    fn read_bit(&self, pos: u32, rng: &mut SimpleRng) -> u8 {
+        if pos >= self.bit_count { return 0; }
+        let byte_idx = (pos / 8) as usize;
+        let bit_idx = 7 - (pos % 8);
+
+        // Check if this is a weak bit
+        if self.has_weak_bits && byte_idx < self.weak_mask.len() {
+            if (self.weak_mask[byte_idx] >> bit_idx) & 1 != 0 {
+                return rng.next_bit();
+            }
+        }
+
+        (self.bits[byte_idx] >> bit_idx) & 1
+    }
+
+    /// Write a single bit at position `pos`.
+    #[inline]
+    fn write_bit(&mut self, pos: u32, val: u8) {
+        if pos >= self.bit_count { return; }
+        let byte_idx = (pos / 8) as usize;
+        let bit_idx = 7 - (pos % 8);
+        if val != 0 {
+            self.bits[byte_idx] |= 1 << bit_idx;
+        } else {
+            self.bits[byte_idx] &= !(1 << bit_idx);
+        }
+        // Clear weak bit status when overwritten
+        if self.has_weak_bits && byte_idx < self.weak_mask.len() {
+            self.weak_mask[byte_idx] &= !(1 << bit_idx);
+        }
+    }
+}
+
+/// A complete parsed WOZ disk image.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct WozImage {
+    /// WOZ format version (1 or 2).
+    version: u8,
+    /// Tracks indexed by TRKS index (sparse — some may be None).
+    tracks: Vec<Option<WozTrack>>,
+    /// Quarter-track map: 160 entries mapping quarter-track 0–159 to a TRKS index,
+    /// or 0xFF for empty.
+    tmap: [u8; 160],
+    /// Whether the disk is write-protected.
+    write_protected: bool,
+    /// Disk type: 1 = 5.25", 2 = 3.5"
+    disk_type: u8,
+    /// Whether tracks are synchronized.
+    synchronized: bool,
+}
+
+impl WozImage {
+    /// Look up the WozTrack for a given quarter-track index (0–159).
+    fn track_for_quarter(&self, qt: usize) -> Option<&WozTrack> {
+        if qt >= 160 { return None; }
+        let idx = self.tmap[qt];
+        if idx == 0xFF { return None; }
+        self.tracks.get(idx as usize)?.as_ref()
+    }
+
+    /// Mutable track lookup for a given quarter-track.
+    fn track_for_quarter_mut(&mut self, qt: usize) -> Option<&mut WozTrack> {
+        if qt >= 160 { return None; }
+        let idx = self.tmap[qt];
+        if idx == 0xFF { return None; }
+        self.tracks.get_mut(idx as usize)?.as_mut()
+    }
+}
+
+/// Simple LFSR-based random number generator for weak bits.
+/// We avoid depending on `rand` by using a 32-bit xorshift.
+#[derive(Clone)]
+struct SimpleRng {
+    state: u32,
+}
+
+impl SimpleRng {
+    fn new(seed: u32) -> Self {
+        Self { state: if seed == 0 { 0xDEAD_BEEF } else { seed } }
+    }
+
+    #[inline]
+    fn next(&mut self) -> u32 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        x
+    }
+
+    #[inline]
+    fn next_bit(&mut self) -> u8 {
+        (self.next() & 1) as u8
+    }
+}
+
+// ── CRC32 (IEEE / zip) ──────────────────────────────────────────────────────
+
+/// Compute CRC32 over a byte slice (standard IEEE polynomial).
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+/// CPU cycles between each bit at 250 kbit/s with a 1.023 MHz clock.
+/// 1_023_000 / 250_000 = ~4.092 cycles per bit.
+const CYCLES_PER_BIT: u64 = 4;
+
 // ── Per-drive state ───────────────────────────────────────────────────────────
 
 struct Drive {
     /// Pre-nibblized track data: 35 entries, each a GCR byte stream.
+    /// Used for non-WOZ formats (DSK, PO, NIB, D13).
     tracks:          Vec<Vec<u8>>,
-    /// Head position in quarter-tracks (0–79; integer track = phase / 2).
+    /// Head position in quarter-tracks (0–159 for WOZ, 0–79 for nibble formats).
     phase:           i32,
     /// Cached integer track index (= phase / 2, clamped to 0..NUM_TRACKS-1).
-    /// Updated whenever `phase` changes to avoid recomputing it in the hot
-    /// nibble read/write path.
+    /// Used only for non-WOZ formats.
     current_track_idx: usize,
-    /// Current byte offset within the current track buffer.
+    /// Current byte offset within the current track buffer (nibble mode).
     byte_pos:        usize,
     /// Whether a disk image is loaded.
     loaded:          bool,
@@ -82,6 +227,21 @@ struct Drive {
     path:            Option<std::path::PathBuf>,
     /// Whether this drive is write-protected.
     write_protected: bool,
+
+    // ── WOZ bit-level fields ──────────────────────────────────────────────
+
+    /// Parsed WOZ image data (None for non-WOZ formats).
+    woz: Option<WozImage>,
+    /// Current bit position within the current WOZ track.
+    bit_pos: u32,
+    /// Shift register for accumulating bits into a nibble.
+    shift_reg: u8,
+    /// Number of zero bits encountered consecutively (for MC3470 emulation).
+    zero_count: u32,
+    /// Last CPU cycle when a bit was read/written (for timing).
+    last_cycle: u64,
+    /// RNG state for weak/flux bits.
+    rng: SimpleRng,
 }
 
 impl Drive {
@@ -97,7 +257,19 @@ impl Drive {
             format:          DiskFormat::Dos33,
             path:            None,
             write_protected: false,
+            woz:             None,
+            bit_pos:         0,
+            shift_reg:       0,
+            zero_count:      0,
+            last_cycle:      0,
+            rng:             SimpleRng::new(0xCAFE_BABE),
         }
+    }
+
+    /// Whether this drive is in WOZ bit-level mode.
+    #[inline]
+    fn is_woz(&self) -> bool {
+        self.woz.is_some()
     }
 
     /// Recompute `current_track_idx` from `phase`.  Call after any write to `phase`.
@@ -106,8 +278,16 @@ impl Drive {
         self.current_track_idx = (self.phase / 2).clamp(0, (NUM_TRACKS as i32) - 1) as usize;
     }
 
-    /// Return the next nibble and advance the byte pointer.
-    fn read_nibble(&mut self) -> u8 {
+    /// Get the current quarter-track index for WOZ lookup.
+    #[inline]
+    fn quarter_track(&self) -> usize {
+        self.phase.clamp(0, 159) as usize
+    }
+
+    // ── Nibble-mode read/write (non-WOZ) ─────────────────────────────────
+
+    /// Return the next nibble and advance the byte pointer (nibble mode).
+    fn read_nibble_legacy(&mut self) -> u8 {
         if !self.loaded { return 0xFF; }
         let buf = &self.tracks[self.current_track_idx];
         if buf.is_empty() { return 0xFF; }
@@ -116,7 +296,7 @@ impl Drive {
         n
     }
 
-    fn write_nibble(&mut self, byte: u8) {
+    fn write_nibble_legacy(&mut self, byte: u8) {
         if self.write_protected || !self.loaded { return; }
         let t = self.current_track_idx;
         if t >= self.tracks.len() { return; }
@@ -127,6 +307,116 @@ impl Drive {
         }
         self.byte_pos = (self.byte_pos + 1) % buf.len();
         self.dirty = true;
+    }
+
+    // ── WOZ bit-level read/write ─────────────────────────────────────────
+
+    /// Advance the bit position by the number of bits that have elapsed since
+    /// `last_cycle`, based on CPU cycle count.  Returns number of bits advanced.
+    fn advance_bits(&mut self, cycles: u64) -> u32 {
+        if cycles <= self.last_cycle { return 0; }
+        let elapsed = cycles - self.last_cycle;
+        let bits = (elapsed / CYCLES_PER_BIT) as u32;
+        self.last_cycle = cycles;
+        bits
+    }
+
+    /// Read a single bit from the current WOZ track at the current position.
+    fn woz_read_bit(&mut self) -> u8 {
+        let qt = self.quarter_track();
+        let woz = self.woz.as_ref().unwrap();
+        if let Some(track) = woz.track_for_quarter(qt) {
+            let bit_count = track.bit_count;
+            if bit_count == 0 { return 0; }
+            let pos = self.bit_pos % bit_count;
+            let bit = track.read_bit(pos, &mut self.rng);
+            self.bit_pos = (pos + 1) % bit_count;
+            bit
+        } else {
+            // No track data — return random bits (unformatted track)
+            self.rng.next_bit()
+        }
+    }
+
+    /// Read bits until a complete nibble is formed (1-bit followed by 7 more bits).
+    /// This simulates the Apple II disk controller's shift register behavior.
+    /// `cycles` is the current CPU cycle count for timing.
+    fn woz_read_nibble(&mut self, cycles: u64) -> u8 {
+        // Advance position based on elapsed cycles
+        let bits_elapsed = self.advance_bits(cycles);
+
+        // Simulate each bit that elapsed
+        for _ in 0..bits_elapsed.min(128) {
+            let bit = self.woz_read_bit();
+            self.shift_reg = (self.shift_reg << 1) | bit;
+
+            if self.shift_reg & 0x80 != 0 {
+                // Full nibble accumulated
+                let result = self.shift_reg;
+                self.shift_reg = 0;
+                return result;
+            }
+        }
+
+        // If no complete nibble was read, return the partial shift register
+        // with high bit clear (indicates "not ready")
+        0
+    }
+
+    /// Write a single bit to the current WOZ track at the current position.
+    fn woz_write_bit(&mut self, val: u8) {
+        let qt = self.quarter_track();
+        let woz = self.woz.as_mut().unwrap();
+        if let Some(track) = woz.track_for_quarter_mut(qt) {
+            let bit_count = track.bit_count;
+            if bit_count == 0 { return; }
+            let pos = self.bit_pos % bit_count;
+            track.write_bit(pos, val);
+            self.bit_pos = (pos + 1) % bit_count;
+            self.dirty = true;
+        }
+    }
+
+    /// Write a full nibble (8 bits, MSB first) to the current WOZ track.
+    fn woz_write_nibble(&mut self, byte: u8, cycles: u64) {
+        if self.write_protected { return; }
+
+        // Advance position based on elapsed cycles
+        let bits_elapsed = self.advance_bits(cycles);
+
+        // Skip bits that elapsed while not writing
+        let qt = self.quarter_track();
+        let woz = self.woz.as_ref().unwrap();
+        if let Some(track) = woz.track_for_quarter(qt) {
+            let bit_count = track.bit_count;
+            if bit_count > 0 {
+                self.bit_pos = (self.bit_pos + bits_elapsed) % bit_count;
+            }
+        }
+
+        // Write the 8 bits MSB first
+        for i in (0..8).rev() {
+            let bit = (byte >> i) & 1;
+            self.woz_write_bit(bit);
+        }
+    }
+
+    // ── Unified read/write dispatchers ───────────────────────────────────
+
+    fn read_nibble(&mut self, cycles: u64) -> u8 {
+        if self.is_woz() {
+            self.woz_read_nibble(cycles)
+        } else {
+            self.read_nibble_legacy()
+        }
+    }
+
+    fn write_nibble(&mut self, byte: u8, cycles: u64) {
+        if self.is_woz() {
+            self.woz_write_nibble(byte, cycles);
+        } else {
+            self.write_nibble_legacy(byte);
+        }
     }
 
     fn flush(&mut self) {
@@ -165,7 +455,8 @@ impl Drive {
                 self.raw = raw;
             }
             DiskFormat::Woz => {
-                // WOZ write-back not supported — would need to repack bitstream
+                // WOZ write-back: not yet supported (would need to repack bitstream)
+                // Track data is modified in-memory; changes are lost on eject.
             }
             DiskFormat::Dos32 => {
                 // 13-sector write-back not supported
@@ -209,14 +500,43 @@ impl Disk2Card {
     ///
     /// `ext` is the lowercase file extension used to select sector ordering:
     /// `"dsk"` / `"do"` → DOS 3.3 order, `"po"` → ProDOS order,
-    /// `"nib"` → raw nibbles, `"woz"` → WOZ bitstream (write-protected).
+    /// `"nib"` → raw nibbles, `"woz"` → WOZ bitstream (bit-level emulation).
+    ///
+    /// WOZ images are loaded in bit-level mode: the drive maintains a bit
+    /// position and shift register, and the controller reads one bit per
+    /// ~4 CPU cycles.  Non-WOZ images continue to use nibble-level mode.
     pub fn load_drive(&mut self, drive: usize, data: &[u8], ext: &str) -> bool {
         if drive >= 2 { return false; }
-        let (format, tracks, write_protected) = match ext {
-            "woz" => {
-                let t = load_woz(data);
-                (DiskFormat::Woz, t, true)
+
+        // Auto-detect WOZ by magic bytes, regardless of extension
+        let is_woz_magic = data.len() >= 8
+            && (data.starts_with(b"WOZ1\xff\x0a\x0d\x0a")
+             || data.starts_with(b"WOZ2\xff\x0a\x0d\x0a"));
+
+        if ext == "woz" || is_woz_magic {
+            // Load as WOZ bit-level image
+            if let Some(woz) = parse_woz(data) {
+                let wp = woz.write_protected;
+                let d = &mut self.drives[drive];
+                d.woz               = Some(woz);
+                d.tracks            = Vec::new(); // not used in WOZ mode
+                d.loaded            = true;
+                d.byte_pos          = 0;
+                d.bit_pos           = 0;
+                d.shift_reg         = 0;
+                d.zero_count        = 0;
+                d.phase             = 0;
+                d.current_track_idx = 0;
+                d.dirty             = false;
+                d.format            = DiskFormat::Woz;
+                d.raw               = data.to_vec();
+                d.write_protected   = wp;
+                return true;
             }
+            return false;
+        }
+
+        let (format, tracks, write_protected) = match ext {
             "po" => (DiskFormat::ProDos, nibblize_image(data, &PRODOS_SKEW), false),
             "nib" => (DiskFormat::Nib, load_nib(data), false),
             "d13" => (DiskFormat::Dos32, nibblize_image_13(data), false),
@@ -230,15 +550,17 @@ impl Disk2Card {
             }
         };
         if let Some(t) = tracks {
-            self.drives[drive].tracks            = t;
-            self.drives[drive].loaded            = true;
-            self.drives[drive].byte_pos          = 0;
-            self.drives[drive].phase             = 0;
-            self.drives[drive].current_track_idx = 0;
-            self.drives[drive].dirty             = false;
-            self.drives[drive].format            = format;
-            self.drives[drive].raw               = data.to_vec();
-            self.drives[drive].write_protected   = write_protected;
+            let d = &mut self.drives[drive];
+            d.woz               = None; // ensure not in WOZ mode
+            d.tracks            = t;
+            d.loaded            = true;
+            d.byte_pos          = 0;
+            d.phase             = 0;
+            d.current_track_idx = 0;
+            d.dirty             = false;
+            d.format            = format;
+            d.raw               = data.to_vec();
+            d.write_protected   = write_protected;
             true
         } else {
             false
@@ -297,7 +619,7 @@ impl Card for Disk2Card {
 
     fn cx_rom(&self) -> Option<&[u8; 256]> { Some(DISK2_FW) }
 
-    fn slot_io_read(&mut self, reg: u8, _cycles: u64) -> u8 {
+    fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
         match reg {
             0x00..=0x07 => { self.step_phase(reg); self.latch }
             0x08 => {
@@ -312,9 +634,9 @@ impl Card for Disk2Card {
             0x0B => { self.active_drive = 1; self.latch }
             0x0C => {
                 if self.write_mode && self.motor_on {
-                    self.drives[self.active_drive].write_nibble(self.latch);
+                    self.drives[self.active_drive].write_nibble(self.latch, cycles);
                 } else if !self.write_mode && self.motor_on {
-                    self.latch = self.drives[self.active_drive].read_nibble();
+                    self.latch = self.drives[self.active_drive].read_nibble(cycles);
                 }
                 self.latch
             }
@@ -327,7 +649,7 @@ impl Card for Disk2Card {
         }
     }
 
-    fn slot_io_write(&mut self, reg: u8, value: u8, _cycles: u64) {
+    fn slot_io_write(&mut self, reg: u8, value: u8, cycles: u64) {
         match reg {
             0x00..=0x07 => self.step_phase(reg),
             0x08 => {
@@ -343,7 +665,7 @@ impl Card for Disk2Card {
                 // Q6L write: load latch (data to write on next strobe)
                 if self.write_mode && self.motor_on {
                     self.latch = value;
-                    self.drives[self.active_drive].write_nibble(value);
+                    self.drives[self.active_drive].write_nibble(value, cycles);
                 }
             }
             0x0D => { self.latch = value; }        // Q6H: load data register
@@ -692,25 +1014,42 @@ fn denibblize_track(nibs: &[u8], track_num: u8, skew: &[u8; 16], out: &mut [u8])
     }
 }
 
-// ── WOZ format support ────────────────────────────────────────────────────────
+// ── WOZ format support (bit-level) ───────────────────────────────────────────
 
-/// Parse a WOZ disk image and return nibble tracks.
-/// WOZ is write-protected in emulation.
-fn load_woz(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+/// Parse a WOZ v1 or v2 disk image into a `WozImage` for bit-level emulation.
+///
+/// Validates the header magic and CRC32, then parses INFO, TMAP, and TRKS
+/// chunks.  For WOZ v1, each track is a fixed 6646-byte buffer with a trailing
+/// bit count.  For WOZ v2, tracks have variable-length bitstreams addressed
+/// by 512-byte block offsets.
+///
+/// Weak bits are detected as long runs of zero bits (>= 3 consecutive 0x00
+/// bytes in the bitstream) which is the standard WOZ convention for marking
+/// unreadable flux areas.
+fn parse_woz(data: &[u8]) -> Option<WozImage> {
     if data.len() < 12 { return None; }
 
-    // Check magic: "WOZ1\xFF\x0A\x0D\x0A" or "WOZ2\xFF\x0A\x0D\x0A"
     let is_woz1 = data.starts_with(b"WOZ1\xff\x0a\x0d\x0a");
     let is_woz2 = data.starts_with(b"WOZ2\xff\x0a\x0d\x0a");
     if !is_woz1 && !is_woz2 { return None; }
 
-    // Skip 8-byte magic + 4-byte CRC = offset 12 for first chunk
-    let mut pos = 12usize;
+    let version = if is_woz1 { 1u8 } else { 2u8 };
 
-    let mut tmap: Option<[u8; 160]> = None;
-    let mut trks_data: &[u8] = &[];
+    // Validate CRC32: bytes 8..12 contain the stored CRC of bytes 12..end
+    let stored_crc = u32::from_le_bytes(data[8..12].try_into().ok()?);
+    if stored_crc != 0 {
+        let computed = crc32(&data[12..]);
+        if computed != stored_crc { return None; }
+    }
 
     // Parse chunks
+    let mut pos = 12usize;
+    let mut tmap: Option<[u8; 160]> = None;
+    let mut trks_data: &[u8] = &[];
+    let mut write_protected = false;
+    let mut disk_type: u8 = 1; // default 5.25"
+    let mut synchronized = false;
+
     while pos + 8 <= data.len() {
         let id = &data[pos..pos + 4];
         let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
@@ -718,12 +1057,23 @@ fn load_woz(data: &[u8]) -> Option<Vec<Vec<u8>>> {
         if pos + size > data.len() { break; }
         let chunk = &data[pos..pos + size];
 
-        if id == b"TMAP" && size >= 160 {
-            let mut t = [0xFFu8; 160];
-            t.copy_from_slice(&chunk[..160]);
-            tmap = Some(t);
-        } else if id == b"TRKS" {
-            trks_data = chunk;
+        match id {
+            b"INFO" if size >= 60 => {
+                // INFO chunk: version(1), disk_type(1), write_protected(1),
+                //             synchronized(1), cleaned(1), creator(32), ...
+                disk_type = chunk[1];
+                write_protected = chunk[2] != 0;
+                synchronized = chunk[3] != 0;
+            }
+            b"TMAP" if size >= 160 => {
+                let mut t = [0xFFu8; 160];
+                t.copy_from_slice(&chunk[..160]);
+                tmap = Some(t);
+            }
+            b"TRKS" => {
+                trks_data = chunk;
+            }
+            _ => {} // skip META and unknown chunks
         }
 
         pos += size;
@@ -731,78 +1081,150 @@ fn load_woz(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 
     let tmap = tmap?;
 
-    // Build nibble tracks for the 35 whole tracks (0, 2, 4, ... 68 in quarter-track space)
-    let mut tracks = vec![Vec::new(); NUM_TRACKS];
+    // Determine the maximum track index referenced by TMAP
+    let max_trks_idx = tmap.iter().copied().filter(|&v| v != 0xFF).max().unwrap_or(0) as usize;
+
+    let mut tracks: Vec<Option<WozTrack>> = Vec::new();
 
     if is_woz1 {
-        // WOZ1: each TRKS entry is 6646 bytes of bitstream
-        const WOZ1_TRACK_BYTES: usize = 6646;
-        const WOZ1_BIT_COUNT:   usize = 6646 * 8; // max bits
-        #[allow(clippy::needless_range_loop)]
-        for track_idx in 0..NUM_TRACKS {
-            let qt = track_idx * 2; // quarter-track index for whole track
-            let trks_idx = tmap[qt];
-            if trks_idx == 0xFF { continue; }
-            let t_off = trks_idx as usize * WOZ1_TRACK_BYTES;
-            if t_off + WOZ1_TRACK_BYTES > trks_data.len() { continue; }
-            let bits = &trks_data[t_off..t_off + WOZ1_TRACK_BYTES];
-            tracks[track_idx] = bitstream_to_nibbles(bits, WOZ1_BIT_COUNT);
+        // WOZ1: TRKS chunk contains fixed 6656-byte entries (6646 bytes data + 2 bytes used,
+        // plus 8 bytes padding = 6656 total per entry).
+        const WOZ1_ENTRY_SIZE: usize = 6656;
+        const WOZ1_DATA_SIZE: usize = 6646;
+
+        for idx in 0..=max_trks_idx {
+            let entry_off = idx * WOZ1_ENTRY_SIZE;
+            if entry_off + WOZ1_ENTRY_SIZE > trks_data.len() {
+                tracks.push(None);
+                continue;
+            }
+            // Bytes used is at offset 6646 (2 bytes LE), bit count at 6648 (2 bytes LE)
+            let bytes_used = u16::from_le_bytes(
+                trks_data[entry_off + WOZ1_DATA_SIZE..entry_off + WOZ1_DATA_SIZE + 2]
+                    .try_into().ok()?,
+            ) as usize;
+            let bit_count = u16::from_le_bytes(
+                trks_data[entry_off + WOZ1_DATA_SIZE + 2..entry_off + WOZ1_DATA_SIZE + 4]
+                    .try_into().ok()?,
+            ) as u32;
+
+            let byte_count = bytes_used.min(WOZ1_DATA_SIZE);
+            let bits = trks_data[entry_off..entry_off + byte_count].to_vec();
+
+            let (has_weak, weak_mask) = detect_weak_bits(&bits, bit_count);
+            tracks.push(Some(WozTrack {
+                bits,
+                bit_count,
+                has_weak_bits: has_weak,
+                weak_mask,
+            }));
         }
     } else {
-        // WOZ2: 8-byte track descriptors at start of TRKS, data blocks at offset 1536
-        // Track descriptor: u16 starting_block, u16 block_count, u32 bit_count
+        // WOZ2: TRKS chunk starts with 160 track descriptors (8 bytes each = 1280 bytes),
+        // followed by track data in 512-byte blocks.
         const DESC_SIZE: usize = 8;
-        #[allow(clippy::needless_range_loop)]
-        for track_idx in 0..NUM_TRACKS {
-            let qt = track_idx * 2;
-            let trks_idx = tmap[qt];
-            if trks_idx == 0xFF { continue; }
-            let desc_off = trks_idx as usize * DESC_SIZE;
-            if desc_off + DESC_SIZE > trks_data.len() { continue; }
-            let starting_block = u16::from_le_bytes(trks_data[desc_off..desc_off + 2].try_into().ok()?) as usize;
-            let block_count    = u16::from_le_bytes(trks_data[desc_off + 2..desc_off + 4].try_into().ok()?) as usize;
-            let bit_count      = u32::from_le_bytes(trks_data[desc_off + 4..desc_off + 8].try_into().ok()?) as usize;
 
-            // Data starts addressed in 512-byte blocks relative to the beginning of the file.
+        for idx in 0..=max_trks_idx {
+            let desc_off = idx * DESC_SIZE;
+            if desc_off + DESC_SIZE > trks_data.len() {
+                tracks.push(None);
+                continue;
+            }
+            let starting_block = u16::from_le_bytes(
+                trks_data[desc_off..desc_off + 2].try_into().ok()?,
+            ) as usize;
+            let block_count = u16::from_le_bytes(
+                trks_data[desc_off + 2..desc_off + 4].try_into().ok()?,
+            ) as usize;
+            let bit_count = u32::from_le_bytes(
+                trks_data[desc_off + 4..desc_off + 8].try_into().ok()?,
+            );
+
+            if starting_block == 0 && block_count == 0 {
+                tracks.push(None);
+                continue;
+            }
+
+            // Data addressed as 512-byte blocks relative to the file start
             let file_data_off = starting_block * 512;
             let byte_count = block_count * 512;
-            if file_data_off + byte_count > data.len() { continue; }
-            let bits = &data[file_data_off..file_data_off + byte_count];
-            tracks[track_idx] = bitstream_to_nibbles(bits, bit_count);
+            if file_data_off + byte_count > data.len() {
+                tracks.push(None);
+                continue;
+            }
+
+            let bits = data[file_data_off..file_data_off + byte_count].to_vec();
+
+            let (has_weak, weak_mask) = detect_weak_bits(&bits, bit_count);
+            tracks.push(Some(WozTrack {
+                bits,
+                bit_count,
+                has_weak_bits: has_weak,
+                weak_mask,
+            }));
         }
     }
 
-    Some(tracks)
+    Some(WozImage {
+        version,
+        tracks,
+        tmap,
+        write_protected,
+        disk_type,
+        synchronized,
+    })
 }
 
-/// Convert a raw bitstream (MSB-first within each byte) to nibbles.
-/// Simulates the Apple II disk controller's shift register: accumulate bits
-/// until the high bit is set, then emit the byte.
-fn bitstream_to_nibbles(bits: &[u8], bit_count: usize) -> Vec<u8> {
-    let mut nibs = Vec::with_capacity(bits.len());
-    let mut shift_reg: u8 = 0;
+/// Detect weak/flux bit areas in a bitstream.
+///
+/// The WOZ specification marks weak bits as long runs of zero bits.  Specifically,
+/// any sequence of 3 or more consecutive 0x00 bytes (24+ zero bits) is considered
+/// a weak bit area.  Returns (has_any, weak_mask) where weak_mask has 1-bits at
+/// positions that should be randomized on read.
+fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
+    let byte_len = bits.len();
+    let mut weak_mask = vec![0u8; byte_len];
+    let mut has_any = false;
 
-    // Double the bitstream to handle wrap-around (tracks are circular)
-    let total = bit_count.min(bits.len() * 8);
+    // Scan for runs of 3+ consecutive 0x00 bytes
+    let mut run_start: Option<usize> = None;
 
-    for bit_idx in 0..total * 2 {
-        let actual_bit = bit_idx % total;
-        let byte_idx = actual_bit / 8;
-        let bit_pos  = 7 - (actual_bit % 8); // MSB first
-        let bit = (bits[byte_idx] >> bit_pos) & 1;
-
-        shift_reg = (shift_reg << 1) | bit;
-        if shift_reg & 0x80 != 0 {
-            nibs.push(shift_reg);
-            shift_reg = 0;
-            if bit_idx >= total {
-                // We've wrapped once; enough data for one revolution
-                break;
+    for i in 0..byte_len {
+        if bits[i] == 0x00 {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        } else {
+            if let Some(start) = run_start {
+                let run_len = i - start;
+                if run_len >= 3 {
+                    // Mark all bits in this run as weak
+                    for j in start..i {
+                        // Only mark bits within valid bit_count
+                        if (j as u32) * 8 < bit_count {
+                            weak_mask[j] = 0xFF;
+                            has_any = true;
+                        }
+                    }
+                }
+            }
+            run_start = None;
+        }
+    }
+    // Handle run extending to end of data
+    if let Some(start) = run_start {
+        let run_len = byte_len - start;
+        if run_len >= 3 {
+            for j in start..byte_len {
+                if (j as u32) * 8 < bit_count {
+                    weak_mask[j] = 0xFF;
+                    has_any = true;
+                }
             }
         }
     }
 
-    nibs
+    (has_any, weak_mask)
 }
 
 // ── Embedded 16-sector Disk II firmware (256 bytes) ──────────────────────────
@@ -841,3 +1263,535 @@ static DISK2_FW: &[u8; 256] = &[
     0x3D, 0xCD, 0x00, 0x08, 0xA6, 0x2B, 0x90, 0xDB,
     0x4C, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Helper: build a minimal WOZ v1 image in memory ───────────────────
+
+    /// Create a minimal WOZ v1 image with one track of known bit data.
+    fn make_woz1_image(track_bits: &[u8], bit_count: u16) -> Vec<u8> {
+        let mut img = Vec::new();
+
+        // Magic
+        img.extend_from_slice(b"WOZ1\xff\x0a\x0d\x0a");
+        // CRC placeholder (will be filled in)
+        img.extend_from_slice(&[0u8; 4]);
+
+        // INFO chunk (60 bytes)
+        img.extend_from_slice(b"INFO");
+        img.extend_from_slice(&60u32.to_le_bytes());
+        let mut info = [0u8; 60];
+        info[0] = 1;  // version
+        info[1] = 1;  // disk type = 5.25"
+        info[2] = 0;  // not write protected
+        info[3] = 0;  // not synchronized
+        info[4] = 0;  // not cleaned
+        // creator (32 bytes at offset 5)
+        info[5..5 + 4].copy_from_slice(b"TEST");
+        img.extend_from_slice(&info);
+
+        // TMAP chunk (160 bytes)
+        img.extend_from_slice(b"TMAP");
+        img.extend_from_slice(&160u32.to_le_bytes());
+        let mut tmap = [0xFFu8; 160];
+        tmap[0] = 0; // quarter-track 0 -> TRKS index 0
+        img.extend_from_slice(&tmap);
+
+        // TRKS chunk: one entry = 6656 bytes
+        // Layout: 6646 bytes data, 2 bytes bytes_used, 2 bytes bit_count, 8 bytes padding
+        const ENTRY_SIZE: usize = 6656;
+        let trks_size = ENTRY_SIZE;
+        img.extend_from_slice(b"TRKS");
+        img.extend_from_slice(&(trks_size as u32).to_le_bytes());
+
+        let mut entry = vec![0u8; ENTRY_SIZE];
+        let copy_len = track_bits.len().min(6646);
+        entry[..copy_len].copy_from_slice(&track_bits[..copy_len]);
+        // bytes_used at offset 6646
+        entry[6646] = (copy_len & 0xFF) as u8;
+        entry[6647] = ((copy_len >> 8) & 0xFF) as u8;
+        // bit_count at offset 6648
+        entry[6648] = (bit_count & 0xFF) as u8;
+        entry[6649] = ((bit_count >> 8) & 0xFF) as u8;
+        img.extend_from_slice(&entry);
+
+        // Compute and fill CRC32
+        let computed_crc = crc32(&img[12..]);
+        img[8..12].copy_from_slice(&computed_crc.to_le_bytes());
+
+        img
+    }
+
+    /// Create a minimal WOZ v2 image with one track of known bit data.
+    fn make_woz2_image(track_bits: &[u8], bit_count: u32) -> Vec<u8> {
+        let mut img = Vec::new();
+
+        // Magic
+        img.extend_from_slice(b"WOZ2\xff\x0a\x0d\x0a");
+        // CRC placeholder
+        img.extend_from_slice(&[0u8; 4]);
+
+        // INFO chunk (60 bytes)
+        img.extend_from_slice(b"INFO");
+        img.extend_from_slice(&60u32.to_le_bytes());
+        let mut info = [0u8; 60];
+        info[0] = 2;  // version
+        info[1] = 1;  // disk type = 5.25"
+        info[2] = 1;  // write protected
+        info[3] = 0;  // not synchronized
+        info[4] = 0;  // not cleaned
+        img.extend_from_slice(&info);
+
+        // TMAP chunk (160 bytes)
+        img.extend_from_slice(b"TMAP");
+        img.extend_from_slice(&160u32.to_le_bytes());
+        let mut tmap = [0xFFu8; 160];
+        tmap[0] = 0;  // quarter-track 0 -> TRKS index 0
+        tmap[4] = 0;  // quarter-track 4 also -> TRKS index 0 (shared)
+        tmap[1] = 0;  // quarter-track 1 also -> TRKS index 0
+        img.extend_from_slice(&tmap);
+
+        // TRKS chunk: 160 track descriptors (8 bytes each = 1280),
+        // followed by actual track data in 512-byte blocks.
+        // Track data starts at block 3 (offset 3*512 = 1536 from file start).
+        // The file so far: 12 + 68 + 168 + 8 = 256 bytes of header+chunks-before-TRKS
+        // But TRKS data blocks are relative to the file, not the chunk.
+        // We need to calculate: after writing TRKS chunk header + 1280 desc bytes,
+        // where does the file offset land? That tells us the starting block.
+
+        // Let's compute: current file size + 8 (TRKS header) + 1280 (descs)
+        let trks_chunk_start = img.len() + 8; // position right after TRKS chunk header
+        let descs_end = trks_chunk_start + 1280;
+        // Round up to next 512-byte block
+        let data_block_start = (descs_end + 511) / 512;
+        let data_file_offset = data_block_start * 512;
+        // Padding needed between descs and first data block
+        let padding = data_file_offset - descs_end;
+
+        // Calculate block count: ceil(track_bits.len() / 512)
+        let block_count = ((track_bits.len() + 511) / 512) as u16;
+
+        // Build descriptors: only index 0 is used
+        let mut descs = vec![0u8; 1280];
+        descs[0..2].copy_from_slice(&(data_block_start as u16).to_le_bytes());
+        descs[2..4].copy_from_slice(&block_count.to_le_bytes());
+        descs[4..8].copy_from_slice(&bit_count.to_le_bytes());
+
+        let trks_total_size = 1280 + padding + (block_count as usize * 512);
+        img.extend_from_slice(b"TRKS");
+        img.extend_from_slice(&(trks_total_size as u32).to_le_bytes());
+        img.extend_from_slice(&descs);
+        img.extend(std::iter::repeat_n(0u8, padding));
+
+        // Write track data padded to block_count * 512
+        let mut track_data = track_bits.to_vec();
+        track_data.resize(block_count as usize * 512, 0);
+        img.extend_from_slice(&track_data);
+
+        // Compute and fill CRC32
+        let computed_crc = crc32(&img[12..]);
+        img[8..12].copy_from_slice(&computed_crc.to_le_bytes());
+
+        img
+    }
+
+    // ── CRC32 tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_crc32_known() {
+        // CRC32 of "123456789" is 0xCBF43926
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn test_crc32_empty() {
+        assert_eq!(crc32(b""), 0x0000_0000);
+    }
+
+    // ── WOZ v1 parsing tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_woz1_basic() {
+        // Create a simple bitstream: alternating 1-0 pattern = 0xAA
+        let track_data = vec![0xAA; 100];
+        let bit_count = 800u16; // 100 bytes * 8 bits
+        let img = make_woz1_image(&track_data, bit_count);
+
+        let woz = parse_woz(&img).expect("should parse WOZ v1");
+        assert_eq!(woz.version, 1);
+        assert_eq!(woz.disk_type, 1);
+        assert!(!woz.write_protected);
+
+        // Quarter-track 0 should map to track index 0
+        assert_eq!(woz.tmap[0], 0);
+        assert_eq!(woz.tmap[1], 0xFF); // unmapped
+
+        let track = woz.track_for_quarter(0).expect("track 0 should exist");
+        assert_eq!(track.bit_count, 800);
+        assert_eq!(track.bits[0], 0xAA);
+    }
+
+    #[test]
+    fn test_parse_woz1_bad_magic() {
+        let mut img = make_woz1_image(&[0xFF; 10], 80);
+        img[0..4].copy_from_slice(b"NOPE");
+        assert!(parse_woz(&img).is_none());
+    }
+
+    #[test]
+    fn test_parse_woz1_bad_crc() {
+        let mut img = make_woz1_image(&[0xFF; 10], 80);
+        // Corrupt the CRC
+        img[8] = img[8].wrapping_add(1);
+        assert!(parse_woz(&img).is_none());
+    }
+
+    // ── WOZ v2 parsing tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_woz2_basic() {
+        let track_data = vec![0xD5; 64];
+        let bit_count = 512u32;
+        let img = make_woz2_image(&track_data, bit_count);
+
+        let woz = parse_woz(&img).expect("should parse WOZ v2");
+        assert_eq!(woz.version, 2);
+        assert!(woz.write_protected);
+
+        let track = woz.track_for_quarter(0).expect("track 0 should exist");
+        assert_eq!(track.bit_count, 512);
+    }
+
+    #[test]
+    fn test_parse_woz2_quarter_track_mapping() {
+        let track_data = vec![0xFF; 64];
+        let img = make_woz2_image(&track_data, 512);
+
+        let woz = parse_woz(&img).expect("should parse");
+        // Quarter-track 0, 1, and 4 all map to track index 0
+        assert!(woz.track_for_quarter(0).is_some());
+        assert!(woz.track_for_quarter(1).is_some());
+        assert!(woz.track_for_quarter(4).is_some());
+        // Quarter-track 2 is unmapped
+        assert!(woz.track_for_quarter(2).is_none());
+        // Out of range
+        assert!(woz.track_for_quarter(160).is_none());
+    }
+
+    // ── Bit-level read tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_woz_read_bit() {
+        // Bitstream: 0b10110100 = 0xB4
+        let track = WozTrack {
+            bits: vec![0xB4],
+            bit_count: 8,
+            has_weak_bits: false,
+            weak_mask: vec![0],
+        };
+        let mut rng = SimpleRng::new(42);
+
+        assert_eq!(track.read_bit(0, &mut rng), 1); // bit 7
+        assert_eq!(track.read_bit(1, &mut rng), 0); // bit 6
+        assert_eq!(track.read_bit(2, &mut rng), 1); // bit 5
+        assert_eq!(track.read_bit(3, &mut rng), 1); // bit 4
+        assert_eq!(track.read_bit(4, &mut rng), 0); // bit 3
+        assert_eq!(track.read_bit(5, &mut rng), 1); // bit 2
+        assert_eq!(track.read_bit(6, &mut rng), 0); // bit 1
+        assert_eq!(track.read_bit(7, &mut rng), 0); // bit 0
+    }
+
+    #[test]
+    fn test_woz_read_nibble_shift_register() {
+        // Create a bitstream that encodes nibble 0xD5:
+        // 0xD5 = 0b11010101
+        // The shift register accumulates bits until bit 7 is set.
+        // So bits: 1,1,0,1,0,1,0,1 -> first 1 starts, then 7 more -> 0xD5
+        let track = WozTrack {
+            bits: vec![0xD5, 0xAA], // 0xD5 followed by 0xAA
+            bit_count: 16,
+            has_weak_bits: false,
+            weak_mask: vec![0, 0],
+        };
+
+        let woz = WozImage {
+            version: 1,
+            tracks: vec![Some(track)],
+            tmap: {
+                let mut t = [0xFFu8; 160];
+                t[0] = 0;
+                t
+            },
+            write_protected: false,
+            disk_type: 1,
+            synchronized: false,
+        };
+
+        let mut drive = Drive::new();
+        drive.woz = Some(woz);
+        drive.loaded = true;
+        drive.last_cycle = 0;
+
+        // Reading a nibble with enough cycles elapsed (8 bits * 4 cycles = 32 cycles)
+        let nibble = drive.woz_read_nibble(32);
+        assert_eq!(nibble, 0xD5);
+    }
+
+    // ── Bit-level write tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_woz_write_bit() {
+        let mut track = WozTrack {
+            bits: vec![0x00],
+            bit_count: 8,
+            has_weak_bits: false,
+            weak_mask: vec![0],
+        };
+
+        // Write 1 at position 0 (MSB)
+        track.write_bit(0, 1);
+        assert_eq!(track.bits[0], 0x80);
+
+        // Write 1 at position 7 (LSB)
+        track.write_bit(7, 1);
+        assert_eq!(track.bits[0], 0x81);
+
+        // Write 0 at position 0 (clear MSB)
+        track.write_bit(0, 0);
+        assert_eq!(track.bits[0], 0x01);
+    }
+
+    #[test]
+    fn test_woz_write_nibble() {
+        let track = WozTrack {
+            bits: vec![0x00; 4],
+            bit_count: 32,
+            has_weak_bits: false,
+            weak_mask: vec![0; 4],
+        };
+
+        let woz = WozImage {
+            version: 1,
+            tracks: vec![Some(track)],
+            tmap: {
+                let mut t = [0xFFu8; 160];
+                t[0] = 0;
+                t
+            },
+            write_protected: false,
+            disk_type: 1,
+            synchronized: false,
+        };
+
+        let mut drive = Drive::new();
+        drive.woz = Some(woz);
+        drive.loaded = true;
+        drive.last_cycle = 0;
+
+        // Write nibble 0xD5 starting at bit position 0
+        drive.woz_write_nibble(0xD5, 0);
+        assert!(drive.dirty);
+
+        // Check the bits: 0xD5 = 11010101 should be written at positions 0..8
+        let track = drive.woz.as_ref().unwrap().track_for_quarter(0).unwrap();
+        assert_eq!(track.bits[0], 0xD5);
+    }
+
+    // ── Weak bit tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_weak_bits() {
+        // 3 consecutive zero bytes = weak area
+        let bits = vec![0xFF, 0x00, 0x00, 0x00, 0xFF];
+        let (has_weak, mask) = detect_weak_bits(&bits, 40);
+        assert!(has_weak);
+        assert_eq!(mask[0], 0x00); // not weak
+        assert_eq!(mask[1], 0xFF); // weak
+        assert_eq!(mask[2], 0xFF); // weak
+        assert_eq!(mask[3], 0xFF); // weak
+        assert_eq!(mask[4], 0x00); // not weak
+    }
+
+    #[test]
+    fn test_detect_weak_bits_short_run() {
+        // Only 2 consecutive zero bytes = NOT weak
+        let bits = vec![0xFF, 0x00, 0x00, 0xFF];
+        let (has_weak, _mask) = detect_weak_bits(&bits, 32);
+        assert!(!has_weak);
+    }
+
+    #[test]
+    fn test_weak_bit_randomization() {
+        let track = WozTrack {
+            bits: vec![0x00, 0x00, 0x00], // all zeros = weak area
+            bit_count: 24,
+            has_weak_bits: true,
+            weak_mask: vec![0xFF, 0xFF, 0xFF],
+        };
+
+        let mut rng = SimpleRng::new(12345);
+
+        // Read several weak bits — they should not all be the same value
+        let mut seen_zero = false;
+        let mut seen_one = false;
+        for _ in 0..100 {
+            let bit = track.read_bit(0, &mut rng);
+            if bit == 0 { seen_zero = true; }
+            if bit == 1 { seen_one = true; }
+            if seen_zero && seen_one { break; }
+        }
+        assert!(seen_zero && seen_one, "weak bits should produce both 0 and 1");
+    }
+
+    #[test]
+    fn test_write_clears_weak_bits() {
+        let mut track = WozTrack {
+            bits: vec![0x00, 0x00, 0x00],
+            bit_count: 24,
+            has_weak_bits: true,
+            weak_mask: vec![0xFF, 0xFF, 0xFF],
+        };
+
+        // Write a 1 at position 0
+        track.write_bit(0, 1);
+        // The weak mask at byte 0, bit 7 should now be cleared
+        assert_eq!(track.weak_mask[0] & 0x80, 0);
+    }
+
+    // ── SimpleRng tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_simple_rng_produces_both_values() {
+        let mut rng = SimpleRng::new(42);
+        let mut seen = [false; 2];
+        for _ in 0..100 {
+            seen[rng.next_bit() as usize] = true;
+            if seen[0] && seen[1] { break; }
+        }
+        assert!(seen[0] && seen[1]);
+    }
+
+    #[test]
+    fn test_simple_rng_deterministic() {
+        let mut rng1 = SimpleRng::new(999);
+        let mut rng2 = SimpleRng::new(999);
+        for _ in 0..50 {
+            assert_eq!(rng1.next(), rng2.next());
+        }
+    }
+
+    // ── Disk2Card integration tests ──────────────────────────────────────
+
+    #[test]
+    fn test_load_woz1_into_card() {
+        let track_data = vec![0xD5; 100];
+        let img = make_woz1_image(&track_data, 800);
+
+        let mut card = Disk2Card::new(6);
+        assert!(card.load_drive(0, &img, "woz"));
+        assert!(card.drives[0].is_woz());
+        assert!(card.drives[0].loaded);
+    }
+
+    #[test]
+    fn test_load_woz2_into_card() {
+        let track_data = vec![0xAA; 128];
+        let img = make_woz2_image(&track_data, 1024);
+
+        let mut card = Disk2Card::new(6);
+        assert!(card.load_drive(0, &img, "woz"));
+        assert!(card.drives[0].is_woz());
+        assert!(card.drives[0].write_protected); // WOZ v2 test image is write-protected
+    }
+
+    #[test]
+    fn test_autodetect_woz_by_magic() {
+        let track_data = vec![0xFF; 100];
+        let img = make_woz1_image(&track_data, 800);
+
+        let mut card = Disk2Card::new(6);
+        // Even with "dsk" extension, WOZ magic should be auto-detected
+        assert!(card.load_drive(0, &img, "dsk"));
+        assert!(card.drives[0].is_woz());
+    }
+
+    #[test]
+    fn test_dsk_still_works() {
+        // Ensure a normal DSK image still loads in nibble mode
+        let dsk = vec![0x00u8; DSK_SIZE];
+        let mut card = Disk2Card::new(6);
+        assert!(card.load_drive(0, &dsk, "dsk"));
+        assert!(!card.drives[0].is_woz());
+        assert!(card.drives[0].loaded);
+    }
+
+    #[test]
+    fn test_woz_eject() {
+        let track_data = vec![0xFF; 100];
+        let img = make_woz1_image(&track_data, 800);
+
+        let mut card = Disk2Card::new(6);
+        card.load_drive(0, &img, "woz");
+        card.eject_drive(0);
+        assert!(!card.drives[0].loaded);
+    }
+
+    // ── Bit timing tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_advance_bits_timing() {
+        let mut drive = Drive::new();
+        drive.last_cycle = 100;
+
+        // 16 cycles elapsed = 4 bits (at 4 cycles per bit)
+        let bits = drive.advance_bits(116);
+        assert_eq!(bits, 4);
+        assert_eq!(drive.last_cycle, 116);
+    }
+
+    #[test]
+    fn test_advance_bits_no_time() {
+        let mut drive = Drive::new();
+        drive.last_cycle = 100;
+        assert_eq!(drive.advance_bits(100), 0);
+        assert_eq!(drive.advance_bits(50), 0); // backwards = 0
+    }
+
+    // ── Track wrap-around test ───────────────────────────────────────────
+
+    #[test]
+    fn test_bit_position_wraps() {
+        let track = WozTrack {
+            bits: vec![0xFF, 0x00], // 16 bits
+            bit_count: 16,
+            has_weak_bits: false,
+            weak_mask: vec![0, 0],
+        };
+
+        let woz = WozImage {
+            version: 1,
+            tracks: vec![Some(track)],
+            tmap: {
+                let mut t = [0xFFu8; 160];
+                t[0] = 0;
+                t
+            },
+            write_protected: false,
+            disk_type: 1,
+            synchronized: false,
+        };
+
+        let mut drive = Drive::new();
+        drive.woz = Some(woz);
+        drive.loaded = true;
+        drive.bit_pos = 15; // at last bit
+
+        // Read one bit, should wrap to position 0
+        let _bit = drive.woz_read_bit();
+        assert_eq!(drive.bit_pos, 0); // wrapped around
+    }
+}

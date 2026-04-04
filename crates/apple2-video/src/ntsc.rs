@@ -326,9 +326,14 @@ impl NtscRenderer {
             }
         } else {
             // Lo-res graphics
-            self.render_lores(text_page, fb);
+            let gr_rows = if mixed { 20 } else { 24 };
+            if dhires && vid80 {
+                // Double lo-res (DGR): 80-column lo-res, aux+main interleaved
+                self.render_dlores(main_ram, aux_ram, text_base, 0, gr_rows, fb);
+            } else {
+                self.render_lores_rows(text_page, 0, gr_rows, fb);
+            }
             if mixed {
-                // Overwrite the last 4 text rows with actual text glyphs
                 if vid80 {
                     self.render_text80_rows(main_ram, aux_ram, text_base, 20, 24, flash_on, fb);
                 } else {
@@ -498,8 +503,19 @@ impl NtscRenderer {
     /// Each byte encodes two colour blocks: low nibble = top 8 px, high nibble = bottom 8 px.
     /// Each cell is 14×16 px (same as text characters).
     pub fn render_lores(&self, text_page: &[u8], fb: &mut Framebuffer) {
+        self.render_lores_rows(text_page, 0, 24, fb);
+    }
+
+    /// Render lo-res graphics rows `row_start..row_end` (exclusive).
+    pub fn render_lores_rows(
+        &self,
+        text_page: &[u8],
+        row_start: usize,
+        row_end: usize,
+        fb: &mut Framebuffer,
+    ) {
         let pixels = fb.pixels_mut();
-        for row in 0..24usize {
+        for row in row_start..row_end {
             for col in 0..40usize {
                 let addr     = text_addr(row, col);
                 let byte     = text_page.get(addr).copied().unwrap_or(0);
@@ -519,6 +535,62 @@ impl NtscRenderer {
                 for dy in 8..16usize {
                     let start = (base_y + dy) * FB_WIDTH + base_x;
                     pixels[start..start + 14].fill(bot_argb);
+                }
+            }
+        }
+    }
+
+    /// Render double lo-res (DGR) graphics rows `row_start..row_end` (exclusive).
+    ///
+    /// Apple IIe double lo-res: 80 columns × 48 colour blocks, using interleaved
+    /// aux and main text page memory.  Each byte's low nibble = top colour block,
+    /// high nibble = bottom colour block.  Each colour block is 7 px wide × 8 px
+    /// tall on the 560×384 framebuffer (half the width of standard lo-res cells).
+    ///
+    /// Column ordering (same as 80-col text):
+    ///   screen col 0 → aux[addr],  screen col 1 → main[addr],
+    ///   screen col 2 → aux[addr+1], screen col 3 → main[addr+1], …
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_dlores(
+        &self,
+        main_ram:  &[u8; 65536],
+        aux_ram:   &[u8; 65536],
+        text_base: usize,
+        row_start: usize,
+        row_end:   usize,
+        fb:        &mut Framebuffer,
+    ) {
+        let main_page = &main_ram[text_base..text_base + 0x400];
+        let aux_page  = &aux_ram [text_base..text_base + 0x400];
+        let pixels = fb.pixels_mut();
+
+        for row in row_start..row_end {
+            for screen_col in 0..80usize {
+                let phys_col = screen_col / 2;
+                let addr = text_addr(row, phys_col);
+                // Even screen columns → aux; odd → main (same as 80-col text)
+                let byte = if screen_col & 1 == 0 {
+                    aux_page.get(addr).copied().unwrap_or(0)
+                } else {
+                    main_page.get(addr).copied().unwrap_or(0)
+                };
+
+                let lo_color = (byte & 0x0F) as usize;
+                let hi_color = ((byte >> 4) & 0x0F) as usize;
+                let base_x   = screen_col * 7;
+                let base_y   = row * 16;
+
+                // Top half: 7 px wide × 8 px tall
+                let top_argb = LORES_PALETTE[lo_color];
+                for dy in 0..8usize {
+                    let start = (base_y + dy) * FB_WIDTH + base_x;
+                    pixels[start..start + 7].fill(top_argb);
+                }
+                // Bottom half: 7 px wide × 8 px tall
+                let bot_argb = LORES_PALETTE[hi_color];
+                for dy in 8..16usize {
+                    let start = (base_y + dy) * FB_WIDTH + base_x;
+                    pixels[start..start + 7].fill(bot_argb);
                 }
             }
         }
@@ -743,5 +815,241 @@ fn apply_scanlines(fb: &mut Framebuffer) {
             // This is format-agnostic across ARGB and ABGR.
             *px = 0xFF000000 | ((*px & 0x00FEFEFE) >> 1);
         }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::framebuffer::{FB_WIDTH, FB_HEIGHT};
+    use apple2_core::bus::MemMode;
+
+    /// Helper: create a renderer with a blank char ROM.
+    fn make_renderer() -> NtscRenderer {
+        // 128 chars × 8 rows = 1024 bytes; fill with a simple pattern:
+        // every glyph row is 0xFF (all pixels lit) for easy verification.
+        let char_rom_data = vec![0xFEu8; 1024]; // 0xFE = bits 7-1 set (7 pixels on)
+        NtscRenderer::new(CharRom::new(char_rom_data), false)
+    }
+
+    #[test]
+    fn text_addr_layout() {
+        // Row 0, col 0 → offset 0
+        assert_eq!(text_addr(0, 0), 0);
+        // Row 0, col 1 → offset 1
+        assert_eq!(text_addr(0, 1), 1);
+        // Row 1, col 0 → offset 0x80
+        assert_eq!(text_addr(1, 0), 0x80);
+        // Row 8, col 0 → offset 0x28  (second group of 8 rows)
+        assert_eq!(text_addr(8, 0), 0x28);
+        // Row 16, col 0 → offset 0x50  (third group)
+        assert_eq!(text_addr(16, 0), 0x50);
+    }
+
+    #[test]
+    fn ntsc_tables_generate_does_not_panic() {
+        let _tables = NtscTables::generate();
+    }
+
+    #[test]
+    fn ntsc_tables_black_and_white() {
+        let tables = NtscTables::generate();
+        // Signal 0x000 (all zeros) should produce black (or near-black) for any phase
+        for phase in 0..4 {
+            let color = tables.hue_color_tv[phase][0];
+            let r =  color        & 0xFF;
+            let g = (color >>  8) & 0xFF;
+            let b = (color >> 16) & 0xFF;
+            assert!(r < 10 && g < 10 && b < 10,
+                "phase {phase}: expected near-black, got r={r} g={g} b={b}");
+        }
+        // Signal 0xFFF (all ones) should produce white (or near-white) for any phase
+        for phase in 0..4 {
+            let color = tables.hue_color_tv[phase][0xFFF];
+            let r =  color        & 0xFF;
+            let g = (color >>  8) & 0xFF;
+            let b = (color >> 16) & 0xFF;
+            assert!(r > 240 && g > 240 && b > 240,
+                "phase {phase}: expected near-white, got r={r} g={g} b={b}");
+        }
+    }
+
+    #[test]
+    fn pixel_double_mask_basic() {
+        let tables = NtscTables::generate();
+        // Byte 0 → mask 0
+        assert_eq!(tables.pixel_double_mask[0], 0);
+        // Byte 1 (bit 0 set) → bits 0,1 set = 0x0003
+        assert_eq!(tables.pixel_double_mask[1], 0x0003);
+        // Byte 0x7F (all 7 bits) → all 14 bits = 0x3FFF
+        assert_eq!(tables.pixel_double_mask[0x7F], 0x3FFF);
+    }
+
+    #[test]
+    fn render_text40_fills_framebuffer() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        // Fill text page with normal 'A' (0xC1)
+        let mut text_page = [0xA0u8; 0x400]; // normal spaces
+        text_page[text_addr(0, 0)] = 0xC1; // 'A' at row 0, col 0
+
+        renderer.render_text40_rows(&text_page, 0, 1, false, &mut fb);
+
+        // The char ROM is all-pixels-on (0xFE), so the 'A' glyph should produce
+        // white pixels (fg=0xFFFFFFFF) in the cell area.
+        // Row 0, col 0 → pixel (0,0) should be white (fg).
+        let px = fb.pixels()[0]; // (x=0, y=0)
+        assert_eq!(px, 0xFFFFFFFF, "expected white fg pixel at (0,0)");
+    }
+
+    #[test]
+    fn render_lores_rows_fills_correct_colors() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut text_page = [0u8; 0x400];
+        // Row 0, col 0: lo nibble=1 (Deep Red), hi nibble=2 (Dark Blue) → byte 0x21
+        text_page[text_addr(0, 0)] = 0x21;
+
+        renderer.render_lores_rows(&text_page, 0, 1, &mut fb);
+
+        // Top half: should be LORES_PALETTE[1] at pixel (0,0)
+        let top_px = fb.pixels()[0];
+        assert_eq!(top_px, LORES_PALETTE[1]);
+        // Bottom half: should be LORES_PALETTE[2] at pixel (0, 8)
+        let bot_px = fb.pixels()[8 * FB_WIDTH];
+        assert_eq!(bot_px, LORES_PALETTE[2]);
+    }
+
+    #[test]
+    fn render_full_frame_text_mode() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let main_ram = [0xA0u8; 65536]; // all normal spaces
+        let aux_ram  = [0xA0u8; 65536];
+        let mode = MemMode::empty(); // text mode (no MF_GRAPHICS)
+
+        renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+
+        // Text mode with blank char ROM and normal spaces should produce
+        // all-black pixels (bg=0xFF000000) since space glyph has all pixels on
+        // but the char is normal mode (fg=white, bg=black) and the ROM has 0xFE
+        // which has the high bit set for each row.
+        // Actually with 0xFE (bit 7 set, bit pattern 11111110), 6 of 7 pixels
+        // per glyph will be white.  Just check the framebuffer was written.
+        let non_default = fb.pixels().iter().filter(|&&p| p != 0xFF000000).count();
+        // With all-0xFE glyphs, most pixels will be white
+        assert!(non_default > 0, "framebuffer should have non-black pixels");
+    }
+
+    #[test]
+    fn render_hires_mode() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut main_ram = [0u8; 65536];
+        let aux_ram = [0u8; 65536];
+        // Set hires page 1 to all white (0x7F = 7 pixels on, hi-bit clear)
+        for i in 0x2000..0x4000 {
+            main_ram[i] = 0x7F;
+        }
+        let mode = MemMode::MF_GRAPHICS | MemMode::MF_HIRES;
+
+        renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+
+        // With all-white hires data, the NTSC tables should produce near-white pixels
+        // Check a pixel in the middle of the screen
+        let px = fb.pixels()[96 * FB_WIDTH + 280];
+        let r =  px        & 0xFF;
+        let g = (px >>  8) & 0xFF;
+        let b = (px >> 16) & 0xFF;
+        assert!(r > 200 && g > 200 && b > 200,
+            "expected near-white in all-white hires, got r={r} g={g} b={b}");
+    }
+
+    #[test]
+    fn render_mixed_mode_has_text_bottom() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut main_ram = [0u8; 65536];
+        let aux_ram = [0u8; 65536];
+        // Hires page: all black (0x00)
+        // Text page row 20, col 0: put a visible character
+        let text_base = 0x0400usize;
+        main_ram[text_base + text_addr(20, 0)] = 0xC1; // 'A'
+        let mode = MemMode::MF_GRAPHICS | MemMode::MF_HIRES | MemMode::MF_MIXED;
+
+        renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+
+        // Row 20 in text is at framebuffer y = 20*16 = 320.
+        // With our all-on char ROM, the 'A' glyph should produce white pixels.
+        let px = fb.pixels()[320 * FB_WIDTH + 0];
+        assert_eq!(px, 0xFFFFFFFF, "mixed mode text area should have white fg");
+    }
+
+    #[test]
+    fn render_dlores_fills_correct_colors() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut main_ram = [0u8; 65536];
+        let mut aux_ram  = [0u8; 65536];
+        let text_base = 0x0400usize;
+        // Row 0, phys_col 0: aux byte = 0x34 (lo=4, hi=3), main byte = 0x56 (lo=6, hi=5)
+        aux_ram [text_base + text_addr(0, 0)] = 0x34;
+        main_ram[text_base + text_addr(0, 0)] = 0x56;
+
+        renderer.render_dlores(&main_ram, &aux_ram, text_base, 0, 1, &mut fb);
+
+        // Screen col 0 (aux): lo nibble=4 → LORES_PALETTE[4] at top, hi nibble=3 at bottom
+        let top0 = fb.pixels()[0]; // (0,0)
+        assert_eq!(top0, LORES_PALETTE[4]);
+        let bot0 = fb.pixels()[8 * FB_WIDTH]; // (0,8)
+        assert_eq!(bot0, LORES_PALETTE[3]);
+
+        // Screen col 1 (main): lo nibble=6, hi nibble=5
+        let top1 = fb.pixels()[7]; // (7,0) — screen col 1 starts at x=7
+        assert_eq!(top1, LORES_PALETTE[6]);
+        let bot1 = fb.pixels()[8 * FB_WIDTH + 7]; // (7,8)
+        assert_eq!(bot1, LORES_PALETTE[5]);
+    }
+
+    #[test]
+    fn apply_scanlines_dims_odd_rows() {
+        let mut fb = Framebuffer::new();
+        // Set all pixels to known value
+        fb.clear(0xFF808080);
+        apply_scanlines(&mut fb);
+
+        // Even rows should be unchanged
+        assert_eq!(fb.pixels()[0], 0xFF808080);
+        // Odd rows should be dimmed to ~half: (0x80 & 0xFE) >> 1 = 0x40
+        assert_eq!(fb.pixels()[FB_WIDTH], 0xFF404040);
+    }
+
+    #[test]
+    fn char_rom_glyph_returns_correct_data() {
+        let data = vec![0xAAu8; 1024];
+        let rom = CharRom::new(data);
+        let glyph = rom.glyph(0);
+        assert_eq!(glyph, [0xAA; 8]);
+        let glyph_last = rom.glyph(127);
+        assert_eq!(glyph_last, [0xAA; 8]);
+    }
+
+    #[test]
+    fn char_rom_glyph_out_of_range() {
+        // Empty ROM should return zeroes
+        let rom = CharRom::new(vec![]);
+        let glyph = rom.glyph(0);
+        assert_eq!(glyph, [0u8; 8]);
+    }
+
+    #[test]
+    fn framebuffer_set_pixel_bounds_check() {
+        let mut fb = Framebuffer::new();
+        // Out-of-bounds writes should be silently ignored
+        fb.set_pixel(FB_WIDTH, 0, 0xFFFFFFFF);
+        fb.set_pixel(0, FB_HEIGHT, 0xFFFFFFFF);
+        // No panic = pass
     }
 }
