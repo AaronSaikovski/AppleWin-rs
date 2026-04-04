@@ -76,7 +76,10 @@ impl Emulator {
                     // IRQ is asserted; will decide after the instruction whether to defer.
                     self.cpu.irq_pending |= 0x01;
                 }
-            } else {
+            } else if !self.bus.irq_line {
+                // IRQ line deasserted — clear pending and defer.
+                // When I flag is set but irq_line is still asserted, keep
+                // irq_pending so it fires when I is cleared (CLI/RTI).
                 self.cpu.irq_pending &= !0x01;
                 self.cpu.irq_defer = false;
             }

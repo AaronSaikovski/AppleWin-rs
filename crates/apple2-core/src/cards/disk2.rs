@@ -343,8 +343,9 @@ impl Card for Disk2Card {
                     self.drives[self.active_drive].write_nibble(value);
                 }
             }
-            0x0D => { self.write_mode = false; }
-            0x0F => { self.write_mode = true; }
+            0x0D => { self.latch = value; }        // Q6H: load data register
+            0x0E => { self.write_mode = false; }   // Q7L: read mode
+            0x0F => { self.write_mode = true; }    // Q7H: write mode
             _    => {}
         }
     }
