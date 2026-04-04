@@ -194,6 +194,7 @@ version = "1.0.0"
 dependencies = [
  "apple2-core",
  "serde",
+ "serde_yaml",
  "thiserror",
  "tracing",
 ]

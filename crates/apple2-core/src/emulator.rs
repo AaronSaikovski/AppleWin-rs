@@ -123,6 +123,84 @@ impl Emulator {
     }
 }
 
+/// Result of a debugger-aware execution call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecuteResult {
+    /// Ran to completion (consumed all requested cycles).
+    Completed(u64),
+    /// Stopped early because the breakpoint callback returned true.
+    Break(u64),
+}
+
+impl Emulator {
+    /// Execute cycles, calling `should_break(pc)` after each instruction.
+    ///
+    /// `should_break` receives the PC of the instruction that just executed
+    /// and returns `true` to halt.  The memory-access trace slice from
+    /// `bus.mem_trace` (if enabled) is available for the caller to inspect
+    /// *after* the method returns — it is drained per-instruction inside
+    /// this loop only when the break fires.
+    pub fn execute_debugged<F>(&mut self, cycles: u64, mut should_break: F) -> ExecuteResult
+    where
+        F: FnMut(u16, &[(u16, u8, bool)]) -> bool,
+    {
+        if self.cpu.jammed {
+            self.cpu.cycles += cycles;
+            return ExecuteResult::Completed(cycles);
+        }
+        let start = self.cpu.cycles;
+        let target = start + cycles;
+        let mut next_update = start + 17_030;
+
+        while self.cpu.cycles < target {
+            let irq_before = self.bus.irq_line;
+            let pc_before = self.cpu.pc;
+
+            if self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
+                if self.cpu.irq_defer {
+                    self.cpu.irq_defer = false;
+                    self.cpu.irq_pending |= 0x01;
+                } else {
+                    self.cpu.irq_pending |= 0x01;
+                }
+            } else {
+                self.cpu.irq_pending &= !0x01;
+                self.cpu.irq_defer = false;
+            }
+
+            // Clear the per-instruction memory trace before executing.
+            if self.bus.mem_trace_enabled {
+                self.bus.mem_trace.clear();
+            }
+
+            dispatch::step(&mut self.cpu, &mut self.bus);
+
+            if !irq_before && self.bus.irq_line
+                && !self.cpu.flags.contains(super::cpu::Flags::I)
+            {
+                self.cpu.irq_pending &= !0x01;
+                self.cpu.irq_defer = true;
+            }
+
+            if self.cpu.cycles >= next_update {
+                self.bus.cards.update_all(self.cpu.cycles);
+                next_update += 17_030;
+            }
+
+            // Check breakpoint after step.
+            let mem_accesses = if self.bus.mem_trace_enabled {
+                self.bus.mem_trace.as_slice()
+            } else {
+                &[]
+            };
+            if should_break(pc_before, mem_accesses) {
+                return ExecuteResult::Break(self.cpu.cycles - start);
+            }
+        }
+        ExecuteResult::Completed(self.cpu.cycles - start)
+    }
+}
+
 /// Full emulator snapshot for save states.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmulatorSnapshot {

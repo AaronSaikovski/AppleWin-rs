@@ -185,6 +185,13 @@ pub struct Bus {
     /// `frame_offset = cycles - frame_start_cycles`.  Updated lazily inside the
     /// `$C019` (VBLANK) soft-switch read and by `advance_frame()`.
     frame_start_cycles: u64,
+
+    /// When true, record all memory accesses for debugger breakpoint inspection.
+    /// Cost when false: one predicted branch per Bus::read/write (~0 overhead).
+    pub mem_trace_enabled: bool,
+    /// Per-instruction memory access log: (address, value, is_write).
+    /// Drained after each instruction by `Emulator::execute_debugged`.
+    pub mem_trace: Vec<(u16, u8, bool)>,
 }
 
 impl Bus {
@@ -209,6 +216,8 @@ impl Bus {
             irq_line:           false,
             lc_swap_buf:        Box::new([0u8; 16384]),
             frame_start_cycles: 0,
+            mem_trace_enabled:  false,
+            mem_trace:          Vec::new(),
         };
         bus.rebuild_page_tables();
         bus
@@ -354,7 +363,7 @@ impl Bus {
     #[inline]
     pub fn read(&mut self, addr: u16, cycles: u64) -> u8 {
         let page = (addr >> 8) as usize;
-        match self.pages_r[page] {
+        let val = match self.pages_r[page] {
             PageSrc::Main(base) => {
                 self.main_ram[(base | (addr & 0xFF)) as usize]
             }
@@ -369,12 +378,19 @@ impl Bus {
             }
             PageSrc::Io => self.io_read(addr, cycles),
             PageSrc::FloatingBus => self.floating_bus,
+        };
+        if self.mem_trace_enabled {
+            self.mem_trace.push((addr, val, false));
         }
+        val
     }
 
     /// Write a byte, triggering I/O side-effects.
     #[inline]
     pub fn write(&mut self, addr: u16, val: u8, cycles: u64) {
+        if self.mem_trace_enabled {
+            self.mem_trace.push((addr, val, true));
+        }
         let page = (addr >> 8) as usize;
         match self.pages_w[page] {
             PageDst::Main(base) => {

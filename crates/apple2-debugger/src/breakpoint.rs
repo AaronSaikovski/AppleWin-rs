@@ -102,4 +102,32 @@ impl BreakpointManager {
                 && addr < bp.address.saturating_add(bp.length)
         })
     }
+
+    /// Returns true if any enabled opcode breakpoints exist.
+    pub fn has_opcode_breakpoints(&self) -> bool {
+        self.breakpoints.iter().any(|bp| bp.enabled && bp.kind == BreakpointKind::Opcode)
+    }
+
+    /// Returns true if any enabled memory read/write breakpoints exist.
+    pub fn has_mem_breakpoints(&self) -> bool {
+        self.breakpoints.iter().any(|bp| {
+            bp.enabled && matches!(bp.kind, BreakpointKind::MemRead | BreakpointKind::MemWrite)
+        })
+    }
+
+    /// Returns true if any enabled breakpoints of any kind exist.
+    pub fn has_any_breakpoints(&self) -> bool {
+        self.breakpoints.iter().any(|bp| bp.enabled)
+    }
+
+    /// Check memory accesses from a trace slice for read/write breakpoints.
+    pub fn check_mem_trace(&self, trace: &[(u16, u8, bool)]) -> bool {
+        trace.iter().any(|&(addr, _, is_write)| {
+            if is_write {
+                self.check_mem_write(addr)
+            } else {
+                self.check_mem_read(addr)
+            }
+        })
+    }
 }

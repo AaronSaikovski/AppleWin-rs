@@ -55,7 +55,7 @@ mod headless {
 
 #[cfg(feature = "gui")]
 mod gui {
-    use apple2_core::emulator::Emulator;
+    use apple2_core::emulator::{Emulator, ExecuteResult};
     use apple2_video::{
         framebuffer::Framebuffer,
         ntsc::{CharRom, NtscRenderer},
@@ -467,9 +467,11 @@ mod gui {
         /// Characters queued for paste injection into the Apple II keyboard.
         paste_buf:         std::collections::VecDeque<u8>,
         // Debugger
-        show_debugger:     bool,
-        debugger:          apple2_debugger::DebuggerState,
-        debugger_bp_input: String,
+        show_debugger:       bool,
+        debugger:            apple2_debugger::DebuggerState,
+        debugger_bp_input:   String,
+        debugger_cmd_input:  String,
+        debugger_mem_input:  String,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
     }
@@ -569,7 +571,9 @@ mod gui {
                 paste_buf:         std::collections::VecDeque::new(),
                 show_debugger:     false,
                 debugger:          apple2_debugger::DebuggerState::new(),
-                debugger_bp_input: String::new(),
+                debugger_bp_input:  String::new(),
+                debugger_cmd_input: String::new(),
+                debugger_mem_input: String::from("0400"),
                 slot_options_open: [false; 8],
             }
         }
@@ -584,6 +588,292 @@ mod gui {
             self.spkr_cycle_rem   = 0.0;
             self.last_audio_cycle = self.emu.cpu.cycles;
             self.last_frame_time  = std::time::Instant::now();
+        }
+
+        /// Execute a parsed debugger command, updating emulator and debugger state.
+        fn execute_debug_command(&mut self, cmd: apple2_debugger::commands::DebugCommand) {
+            use apple2_debugger::commands::{self, DebugCommand};
+            use apple2_debugger::breakpoint::{Breakpoint, BreakpointKind};
+
+            match cmd {
+                DebugCommand::Go(None) => {
+                    self.debugger.active = false;
+                    self.debugger.console_output.push("Resuming...".into());
+                }
+                DebugCommand::Go(Some(addr)) => {
+                    self.debugger.step_over_target = Some(addr);
+                    self.debugger.active = false;
+                    self.debugger.console_output.push(format!("Running to ${addr:04X}..."));
+                }
+                DebugCommand::Trace => {
+                    if self.debugger.active {
+                        self.emu.step();
+                        let pc = self.emu.cpu.pc;
+                        self.debugger.console_output.push(format!("PC=${pc:04X}"));
+                    } else {
+                        self.debugger.console_output.push("Not paused.".into());
+                    }
+                }
+                DebugCommand::StepOver => {
+                    if self.debugger.active {
+                        let pc = self.emu.cpu.pc;
+                        let opcode = self.emu.bus.read_raw(pc);
+                        if opcode == 0x20 {
+                            self.debugger.step_over_target = Some(pc.wrapping_add(3));
+                            self.debugger.active = false;
+                        } else {
+                            self.emu.step();
+                        }
+                    }
+                }
+                DebugCommand::StepOut => {
+                    if self.debugger.active {
+                        let sp = self.emu.cpu.sp;
+                        let lo = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(1) as u16) as u16;
+                        let hi = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(2) as u16) as u16;
+                        let ret_addr = ((hi << 8) | lo).wrapping_add(1);
+                        self.debugger.step_over_target = Some(ret_addr);
+                        self.debugger.active = false;
+                    }
+                }
+                DebugCommand::Unassemble(addr) => {
+                    let target = addr.unwrap_or(self.emu.cpu.pc);
+                    self.debugger.cursor = target;
+                    // Show a few lines of disassembly in the console
+                    use apple2_debugger::disasm::{disassemble_one, format_instruction};
+                    let mut a = target;
+                    for _ in 0..8 {
+                        let instr = disassemble_one(a, |x| self.emu.bus.read_raw(x));
+                        self.debugger.console_output.push(format_instruction(&instr));
+                        a = a.wrapping_add(instr.bytes as u16);
+                    }
+                }
+                DebugCommand::BreakpointAdd(addr) => {
+                    let idx = self.debugger.breakpoints.add(Breakpoint::at(addr));
+                    self.debugger.console_output.push(format!("BP #{idx} at ${addr:04X}"));
+                }
+                DebugCommand::BreakpointAddMem(addr) => {
+                    let bp_r = commands::make_mem_breakpoint(BreakpointKind::MemRead, addr);
+                    let bp_w = commands::make_mem_breakpoint(BreakpointKind::MemWrite, addr);
+                    self.debugger.breakpoints.add(bp_r);
+                    self.debugger.breakpoints.add(bp_w);
+                    self.debugger.console_output.push(format!("BPM (R+W) at ${addr:04X}"));
+                }
+                DebugCommand::BreakpointAddMemRead(addr) => {
+                    let bp = commands::make_mem_breakpoint(BreakpointKind::MemRead, addr);
+                    self.debugger.breakpoints.add(bp);
+                    self.debugger.console_output.push(format!("BPMR at ${addr:04X}"));
+                }
+                DebugCommand::BreakpointAddMemWrite(addr) => {
+                    let bp = commands::make_mem_breakpoint(BreakpointKind::MemWrite, addr);
+                    self.debugger.breakpoints.add(bp);
+                    self.debugger.console_output.push(format!("BPMW at ${addr:04X}"));
+                }
+                DebugCommand::BreakpointClear(idx) => {
+                    if idx < self.debugger.breakpoints.breakpoints.len() {
+                        self.debugger.breakpoints.remove(idx);
+                        self.debugger.console_output.push(format!("BP #{idx} removed"));
+                    } else {
+                        self.debugger.console_output.push(format!("No breakpoint #{idx}"));
+                    }
+                }
+                DebugCommand::BreakpointList => {
+                    if self.debugger.breakpoints.breakpoints.is_empty() {
+                        self.debugger.console_output.push("No breakpoints.".into());
+                    } else {
+                        for (i, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
+                            let kind = match bp.kind {
+                                BreakpointKind::Opcode   => "PC",
+                                BreakpointKind::MemRead  => "MR",
+                                BreakpointKind::MemWrite => "MW",
+                                _ => "??",
+                            };
+                            let en = if bp.enabled { "+" } else { "-" };
+                            self.debugger.console_output.push(
+                                format!("  #{i} {en} {kind} ${:04X}", bp.address)
+                            );
+                        }
+                    }
+                }
+                DebugCommand::Register(None) => {
+                    let cpu = &self.emu.cpu;
+                    self.debugger.console_output.push(format!(
+                        "PC:{:04X} A:{:02X} X:{:02X} Y:{:02X} SP:{:02X} P:{:08b}",
+                        cpu.pc, cpu.a, cpu.x, cpu.y, cpu.sp, cpu.flags.bits()
+                    ));
+                }
+                DebugCommand::Register(Some((reg, val))) => {
+                    match reg.as_str() {
+                        "A"  => self.emu.cpu.a  = val as u8,
+                        "X"  => self.emu.cpu.x  = val as u8,
+                        "Y"  => self.emu.cpu.y  = val as u8,
+                        "SP" | "S" => self.emu.cpu.sp = val as u8,
+                        "PC" => self.emu.cpu.pc = val,
+                        "P"  => self.emu.cpu.flags = apple2_core::cpu::Flags::from_bits_truncate(val as u8),
+                        _ => {
+                            self.debugger.console_output.push(format!("Unknown register: {reg}"));
+                            return;
+                        }
+                    }
+                    self.debugger.console_output.push(format!("{reg} = ${val:04X}"));
+                }
+                DebugCommand::MemoryDump(addr, len) => {
+                    let lines = commands::format_memory_dump(addr, len, |a| self.emu.bus.read_raw(a));
+                    for line in lines {
+                        self.debugger.console_output.push(line);
+                    }
+                }
+                DebugCommand::SymbolAdd(name, addr) => {
+                    self.debugger.symbols.insert(&name, addr);
+                    self.debugger.console_output.push(format!("SYM {name} = ${addr:04X}"));
+                }
+                DebugCommand::SymbolRemove(name) => {
+                    self.debugger.symbols.remove_name(&name);
+                    self.debugger.console_output.push(format!("Removed symbol {name}"));
+                }
+                DebugCommand::BreakpointSave(path) => {
+                    match serde_yaml::to_string(&self.debugger.breakpoints) {
+                        Ok(yaml) => match std::fs::write(&path, &yaml) {
+                            Ok(_) => self.debugger.console_output.push(format!("Saved to {path}")),
+                            Err(e) => self.debugger.console_output.push(format!("Write error: {e}")),
+                        },
+                        Err(e) => self.debugger.console_output.push(format!("Serialize error: {e}")),
+                    }
+                }
+                DebugCommand::BreakpointLoad(path) => {
+                    match std::fs::read_to_string(&path) {
+                        Ok(yaml) => match serde_yaml::from_str(&yaml) {
+                            Ok(bps) => {
+                                self.debugger.breakpoints = bps;
+                                let count = self.debugger.breakpoints.breakpoints.len();
+                                self.debugger.console_output.push(format!("Loaded {count} breakpoints from {path}"));
+                            }
+                            Err(e) => self.debugger.console_output.push(format!("Parse error: {e}")),
+                        },
+                        Err(e) => self.debugger.console_output.push(format!("Read error: {e}")),
+                    }
+                }
+                DebugCommand::WatchAdd(addr) => {
+                    use apple2_debugger::watch::{Watch, WatchSource};
+                    let idx = self.debugger.watches.add(Watch {
+                        source: WatchSource::Address(addr),
+                        label: None,
+                        enabled: true,
+                    });
+                    self.debugger.console_output.push(format!("Watch #{idx}: byte ${addr:04X}"));
+                }
+                DebugCommand::WatchAddWord(addr) => {
+                    use apple2_debugger::watch::{Watch, WatchSource};
+                    let idx = self.debugger.watches.add(Watch {
+                        source: WatchSource::Word(addr),
+                        label: None,
+                        enabled: true,
+                    });
+                    self.debugger.console_output.push(format!("Watch #{idx}: word ${addr:04X}"));
+                }
+                DebugCommand::WatchAddReg(reg) => {
+                    use apple2_debugger::watch::{Watch, WatchSource};
+                    let idx = self.debugger.watches.add(Watch {
+                        source: WatchSource::Register(reg.clone()),
+                        label: None,
+                        enabled: true,
+                    });
+                    self.debugger.console_output.push(format!("Watch #{idx}: reg {reg}"));
+                }
+                DebugCommand::WatchClear(None) => {
+                    self.debugger.watches.clear();
+                    self.debugger.console_output.push("All watches cleared.".into());
+                }
+                DebugCommand::WatchClear(Some(idx)) => {
+                    if idx < self.debugger.watches.watches.len() {
+                        self.debugger.watches.remove(idx);
+                        self.debugger.console_output.push(format!("Watch #{idx} removed."));
+                    } else {
+                        self.debugger.console_output.push(format!("No watch #{idx}"));
+                    }
+                }
+                DebugCommand::WatchList => {
+                    use apple2_debugger::watch::WatchManager;
+                    if self.debugger.watches.watches.is_empty() {
+                        self.debugger.console_output.push("No watches.".into());
+                    } else {
+                        for (i, w) in self.debugger.watches.watches.iter().enumerate() {
+                            let cpu = &self.emu.cpu;
+                            let val = WatchManager::evaluate(
+                                &w.source,
+                                |a| self.emu.bus.read_raw(a),
+                                |name| match name {
+                                    "A"  => Some(cpu.a as u16),
+                                    "X"  => Some(cpu.x as u16),
+                                    "Y"  => Some(cpu.y as u16),
+                                    "SP" | "S" => Some(cpu.sp as u16),
+                                    "PC" => Some(cpu.pc),
+                                    "P"  => Some(cpu.flags.bits() as u16),
+                                    _ => None,
+                                },
+                            );
+                            self.debugger.console_output.push(format!("  #{i}: {val}"));
+                        }
+                    }
+                }
+                DebugCommand::Cycles(reset) => {
+                    if reset {
+                        self.debugger.cycle_checkpoint = self.emu.cpu.cycles;
+                        self.debugger.console_output.push("Cycle counter reset.".into());
+                    } else {
+                        let elapsed = self.emu.cpu.cycles - self.debugger.cycle_checkpoint;
+                        self.debugger.console_output.push(
+                            format!("Cycles: {} (total: {})", elapsed, self.emu.cpu.cycles)
+                        );
+                    }
+                }
+                DebugCommand::Assemble(addr, instruction) => {
+                    use apple2_debugger::assembler;
+                    match assembler::assemble_at(&instruction, addr) {
+                        Ok(result) => {
+                            for (i, &b) in result.bytes.iter().enumerate() {
+                                self.emu.bus.write_raw(addr.wrapping_add(i as u16), b);
+                            }
+                            let hex: Vec<String> = result.bytes.iter().map(|b| format!("{:02X}", b)).collect();
+                            self.debugger.console_output.push(
+                                format!("{:04X}: {}", addr, hex.join(" "))
+                            );
+                        }
+                        Err(e) => self.debugger.console_output.push(format!("Asm error: {e}")),
+                    }
+                }
+                DebugCommand::MarkData(addr, len, kind) => {
+                    self.debugger.markup.mark(addr, len, kind);
+                    self.debugger.console_output.push(
+                        format!("Marked ${:04X}-${:04X} as {:?}", addr, addr.wrapping_add(len), kind)
+                    );
+                }
+                DebugCommand::MarkCode(addr) => {
+                    self.debugger.markup.remove(addr);
+                    self.debugger.console_output.push(format!("${addr:04X} marked as code"));
+                }
+                DebugCommand::Nop(addr, count) => {
+                    for i in 0..count {
+                        self.emu.bus.write_raw(addr.wrapping_add(i), 0xEA);
+                    }
+                    self.debugger.console_output.push(
+                        format!("NOP x{count} at ${addr:04X}")
+                    );
+                }
+                DebugCommand::Fill(addr, len, val) => {
+                    for i in 0..len {
+                        self.emu.bus.write_raw(addr.wrapping_add(i), val);
+                    }
+                    self.debugger.console_output.push(
+                        format!("Filled ${:04X}-${:04X} with ${:02X}", addr, addr.wrapping_add(len), val)
+                    );
+                }
+                DebugCommand::Help => {
+                    for line in commands::help_text() {
+                        self.debugger.console_output.push(line);
+                    }
+                }
+            }
         }
 
         fn reload_disk(emu: &mut Emulator, slot: usize, drive: usize, path: &Option<PathBuf>) {
@@ -660,7 +950,7 @@ mod gui {
             // system calls across the logo/normal/full-speed branches.
             let frame_now = std::time::Instant::now();
 
-            if !in_logo_mode {
+            if !in_logo_mode && !self.debugger.active {
                 let elapsed_secs = frame_now
                     .duration_since(self.last_frame_time)
                     .as_secs_f64()
@@ -682,8 +972,30 @@ mod gui {
                     const BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
                     const BATCH: u64 = 100_000; // batch size between motor & timer checks
                     let full_start = std::time::Instant::now();
-                    while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
-                        self.emu.execute(BATCH);
+                    let has_bps = self.debugger.breakpoints.has_any_breakpoints();
+                    let step_target = self.debugger.step_over_target;
+                    if has_bps || step_target.is_some() {
+                        self.emu.bus.mem_trace_enabled =
+                            self.debugger.breakpoints.has_mem_breakpoints();
+                        let bps = &self.debugger.breakpoints;
+                        while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
+                            let result = self.emu.execute_debugged(BATCH, |pc, mem| {
+                                bps.check_opcode(pc)
+                                    || step_target == Some(pc)
+                                    || bps.check_mem_trace(mem)
+                            });
+                            if matches!(result, ExecuteResult::Break(_)) {
+                                self.debugger.active = true;
+                                self.debugger.step_over_target = None;
+                                self.show_debugger = true;
+                                break;
+                            }
+                        }
+                        self.emu.bus.mem_trace_enabled = false;
+                    } else {
+                        while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
+                            self.emu.execute(BATCH);
+                        }
                     }
                     // Reset timer so the next frame doesn't try to "catch up" for
                     // the real time spent in the full-speed loop.
@@ -703,11 +1015,32 @@ mod gui {
                 } else {
                     let cycles = (elapsed_secs * base_hz) as u64;
                     if cycles > 0 {
-                        self.emu.execute(cycles);
+                        let has_bps = self.debugger.breakpoints.has_any_breakpoints();
+                        let step_target = self.debugger.step_over_target;
+                        if has_bps || step_target.is_some() {
+                            // Enable memory tracing only when memory breakpoints exist.
+                            self.emu.bus.mem_trace_enabled =
+                                self.debugger.breakpoints.has_mem_breakpoints();
+                            let bps = &self.debugger.breakpoints;
+                            let result = self.emu.execute_debugged(cycles, |pc, mem| {
+                                bps.check_opcode(pc)
+                                    || step_target == Some(pc)
+                                    || bps.check_mem_trace(mem)
+                            });
+                            self.emu.bus.mem_trace_enabled = false;
+                            if matches!(result, ExecuteResult::Break(_)) {
+                                self.debugger.active = true;
+                                self.debugger.step_over_target = None;
+                                self.show_debugger = true;
+                            }
+                        } else {
+                            self.emu.execute(cycles);
+                        }
                     }
                 }
             } else {
-                // Keep last_frame_time current so we don't burst when logo exits.
+                // Keep last_frame_time current so we don't burst when logo exits
+                // or when the debugger resumes after being paused.
                 self.last_frame_time = frame_now;
             }
 
@@ -1362,89 +1695,324 @@ mod gui {
             // ── Debugger window ───────────────────────────────────────────────
             if self.show_debugger {
                 use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                use apple2_debugger::breakpoint::Breakpoint;
+                use apple2_debugger::breakpoint::{Breakpoint, BreakpointKind};
+                use apple2_debugger::commands;
+                use apple2_debugger::markup;
 
                 // Snapshot CPU registers before the closure borrows self
-                let pc   = self.emu.cpu.pc;
-                let a    = self.emu.cpu.a;
-                let x    = self.emu.cpu.x;
-                let y    = self.emu.cpu.y;
-                let sp   = self.emu.cpu.sp;
-                let p    = self.emu.cpu.flags.bits();
+                let pc     = self.emu.cpu.pc;
+                let a      = self.emu.cpu.a;
+                let x      = self.emu.cpu.x;
+                let y      = self.emu.cpu.y;
+                let sp     = self.emu.cpu.sp;
+                let p      = self.emu.cpu.flags.bits();
+                let cycles = self.emu.cpu.cycles;
                 let paused = self.debugger.active;
 
-                let mut do_step      = false;
-                let mut do_pause     = false;
-                let mut do_resume    = false;
-                let mut do_add_bp    = false;
+                let mut do_step          = false;
+                let mut do_step_over     = false;
+                let mut do_step_out      = false;
+                let mut do_run_to_cursor = false;
+                let mut do_pause         = false;
+                let mut do_resume        = false;
+                let mut do_add_bp        = false;
                 let mut do_remove_bp: Option<usize> = None;
                 let mut cursor_update: Option<u16>  = None;
+                let mut do_submit_cmd    = false;
 
                 egui::Window::new("Debugger")
                     .resizable(true)
-                    .min_width(460.0)
+                    .min_width(520.0)
                     .show(ctx, |ui| {
                         // ── CPU registers ──────────────────────────────────
-                        ui.monospace(format!(
-                            "PC:{:04X}  A:{:02X}  X:{:02X}  Y:{:02X}  SP:{:02X}  P:{:08b}",
-                            pc, a, x, y, sp, p
-                        ));
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!(
+                                "PC:{:04X}  A:{:02X}  X:{:02X}  Y:{:02X}  SP:{:02X}  P:{:08b}",
+                                pc, a, x, y, sp, p
+                            ));
+                        });
+                        ui.horizontal(|ui| {
+                            let elapsed = cycles - self.debugger.cycle_checkpoint;
+                            ui.monospace(format!(
+                                "Flags: NV-BDIZC   Cycles: {} (+{})",
+                                cycles, elapsed
+                            ));
+                        });
                         ui.separator();
 
                         // ── Execution controls ──────────────────────────────
                         ui.horizontal(|ui| {
                             if paused {
-                                if ui.button("▶ Resume").clicked() { do_resume = true; }
-                                if ui.button("⏭ Step").clicked()   { do_step   = true; }
+                                if ui.button("Resume").clicked()         { do_resume        = true; }
+                                if ui.button("Step").clicked()           { do_step           = true; }
+                                if ui.button("Step Over").clicked()      { do_step_over      = true; }
+                                if ui.button("Step Out").clicked()       { do_step_out       = true; }
+                                if ui.button("Run to Cursor").clicked()  { do_run_to_cursor  = true; }
                             } else {
-                                if ui.button("⏸ Pause").clicked()  { do_pause  = true; }
+                                if ui.button("Pause").clicked()  { do_pause  = true; }
                             }
                         });
                         ui.separator();
 
-                        // ── Disassembly listing ─────────────────────────────
-                        ui.label("Disassembly:");
-                        egui::ScrollArea::vertical()
-                            .max_height(200.0)
-                            .id_source("dbg_disasm")
-                            .show(ui, |ui| {
-                                let start = if paused { pc } else { self.debugger.cursor };
-                                let mut addr = start;
-                                for _ in 0..20 {
-                                    let instr = disassemble_one(addr, |a| {
-                                        self.emu.bus.read_raw(a)
-                                    });
-                                    let text = format!(
-                                        "{} {}",
-                                        if addr == pc { "▶" } else { " " },
-                                        format_instruction(&instr),
-                                    );
-                                    let resp = ui.selectable_label(
-                                        addr == self.debugger.cursor,
-                                        egui::RichText::new(text).monospace(),
-                                    );
-                                    if resp.clicked() { cursor_update = Some(addr); }
-                                    addr = addr.wrapping_add(instr.bytes as u16);
-                                }
+                        // Use columns: left=disassembly, right=stack+info
+                        ui.columns(2, |cols| {
+                            // ── Left column: Disassembly ────────────────────
+                            cols[0].label("Disassembly:");
+                            egui::ScrollArea::vertical()
+                                .max_height(280.0)
+                                .id_source("dbg_disasm")
+                                .show(&mut cols[0], |ui| {
+                                    let start = if paused { pc } else { self.debugger.cursor };
+                                    let mut addr = start;
+                                    let mut lines_shown = 0;
+                                    while lines_shown < 24 {
+                                        // Check if address has a symbol
+                                        let sym_name = self.debugger.symbols.name_at(addr);
+                                        if let Some(name) = sym_name {
+                                            ui.monospace(
+                                                RichText::new(format!("{name}:"))
+                                                    .color(Color32::YELLOW)
+                                            );
+                                        }
+                                        // Check for data markup at this address
+                                        let markup_kind = self.debugger.markup.kind_at(addr);
+                                        let has_bp = self.debugger.breakpoints.breakpoints.iter()
+                                            .any(|bp| bp.enabled && bp.kind == BreakpointKind::Opcode
+                                                && addr >= bp.address
+                                                && addr < bp.address.saturating_add(bp.length));
+                                        let marker = if addr == pc { ">" } else if has_bp { "*" } else { " " };
+
+                                        if let Some(kind) = markup_kind {
+                                            if kind != markup::MarkupKind::Code {
+                                                // Render as data
+                                                let region = self.debugger.markup.region_at(addr);
+                                                let remaining = region.map(|r| {
+                                                    let end = r.start.wrapping_add(r.length);
+                                                    end.wrapping_sub(addr)
+                                                }).unwrap_or(1);
+                                                let (data_lines, consumed) = markup::format_data_region(
+                                                    addr, kind, remaining,
+                                                    |a| self.emu.bus.read_raw(a),
+                                                );
+                                                for line in &data_lines {
+                                                    let text = format!("{} {}", marker, line);
+                                                    let color = Color32::from_rgb(0x80, 0xC0, 0xFF);
+                                                    let resp = ui.selectable_label(
+                                                        addr == self.debugger.cursor,
+                                                        RichText::new(text).monospace().color(color),
+                                                    );
+                                                    if resp.clicked() { cursor_update = Some(addr); }
+                                                    lines_shown += 1;
+                                                }
+                                                addr = addr.wrapping_add(consumed.max(1));
+                                                continue;
+                                            }
+                                        }
+
+                                        // Normal code disassembly
+                                        let instr = disassemble_one(addr, |a| {
+                                            self.emu.bus.read_raw(a)
+                                        });
+                                        let text = format!(
+                                            "{} {}",
+                                            marker,
+                                            format_instruction(&instr),
+                                        );
+                                        let color = if addr == pc {
+                                            Color32::from_rgb(0x80, 0xFF, 0x80)
+                                        } else if has_bp {
+                                            Color32::from_rgb(0xFF, 0x80, 0x80)
+                                        } else {
+                                            Color32::LIGHT_GRAY
+                                        };
+                                        let resp = ui.selectable_label(
+                                            addr == self.debugger.cursor,
+                                            RichText::new(text).monospace().color(color),
+                                        );
+                                        if resp.clicked() { cursor_update = Some(addr); }
+                                        addr = addr.wrapping_add(instr.bytes as u16);
+                                        lines_shown += 1;
+                                    }
+                                });
+
+                            // ── Right column: Stack + Breakpoints ───────────
+                            cols[1].label("Stack:");
+                            egui::ScrollArea::vertical()
+                                .max_height(120.0)
+                                .id_source("dbg_stack")
+                                .show(&mut cols[1], |ui| {
+                                    for i in 0..16u8 {
+                                        let offset = sp.wrapping_add(1).wrapping_add(i);
+                                        let addr = 0x0100u16 | offset as u16;
+                                        let val = self.emu.bus.read_raw(addr);
+                                        let text = format!("{:04X}: {:02X}", addr, val);
+                                        ui.monospace(text);
+                                    }
+                                });
+                            cols[1].separator();
+
+                            cols[1].label("Breakpoints:");
+                            let mut remove_idx: Option<usize> = None;
+                            for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
+                                cols[1].horizontal(|ui| {
+                                    let kind_str = match bp.kind {
+                                        BreakpointKind::Opcode   => "PC",
+                                        BreakpointKind::MemRead  => "MR",
+                                        BreakpointKind::MemWrite => "MW",
+                                        _ => "??",
+                                    };
+                                    let status = if bp.enabled { "+" } else { "-" };
+                                    ui.monospace(format!("{} {} {:04X}", status, kind_str, bp.address));
+                                    if ui.small_button("x").clicked() {
+                                        remove_idx = Some(idx);
+                                    }
+                                });
+                            }
+                            if let Some(idx) = remove_idx { do_remove_bp = Some(idx); }
+                            cols[1].horizontal(|ui| {
+                                ui.label("BP:");
+                                let te = egui::TextEdit::singleline(&mut self.debugger_bp_input)
+                                    .desired_width(60.0);
+                                ui.add(te);
+                                if ui.button("Add").clicked() { do_add_bp = true; }
                             });
+                        });
                         ui.separator();
 
-                        // ── Breakpoints ─────────────────────────────────────
-                        ui.label("Breakpoints:");
-                        let mut remove_idx: Option<usize> = None;
-                        for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
+                        // ── Memory dump ─────────────────────────────────────
+                        ui.collapsing("Memory Dump", |ui| {
                             ui.horizontal(|ui| {
-                                ui.monospace(format!("{:04X}", bp.address));
-                                if ui.small_button("✕").clicked() {
-                                    remove_idx = Some(idx);
+                                ui.label("Addr:");
+                                let te = egui::TextEdit::singleline(&mut self.debugger_mem_input)
+                                    .desired_width(60.0)
+                                    .font(FontId::monospace(12.0));
+                                ui.add(te);
+                                if ui.button("Go").clicked() {
+                                    if let Ok(addr) = u16::from_str_radix(
+                                        self.debugger_mem_input.trim().trim_start_matches('$'), 16
+                                    ) {
+                                        self.debugger.mem_dump_addr = addr;
+                                    }
+                                }
+                            });
+                            egui::ScrollArea::vertical()
+                                .max_height(160.0)
+                                .id_source("dbg_memdump")
+                                .show(ui, |ui| {
+                                    let lines = commands::format_memory_dump(
+                                        self.debugger.mem_dump_addr,
+                                        0x80,
+                                        |a| self.emu.bus.read_raw(a),
+                                    );
+                                    for line in &lines {
+                                        ui.monospace(line);
+                                    }
+                                });
+                        });
+
+                        // ── Watches ──────────────────────────────────────────
+                        if !self.debugger.watches.watches.is_empty() {
+                            ui.collapsing("Watches", |ui| {
+                                use apple2_debugger::watch::WatchManager;
+                                for (i, w) in self.debugger.watches.watches.iter().enumerate() {
+                                    let val = WatchManager::evaluate(
+                                        &w.source,
+                                        |a_addr| self.emu.bus.read_raw(a_addr),
+                                        |name| match name {
+                                            "A"  => Some(a as u16),
+                                            "X"  => Some(x as u16),
+                                            "Y"  => Some(y as u16),
+                                            "SP" | "S" => Some(sp as u16),
+                                            "PC" => Some(pc),
+                                            "P"  => Some(p as u16),
+                                            _ => None,
+                                        },
+                                    );
+                                    ui.monospace(format!("#{i}: {val}"));
                                 }
                             });
                         }
-                        if let Some(idx) = remove_idx { do_remove_bp = Some(idx); }
-                        ui.horizontal(|ui| {
-                            ui.label("Add:");
-                            ui.text_edit_singleline(&mut self.debugger_bp_input);
-                            if ui.button("Add").clicked() { do_add_bp = true; }
+
+                        // ── Soft-switch status ──────────────────────────────
+                        ui.collapsing("Soft Switches", |ui| {
+                            use apple2_core::bus::MemMode;
+                            let mode = self.emu.bus.mode;
+                            ui.columns(3, |cols| {
+                                // Column 1: Memory
+                                cols[0].label(RichText::new("Memory").strong());
+                                for (flag, name) in [
+                                    (MemMode::MF_80STORE,  "80STORE"),
+                                    (MemMode::MF_ALTZP,    "ALTZP"),
+                                    (MemMode::MF_AUXREAD,  "AUXREAD"),
+                                    (MemMode::MF_AUXWRITE, "AUXWRITE"),
+                                    (MemMode::MF_BANK2,    "BANK2"),
+                                    (MemMode::MF_HIGHRAM,  "HIGHRAM"),
+                                    (MemMode::MF_WRITERAM, "WRITERAM"),
+                                ] {
+                                    let on = mode.contains(flag);
+                                    let color = if on { Color32::GREEN } else { Color32::DARK_GRAY };
+                                    cols[0].monospace(RichText::new(
+                                        format!("{} {}", if on { "+" } else { "-" }, name)
+                                    ).color(color));
+                                }
+
+                                // Column 2: Video
+                                cols[1].label(RichText::new("Video").strong());
+                                for (flag, name) in [
+                                    (MemMode::MF_GRAPHICS, "GRAPHICS"),
+                                    (MemMode::MF_MIXED,    "MIXED"),
+                                    (MemMode::MF_PAGE2,    "PAGE2"),
+                                    (MemMode::MF_HIRES,    "HIRES"),
+                                    (MemMode::MF_VID80,    "VID80"),
+                                    (MemMode::MF_DHIRES,   "DHIRES"),
+                                    (MemMode::MF_ALTCHAR,  "ALTCHAR"),
+                                ] {
+                                    let on = mode.contains(flag);
+                                    let color = if on { Color32::GREEN } else { Color32::DARK_GRAY };
+                                    cols[1].monospace(RichText::new(
+                                        format!("{} {}", if on { "+" } else { "-" }, name)
+                                    ).color(color));
+                                }
+
+                                // Column 3: ROM
+                                cols[2].label(RichText::new("ROM/IO").strong());
+                                for (flag, name) in [
+                                    (MemMode::MF_INTCXROM,  "INTCXROM"),
+                                    (MemMode::MF_SLOTC3ROM, "SLOTC3ROM"),
+                                    (MemMode::MF_IOUDIS,    "IOUDIS"),
+                                    (MemMode::MF_ALTROM0,   "ALTROM0"),
+                                    (MemMode::MF_ALTROM1,   "ALTROM1"),
+                                ] {
+                                    let on = mode.contains(flag);
+                                    let color = if on { Color32::GREEN } else { Color32::DARK_GRAY };
+                                    cols[2].monospace(RichText::new(
+                                        format!("{} {}", if on { "+" } else { "-" }, name)
+                                    ).color(color));
+                                }
+                            });
+                        });
+
+                        // ── Command console ─────────────────────────────────
+                        ui.collapsing("Console", |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(100.0)
+                                .id_source("dbg_console")
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for line in &self.debugger.console_output {
+                                        ui.monospace(line);
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                ui.label(">");
+                                let te = egui::TextEdit::singleline(&mut self.debugger_cmd_input)
+                                    .desired_width(ui.available_width() - 50.0)
+                                    .font(FontId::monospace(12.0));
+                                let resp = ui.add(te);
+                                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                    do_submit_cmd = true;
+                                }
+                            });
                         });
                     });
 
@@ -1452,6 +2020,29 @@ mod gui {
                 if do_pause  { self.debugger.active = true; }
                 if do_resume { self.debugger.active = false; }
                 if do_step && paused { self.emu.step(); }
+                if do_step_over && paused {
+                    let opcode = self.emu.bus.read_raw(pc);
+                    if opcode == 0x20 {
+                        // JSR — set temp target at instruction after JSR (3 bytes)
+                        self.debugger.step_over_target = Some(pc.wrapping_add(3));
+                        self.debugger.active = false;
+                    } else {
+                        // Not a call — just single step
+                        self.emu.step();
+                    }
+                }
+                if do_step_out && paused {
+                    // Read return address from stack (6502 RTS pops lo/hi then adds 1)
+                    let lo = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(1) as u16) as u16;
+                    let hi = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(2) as u16) as u16;
+                    let ret_addr = ((hi << 8) | lo).wrapping_add(1);
+                    self.debugger.step_over_target = Some(ret_addr);
+                    self.debugger.active = false;
+                }
+                if do_run_to_cursor && paused {
+                    self.debugger.step_over_target = Some(self.debugger.cursor);
+                    self.debugger.active = false;
+                }
                 if do_add_bp
                     && let Ok(addr) = u16::from_str_radix(self.debugger_bp_input.trim(), 16) {
                     self.debugger.breakpoints.add(Breakpoint::at(addr));
@@ -1459,6 +2050,27 @@ mod gui {
                 }
                 if let Some(idx) = do_remove_bp { self.debugger.breakpoints.remove(idx); }
                 if let Some(addr) = cursor_update { self.debugger.cursor = addr; }
+
+                // ── Process console command ──────────────────────────────────
+                if do_submit_cmd {
+                    let input = self.debugger_cmd_input.clone();
+                    self.debugger_cmd_input.clear();
+                    if !input.trim().is_empty() {
+                        self.debugger.console_output.push(format!("> {input}"));
+                        self.debugger.command_history.push(input.clone());
+                        match commands::parse_command(&input, &self.debugger.symbols) {
+                            Ok(cmd) => self.execute_debug_command(cmd),
+                            Err(e) if !e.is_empty() => {
+                                self.debugger.console_output.push(format!("Error: {e}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Keep last command for repeat
+                    if !input.trim().is_empty() {
+                        self.debugger.last_command = input;
+                    }
+                }
             }
 
             // ── Settings dialog ───────────────────────────────────────────────
