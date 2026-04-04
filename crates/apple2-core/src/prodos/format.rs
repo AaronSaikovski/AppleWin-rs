@@ -39,8 +39,9 @@ const INTERLEAVE_DSK: [usize; 16] = [
 /// Mirrors `Util_ProDOS_FormatFileSystem`.
 /// `image` MUST already be in ProDOS (block) order.
 pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) {
-    // Clear everything from byte 0x200 * 2 = 0x400 onward (after boot blocks)
-    let boot_size = DSK_SECTOR_SIZE * 2; // two 256-byte sectors = 512 bytes
+    // Clear everything from block 2 onward, preserving both boot blocks (0 and 1).
+    // Mirrors Util_ProDOS_FormatFileSystem which clears from byte 0x400 = ROOT_OFFSET.
+    let boot_size = ROOT_BLOCK as usize * BLOCK_SIZE; // = 0x400 = 1024
     for b in &mut image[boot_size..disk_size] { *b = 0; }
 
     const N_ROOT_DIR_BLOCKS: usize = 4;

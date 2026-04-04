@@ -27,3 +27,5 @@ desktop.ini
 .env
 .env.local
 
+/AppleWin/
+.AppleWin/

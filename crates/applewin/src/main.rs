@@ -2830,13 +2830,12 @@ mod gui {
                                     .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
                                 self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext_str);
                             }
-                        } else if self.disk2.as_deref() == Some(path.as_path()) {
-                            if let Ok(data) = std::fs::read(&path) {
+                        } else if self.disk2.as_deref() == Some(path.as_path())
+                            && let Ok(data) = std::fs::read(&path) {
                                 let ext_str = path.extension()
                                     .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
                                 self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext_str);
                             }
-                        }
                     }
                     Err(e) => eprintln!("Failed to format disk: {e}"),
                 }

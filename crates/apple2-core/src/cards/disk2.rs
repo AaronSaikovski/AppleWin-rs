@@ -275,8 +275,11 @@ impl Disk2Card {
 
         let drive = &mut self.drives[self.active_drive];
         let cur   = drive.phase;
-        let fwd   = if self.phases & (1 << ((cur + 1) & 3)) != 0 {  1i32 } else { 0 };
-        let bwd   = if self.phases & (1 << ((cur + 3) & 3)) != 0 { -1i32 } else { 0 };
+        // Mirror C++ ControlStepperDeferred: additive, same as C++.
+        // When both adjacent phases are active, +1 and -1 cancel → no movement.
+        // This matches the Apple II hardware and avoids overshooting during RWTS seeks.
+        let fwd = if self.phases & (1 << ((cur + 1) & 3)) != 0 {  1i32 } else { 0 };
+        let bwd = if self.phases & (1 << ((cur + 3) & 3)) != 0 { -1i32 } else { 0 };
         drive.phase = (cur + fwd + bwd).clamp(0, 79);
         drive.update_track_idx();
     }
