@@ -106,11 +106,28 @@ impl Emulator {
     }
 
     /// Hard reset (power cycle).
+    ///
+    /// `mem_init_pattern` selects the RAM fill pattern (0–7).
+    /// The C++ AppleWin calls these "Memory Initialization Patterns" (MIP).
+    pub fn reset_with_pattern(&mut self, power_cycle: bool, mem_init_pattern: u8) {
+        if power_cycle {
+            init_memory_pattern(&mut self.bus.main_ram, mem_init_pattern);
+            init_memory_pattern(&mut self.bus.aux_ram, mem_init_pattern);
+        }
+        self.finish_reset(power_cycle);
+    }
+
+    /// Hard reset (power cycle) — pattern 0 (all zeros).
     pub fn reset(&mut self, power_cycle: bool) {
         if power_cycle {
             self.bus.main_ram.fill(0);
             self.bus.aux_ram.fill(0);
         }
+        self.finish_reset(power_cycle);
+    }
+
+    /// Common reset tail shared by `reset()` and `reset_with_pattern()`.
+    fn finish_reset(&mut self, power_cycle: bool) {
         // Reset memory soft-switches so the ROM is mapped at $D000-$FFFF before
         // reading the reset vector.  On real hardware the ROM is always accessible
         // during the vector fetch regardless of language-card state.
@@ -120,6 +137,62 @@ impl Emulator {
         self.bus.speaker_toggles.clear();
         self.cpu.reset(&mut self.bus);
         self.mode = AppMode::Running;
+    }
+}
+
+// ── Memory Initialization Patterns ───────────────────────────────────────────
+
+/// Fill 64K RAM with one of the 8 Memory Initialization Patterns (MIP)
+/// from the C++ AppleWin `Memory.cpp`.  Pattern 0 is the default (all zeros).
+///
+/// These patterns emulate the semi-random power-on state of real DRAM chips.
+/// Some copy-protected software depends on specific patterns to detect
+/// "cold boot" vs "warm boot" or to seed random numbers.
+pub fn init_memory_pattern(ram: &mut [u8; 65536], pattern: u8) {
+    match pattern {
+        0 => ram.fill(0x00),
+        1 => ram.fill(0xFF),
+        2 => {
+            // Alternating 00/FF per page (even pages = 0x00, odd pages = 0xFF).
+            for page in 0..256 {
+                let fill = if page & 1 == 0 { 0x00 } else { 0xFF };
+                let start = page * 256;
+                ram[start..start + 256].fill(fill);
+            }
+        }
+        3 => {
+            // Alternating FF/00 per page (even pages = 0xFF, odd pages = 0x00).
+            for page in 0..256 {
+                let fill = if page & 1 == 0 { 0xFF } else { 0x00 };
+                let start = page * 256;
+                ram[start..start + 256].fill(fill);
+            }
+        }
+        4 => {
+            // Alternating 00/FF per 128-byte half-page.
+            for i in 0..65536 {
+                ram[i] = if (i >> 7) & 1 == 0 { 0x00 } else { 0xFF };
+            }
+        }
+        5 => {
+            // Alternating FF/00 per 128-byte half-page.
+            for i in 0..65536 {
+                ram[i] = if (i >> 7) & 1 == 0 { 0xFF } else { 0x00 };
+            }
+        }
+        6 => {
+            // Pseudo-random pattern seeded from address (matches MIP6 in AppleWin).
+            for i in 0..65536 {
+                ram[i] = ((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            }
+        }
+        7 => {
+            // Inverse pseudo-random.
+            for i in 0..65536 {
+                ram[i] = !((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            }
+        }
+        _ => ram.fill(0x00),
     }
 }
 

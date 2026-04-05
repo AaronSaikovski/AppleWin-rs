@@ -8,4 +8,5 @@
 
 pub mod framebuffer;
 pub mod ntsc;
+pub mod rgb;
 pub mod video_mode;

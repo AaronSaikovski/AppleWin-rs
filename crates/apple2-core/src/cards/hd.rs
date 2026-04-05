@@ -80,9 +80,12 @@ impl Drive {
 
 // ── HdCard ────────────────────────────────────────────────────────────────────
 
+/// Maximum number of SmartPort drives supported.
+pub const MAX_HD_DRIVES: usize = 8;
+
 pub struct HdCard {
     slot:    usize,
-    drives:  [Option<Drive>; 2],
+    drives:  [Option<Drive>; MAX_HD_DRIVES],
 
     // I/O registers
     command: u8,
@@ -107,7 +110,7 @@ impl HdCard {
     pub fn new(slot: usize) -> Self {
         Self {
             slot,
-            drives: [None, None],
+            drives: [None, None, None, None, None, None, None, None],
             command: 0,
             unit: 0,
             buf_lo: 0,
@@ -123,13 +126,19 @@ impl HdCard {
     }
 
     pub fn load_image(&mut self, drive: usize, data: Vec<u8>) {
-        if drive < 2 {
+        if drive < MAX_HD_DRIVES {
+            // Decompress if gzip/zip, then unwrap 2IMG header if present.
+            let (data, _ext) = crate::disk_util::decompress(&data, "hdv");
+            let data = match crate::disk_util::unwrap_2img(&data) {
+                Some((inner, _fmt)) => inner,
+                None => data,
+            };
             self.drives[drive] = Some(Drive { image: data });
         }
     }
 
     pub fn eject(&mut self, drive: usize) {
-        if drive < 2 {
+        if drive < MAX_HD_DRIVES {
             self.drives[drive] = None;
         }
     }
@@ -139,8 +148,11 @@ impl HdCard {
     }
 
     fn drive_idx(&self) -> usize {
-        // Unit byte: b7 = drive (0 or 1)
-        if self.unit & 0x80 != 0 { 1 } else { 0 }
+        // SmartPort unit byte: bits 7:4 encode the drive number.
+        // For backwards compatibility, bit 7 alone selects drive 0 or 1.
+        // Extended: bits 6:4 give drives 0–7 when bit 7 is combined.
+        let idx = ((self.unit >> 4) & 0x0F) as usize;
+        idx.min(MAX_HD_DRIVES - 1)
     }
 
     fn buf_addr(&self) -> u16 {

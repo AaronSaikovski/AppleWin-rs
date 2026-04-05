@@ -12,3 +12,4 @@
 pub mod speaker;
 pub mod ay8910;
 pub mod ssi263;
+pub mod wav_writer;

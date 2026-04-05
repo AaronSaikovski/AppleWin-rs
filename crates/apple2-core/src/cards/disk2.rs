@@ -15,6 +15,8 @@ const SECTOR_SIZE:          usize = 256;
 const DSK_SIZE:             usize = NUM_TRACKS * SECTORS_PER_TRACK * SECTOR_SIZE; // 143 360
 const NIB_TRACK_SIZE:       usize = 6656;
 const NIB_SIZE:             usize = NUM_TRACKS * NIB_TRACK_SIZE;                  // 232 960
+const NB2_TRACK_SIZE:       usize = 6384;
+const NB2_SIZE:             usize = NUM_TRACKS * NB2_TRACK_SIZE;                  // 223 440
 
 // 13-sector (DOS 3.2) constants
 const SECTORS_PER_TRACK_13: usize = 13;
@@ -219,11 +221,15 @@ impl Disk2Card {
             }
             "po" => (DiskFormat::ProDos, nibblize_image(data, &PRODOS_SKEW), false),
             "nib" => (DiskFormat::Nib, load_nib(data), false),
+            "nb2" => (DiskFormat::Nib, load_nib_sized(data, NB2_TRACK_SIZE), false),
             "d13" => (DiskFormat::Dos32, nibblize_image_13(data), false),
             _ => {
-                // Auto-detect 13-sector by file size (116 480 bytes)
+                // Auto-detect by file size.
                 if data.len() == D13_SIZE {
                     (DiskFormat::Dos32, nibblize_image_13(data), false)
+                } else if data.len() == NB2_SIZE {
+                    // NB2: 6384-byte nibble tracks.
+                    (DiskFormat::Nib, load_nib_sized(data, NB2_TRACK_SIZE), false)
                 } else {
                     (DiskFormat::Dos33, nibblize_image(data, &DOS33_SKEW), false)
                 }
@@ -371,11 +377,17 @@ impl Card for Disk2Card {
 // ── GCR Nibblization ──────────────────────────────────────────────────────────
 
 fn load_nib(data: &[u8]) -> Option<Vec<Vec<u8>>> {
-    if data.len() < NIB_SIZE { return None; }
+    load_nib_sized(data, NIB_TRACK_SIZE)
+}
+
+/// Load a nibble image with a configurable track size (6656 for .nib, 6384 for .nb2).
+fn load_nib_sized(data: &[u8], track_size: usize) -> Option<Vec<Vec<u8>>> {
+    let expected = NUM_TRACKS * track_size;
+    if data.len() < expected { return None; }
     let mut tracks = Vec::with_capacity(NUM_TRACKS);
     for t in 0..NUM_TRACKS {
-        let start = t * NIB_TRACK_SIZE;
-        tracks.push(data[start..start + NIB_TRACK_SIZE].to_vec());
+        let start = t * track_size;
+        tracks.push(data[start..start + track_size].to_vec());
     }
     Some(tracks)
 }

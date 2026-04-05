@@ -9,8 +9,55 @@ static APPLE2E_ROM: &[u8] = include_bytes!("../roms/apple2e_enhanced.rom");
 #[cfg(feature = "gui")]
 mod config;
 
-fn make_emulator(machine: Apple2Model, cpu: CpuType) -> Emulator {
-    let rom = APPLE2E_ROM.to_vec();
+fn make_emulator(machine: Apple2Model, cpu: CpuType,
+                  custom_rom: &Option<String>,
+                  custom_f8_rom: &Option<String>) -> Emulator {
+    let mut rom = if let Some(path) = custom_rom {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 16384 || data.len() == 12288 => {
+                // Pad 12K ROMs to 16K (add 4K of 0xFF at the start).
+                if data.len() == 12288 {
+                    let mut padded = vec![0xFF; 4096];
+                    padded.extend_from_slice(&data);
+                    padded
+                } else {
+                    data
+                }
+            }
+            Ok(data) => {
+                eprintln!("Custom ROM wrong size ({} bytes, expected 12K or 16K), using default",
+                          data.len());
+                APPLE2E_ROM.to_vec()
+            }
+            Err(e) => {
+                eprintln!("Failed to load custom ROM '{}': {}, using default", path, e);
+                APPLE2E_ROM.to_vec()
+            }
+        }
+    } else {
+        APPLE2E_ROM.to_vec()
+    };
+
+    // Patch $F800–$FFFF with a custom F8 ROM (2K) if configured.
+    if let Some(path) = custom_f8_rom {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 2048 => {
+                // F8 ROM goes at offset 0x3800 in the 16K ROM image
+                // ($F800 - $C000 = $3800 = 14336).
+                let offset = 0x3800;
+                if rom.len() >= offset + 2048 {
+                    rom[offset..offset + 2048].copy_from_slice(&data);
+                }
+            }
+            Ok(data) => {
+                eprintln!("Custom F8 ROM wrong size ({} bytes, expected 2K)", data.len());
+            }
+            Err(e) => {
+                eprintln!("Failed to load custom F8 ROM '{}': {}", path, e);
+            }
+        }
+    }
+
     Emulator::new(rom, machine, cpu)
     // Card insertion is handled by apply_slot_cards() in the gui module.
 }
@@ -21,7 +68,8 @@ fn main() {
     #[cfg(feature = "gui")]
     {
         let cfg = config::Config::load();
-        let emu = make_emulator(cfg.machine_type, cfg.cpu_type);
+        let emu = make_emulator(cfg.machine_type, cfg.cpu_type,
+                                &cfg.custom_rom_path, &cfg.custom_f8_rom_path);
         // Mode stays as AppMode::Logo — the GUI will show the logo screen
         // and switch to Running on the first key press.
         println!(
@@ -33,7 +81,7 @@ fn main() {
 
     #[cfg(not(feature = "gui"))]
     {
-        let mut emu = make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02);
+        let mut emu = make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02, &None, &None);
         emu.mode = apple2_core::emulator::AppMode::Running;
         headless::run(&mut emu);
     }
@@ -355,6 +403,12 @@ mod gui {
         debugger_bp_input: String,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
+        // RGB video renderer (used when VideoType::ColorRGB is selected)
+        rgb_renderer:      apple2_video::rgb::RgbRenderer,
+        // WAV audio recording
+        wav_recorder:      Option<apple2_audio::wav_writer::WavRecorder>,
+        // Status message (shown briefly after save/load state)
+        status_msg:        Option<String>,
     }
 
     impl EmulatorApp {
@@ -364,9 +418,13 @@ mod gui {
 
             // Build CharRom from the embedded Apple IIe video ROM
             let font_data = build_font_from_rom(VIDEO_ROM);
-            let mut renderer = NtscRenderer::new(CharRom::new(font_data), config.scanlines);
+            let char_rom = CharRom::new(font_data);
+            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines);
             renderer.mono_tint            = config.mono_tint();
             renderer.color_vertical_blend = config.color_vertical_blend;
+            let rgb_renderer = apple2_video::rgb::RgbRenderer::new(
+                char_rom, config.scanlines,
+            );
 
             // Initialise audio output (best-effort; silent if unavailable)
             let (audio_buf, _audio_stream, audio_sample_rate) =
@@ -454,12 +512,15 @@ mod gui {
                 debugger:          apple2_debugger::DebuggerState::new(),
                 debugger_bp_input: String::new(),
                 slot_options_open: [false; 8],
+                rgb_renderer,
+                wav_recorder:      None,
+                status_msg:        None,
             }
         }
 
         /// Reset the emulator and clear all audio state so no stale signal leaks through.
         fn reset(&mut self, power_cycle: bool) {
-            self.emu.reset(power_cycle);
+            self.emu.reset_with_pattern(power_cycle, self.config.memory_init_pattern);
             // Silence the speaker: discard any pending toggles and reset the DC
             // filter so we don't output a fading ±0.5 hiss after the reset.
             self.speaker_state    = false;
@@ -493,13 +554,23 @@ mod gui {
 
         /// Render the Apple II screen into `self.pixel_buf` via `NtscRenderer`.
         fn render_apple2(&mut self) {
-            self.renderer.render(
-                &self.emu.bus.main_ram,
-                &self.emu.bus.aux_ram,
-                self.emu.bus.mode,
-                self.frame_no,
-                &mut self.fb,
-            );
+            if self.config.video_type == crate::config::VideoType::ColorRGB {
+                self.rgb_renderer.render(
+                    &self.emu.bus.main_ram,
+                    &self.emu.bus.aux_ram,
+                    self.emu.bus.mode,
+                    self.frame_no,
+                    &mut self.fb,
+                );
+            } else {
+                self.renderer.render(
+                    &self.emu.bus.main_ram,
+                    &self.emu.bus.aux_ram,
+                    self.emu.bus.mode,
+                    self.frame_no,
+                    &mut self.fb,
+                );
+            }
             // The framebuffer stores pixels as ABGR u32; on little-endian the
             // in-memory byte order is [R, G, B, A] = RGBA, which egui consumes
             // directly — no channel-swap loop needed.
@@ -697,6 +768,20 @@ mod gui {
                 }
             }
 
+            // ── WAV audio recording — tap the ring buffer ────────────────────
+            // Feed the latest samples to the WAV recorder if active.
+            if let Some(ref mut rec) = self.wav_recorder {
+                if let Some(buf) = &self.audio_buf {
+                    let locked = buf.lock().unwrap();
+                    // Record the last N samples (approximate frame's worth).
+                    let n = (self.audio_sample_rate as usize / 60).min(locked.len());
+                    let start = locked.len().saturating_sub(n);
+                    let chunk: Vec<f32> = locked.range(start..).copied().collect();
+                    drop(locked);
+                    let _ = rec.write_samples(&chunk);
+                }
+            }
+
             // ── Collect input events ──────────────────────────────────────────
             let mut key_queue:      Vec<u8>         = Vec::new();
             let mut do_reset:       bool             = false;
@@ -706,6 +791,12 @@ mod gui {
             let mut paste_text:     Option<String>   = None;
             let mut take_screenshot: bool            = false;
             let mut video_shortcut: Option<VideoType> = None;
+            let mut do_save_state:  bool             = false;
+            let mut do_load_state:  bool             = false;
+            let mut speed_shortcut: Option<u32>      = None;
+            let mut toggle_wav_rec: bool             = false;
+            let mut alt_left:       bool             = false;
+            let mut alt_right:      bool             = false;
 
             // Only process Event::Key with repeat:false — this fires exactly once
             // per physical key-down, never for OS auto-repeat.  Event::Text is
@@ -726,15 +817,27 @@ mod gui {
                             Key::F10 if self.config.scrolllock_toggle => {
                                 self.debugger.active = !self.debugger.active;
                             }
+                            // Save / load state
+                            Key::F11 if shift      => do_load_state = true,
+                            Key::F11 if !shift     => do_save_state = true,
+                            // WAV audio recording toggle
+                            Key::F9                => toggle_wav_rec = true,
+                            // Screenshot (F12)
                             Key::F12               => take_screenshot = true,
                             Key::Escape if ctrl    => do_quit = true,
                             Key::F2 if ctrl        => do_reset = true,
-                            // Ctrl+1..5 — video mode shortcuts
-                            Key::Num1 if ctrl => { video_shortcut = Some(VideoType::ColorTV); }
-                            Key::Num2 if ctrl => { video_shortcut = Some(VideoType::ColorIdealized); }
-                            Key::Num3 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
+                            // Speed control: Ctrl+0 = full speed, Ctrl+1 = normal, Ctrl+3 = 3x
+                            Key::Num0 if ctrl => { speed_shortcut = Some(40); }
+                            Key::Num1 if ctrl => { speed_shortcut = Some(10); }
+                            Key::Num3 if ctrl => { speed_shortcut = Some(30); }
+                            // Ctrl+4..5 — video mode shortcuts
                             Key::Num4 if ctrl => { video_shortcut = Some(VideoType::MonoWhite); }
                             Key::Num5 if ctrl => { video_shortcut = Some(VideoType::MonoGreen); }
+                            // Ctrl+6..9 — video mode shortcuts
+                            Key::Num6 if ctrl => { video_shortcut = Some(VideoType::ColorTV); }
+                            Key::Num7 if ctrl => { video_shortcut = Some(VideoType::ColorIdealized); }
+                            Key::Num8 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
+                            Key::Num9 if ctrl => { video_shortcut = Some(VideoType::ColorMonitorNtsc); }
                             Key::Enter             => { any_key = true; key_queue.push(0x0D); }
                             Key::Backspace         => { any_key = true; key_queue.push(0x7F); }
                             Key::Escape            => { any_key = true; key_queue.push(0x1B); }
@@ -838,6 +941,71 @@ mod gui {
             if take_screenshot && !in_logo_mode {
                 self.render_apple2(); // ensure latest frame
                 save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+            }
+
+            // Save / load emulator state (F11 / Shift+F11).
+            if do_save_state && !in_logo_mode {
+                if let Some(path) = self.config.save_state_path() {
+                    let snap = self.emu.take_snapshot();
+                    if let Ok(yaml) = serde_yaml::to_string(&snap) {
+                        let _ = std::fs::write(&path, yaml);
+                        self.status_msg = Some(format!("State saved to {}", path.display()));
+                    }
+                }
+            }
+            if do_load_state && !in_logo_mode {
+                if let Some(path) = self.config.save_state_path()
+                    && let Ok(yaml) = std::fs::read_to_string(&path)
+                    && let Ok(snap) = serde_yaml::from_str(&yaml)
+                {
+                    self.emu.restore_snapshot(&snap);
+                    self.status_msg = Some("State loaded".to_string());
+                }
+            }
+
+            // Speed control shortcuts (Ctrl+0/1/3).
+            if let Some(spd) = speed_shortcut {
+                self.config.emulation_speed = spd;
+                self.config.save();
+            }
+
+            // WAV audio recording toggle (F9).
+            if toggle_wav_rec {
+                if let Some(rec) = self.wav_recorder.take() {
+                    let _ = rec.stop();
+                    self.status_msg = Some("Audio recording stopped".to_string());
+                } else {
+                    let dir = crate::config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let path = dir.join(format!("applewin_audio_{ts}.wav"));
+                    match apple2_audio::wav_writer::WavRecorder::start(&path, self.audio_sample_rate) {
+                        Ok(rec) => {
+                            self.wav_recorder = Some(rec);
+                            self.status_msg = Some(format!("Recording audio to {}", path.display()));
+                        }
+                        Err(e) => {
+                            self.status_msg = Some(format!("WAV recording failed: {e}"));
+                        }
+                    }
+                }
+            }
+
+            // Alt key as Open / Closed Apple (button 0 / button 1).
+            if self.config.alt_key_as_apple {
+                ctx.input(|i| {
+                    alt_left  = i.key_down(Key::ArrowLeft) && i.modifiers.alt
+                                || i.modifiers.alt;
+                    alt_right = false; // egui doesn't distinguish left/right Alt
+                });
+                // Map Alt to Open Apple (button 0 bit)
+                if alt_left {
+                    self.emu.bus.gamepad.buttons |= 0x01;
+                } else {
+                    self.emu.bus.gamepad.buttons &= !0x01;
+                }
             }
 
             if do_hard_reset { self.reset(true); }
@@ -1677,6 +1845,8 @@ mod gui {
                         self.emu = super::make_emulator(
                             self.config.machine_type,
                             self.config.cpu_type,
+                            &self.config.custom_rom_path,
+                            &self.config.custom_f8_rom_path,
                         );
                         apply_slot_cards(&mut self.emu, &self.config);
                         self.disk_slot = self.config.disk2_slot();
@@ -2138,6 +2308,9 @@ mod gui {
         use apple2_core::cards::vidhd::VidHdCard;
         use apple2_core::cards::z80card::Z80Card;
         use apple2_core::cards::uthernet::UthernCard;
+        use apple2_core::cards::languagecard::LanguageCardCard;
+        use apple2_core::cards::megaaudio::MegaAudioCard;
+        use apple2_core::cards::sdmusic::SdMusicCard;
         // Clear all slots first
         for slot in 0..apple2_core::card::NUM_SLOTS {
             emu.bus.cards.remove(slot);
@@ -2213,6 +2386,15 @@ mod gui {
                 }
                 CardType::Uthernet2 => {
                     emu.bus.cards.insert(Box::new(UthernCard::new_uthernet2(slot)));
+                }
+                CardType::LanguageCard => {
+                    emu.bus.cards.insert(Box::new(LanguageCardCard::new(slot)));
+                }
+                CardType::MegaAudio => {
+                    emu.bus.cards.insert(Box::new(MegaAudioCard::new(slot)));
+                }
+                CardType::SdMusic => {
+                    emu.bus.cards.insert(Box::new(SdMusicCard::new(slot)));
                 }
                 _ => {} // not yet implemented — leave slot empty
             }
@@ -2405,7 +2587,7 @@ mod gui {
             .set_title(title)
             .add_filter(
                 "Apple II Disk Images",
-                &["dsk", "do", "po", "nib", "woz", "hdv", "2mg", "img"],
+                &["dsk", "do", "po", "nib", "nb2", "woz", "hdv", "2mg", "2img", "img", "gz", "zip"],
             )
             .add_filter("All Files", &["*"]);
         if let Some(dir) = start_dir {
@@ -2417,7 +2599,7 @@ mod gui {
     fn open_hdd_dialog(title: &str, start_dir: Option<&str>) -> Option<PathBuf> {
         let mut d = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("Apple II HDD Images", &["hdv", "po", "2mg", "img"])
+            .add_filter("Apple II HDD Images", &["hdv", "po", "2mg", "2img", "img", "gz", "zip"])
             .add_filter("All Files", &["*"]);
         if let Some(dir) = start_dir {
             d = d.set_directory(dir);

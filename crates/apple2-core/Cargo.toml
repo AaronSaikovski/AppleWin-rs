@@ -11,4 +11,6 @@ thiserror   = { workspace = true }
 tracing     = { workspace = true }
 serde       = { workspace = true }
 serde_bytes = { workspace = true }
+flate2      = { workspace = true }
+zip         = { workspace = true }
 apple2-audio = { path = "../apple2-audio" }
