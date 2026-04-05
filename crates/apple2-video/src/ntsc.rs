@@ -219,6 +219,7 @@ impl NtscTables {
 /// Apple II character ROM (7×8 bit font, 128 characters × 8 rows × 7 pixels).
 /// Actual ROM bytes should be loaded from firmware at startup.
 /// This stub uses a blank ROM.
+#[derive(Clone)]
 pub struct CharRom {
     data: Vec<u8>,
 }
@@ -236,6 +237,24 @@ impl CharRom {
             self.data[idx..idx + 8].try_into().unwrap_or([0u8; 8])
         } else {
             [0u8; 8]
+        }
+    }
+
+    /// Decode an Apple II text byte into a glyph and inversion flag.
+    ///
+    /// Returns `(glyph_rows, invert)` where `invert` means the glyph should be
+    /// rendered with swapped foreground/background colours.
+    pub fn decode_char(&self, ch: u8, flash_on: bool) -> ([u8; 8], bool) {
+        if ch < 0x40 {
+            // INVERSE
+            (self.glyph(ch & 0x3F), true)
+        } else if ch < 0x80 {
+            // FLASH
+            let invert = !flash_on;
+            (self.glyph(ch & 0x3F), invert)
+        } else {
+            // NORMAL
+            (self.glyph(ch & 0x7F), false)
         }
     }
 }
@@ -756,12 +775,24 @@ fn text_addr(row: usize, col: usize) -> usize {
     (row % 8) * 0x80 + (row / 8) * 0x28 + col
 }
 
+/// Public helper: compute the offset within a 0x400-byte text page for a given row (0–23).
+/// Used by the RGB renderer.
+pub fn text_row_offset(row: usize) -> usize {
+    (row % 8) * 0x80 + (row / 8) * 0x28
+}
+
+/// Public helper: compute the HGR scanline offset within a 0x2000-byte HGR page.
+/// `y` is the scanline (0–191).
+pub fn hgr_row_offset(y: usize) -> usize {
+    (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x80 + (y >> 6) * 0x28
+}
+
 /// Blend each pair of adjacent rendered rows (colour vertical blend).
 ///
 /// Each Apple II scanline k renders to 2 identical FB rows (2k and 2k+1).
 /// Approximates AppleWin's updateFramebufferTVSingleScanline inbetween-row
 /// calculation: odd row = 50% of (row above + row below).
-fn apply_color_vertical_blend(fb: &mut Framebuffer) {
+pub fn apply_color_vertical_blend(fb: &mut Framebuffer) {
     use crate::framebuffer::{FB_WIDTH, FB_HEIGHT};
     let pixels = fb.pixels_mut();
     let mut y = 1usize;
@@ -802,7 +833,7 @@ fn apply_mono_tint(fb: &mut Framebuffer, tr: u8, tg: u8, tb: u8) {
 ///
 /// Dims every odd framebuffer row to 50% brightness, matching a CRT's dark
 /// gaps between phosphor lines.
-fn apply_scanlines(fb: &mut Framebuffer) {
+pub fn apply_scanlines(fb: &mut Framebuffer) {
     use crate::framebuffer::{FB_WIDTH, FB_HEIGHT};
     let pixels = fb.pixels_mut();
     for y in (1..FB_HEIGHT).step_by(2) {

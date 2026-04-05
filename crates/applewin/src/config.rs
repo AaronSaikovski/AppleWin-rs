@@ -156,6 +156,19 @@ pub struct Config {
     pub mouse_crosshair: bool,
     /// Restrict mouse pointer to the emulator window (REGVALUE_MOUSE_RESTRICT_TO_WINDOW).
     pub mouse_restrict_to_window: bool,
+    /// Map the Alt key to Open Apple (button 0).  Default true — matches
+    /// the C++ AppleWin behaviour.
+    pub alt_key_as_apple: bool,
+    /// Memory Initialization Pattern (0–7).  Selects how RAM is filled on
+    /// power-on reset.  Some copy-protected software requires specific patterns.
+    pub memory_init_pattern: u8,
+
+    // ── Custom ROM loading ───────────────────────────────────────────────────
+    /// Path to a custom system ROM file (12K or 16K).  When set, this ROM is
+    /// loaded instead of the embedded Apple IIe Enhanced ROM.
+    pub custom_rom_path: Option<String>,
+    /// Path to a custom F8 ROM (2K) that replaces only the $F800–$FFFF region.
+    pub custom_f8_rom_path: Option<String>,
 
     // ── UI behaviour ──────────────────────────────────────────────────────────
     /// Show a confirmation dialog before any reset (matches AppleWin's
@@ -253,6 +266,10 @@ impl Default for Config {
             joystick_swap_buttons:    false,
             mouse_crosshair:          false,
             mouse_restrict_to_window: false,
+            alt_key_as_apple:         true,
+            memory_init_pattern:      0,
+            custom_rom_path:          None,
+            custom_f8_rom_path:       None,
             confirm_reboot:       true,
             show_disk_status:     true,   // always show disk LEDs by default
             scrolllock_toggle:    false,
@@ -384,7 +401,7 @@ fn config_path() -> Option<PathBuf> {
     Some(config_dir()?.join("config.toml"))
 }
 
-fn config_dir() -> Option<PathBuf> {
+pub fn config_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var_os("APPDATA")?;
@@ -503,6 +520,9 @@ pub const IMPLEMENTED_CARDS: &[CardType] = &[
     CardType::Z80,
     CardType::Uthernet,
     CardType::Uthernet2,
+    CardType::LanguageCard,
+    CardType::MegaAudio,
+    CardType::SdMusic,
 ];
 
 /// All video types in menu order (matches AppleWin property sheet).

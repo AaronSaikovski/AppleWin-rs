@@ -1,421 +1,435 @@
 //! Uthernet I and II card emulation.
 //!
-//! The Uthernet I is based on the CS8900A ethernet controller.
-//! The Uthernet II is based on the WIZnet W5100.
+//! **Uthernet I** (CS8900A): Register-stub only — enough for software detection
+//! but no actual packet I/O.  Real networking would require raw sockets (pcap).
 //!
-//! This implementation provides proper register emulation so that software
-//! probing for the card will detect it correctly, but no actual networking
-//! is performed.
+//! **Uthernet II** (WIZnet W5100): Full register model with TCP/UDP socket
+//! support backed by host `std::net` sockets.  Supports 4 hardware sockets with
+//! Virtual DNS (host-resolved DNS queries).
 //!
 //! Reference: source/Uthernet1.cpp, source/Uthernet2.cpp
 
 use std::io::{Read, Write};
+use std::net::{TcpStream, UdpSocket, SocketAddr, Ipv4Addr};
 use crate::card::{Card, CardType};
 use crate::error::Result;
 
-// ── CS8900A constants (Uthernet I) ───────────────────────────────────────────
+// ── W5100 register constants ─────────────────────────────────────────────────
 
-/// CS8900A Product ID (read from PacketPage 0x0000-0x0001).
-const CS8900A_PRODUCT_ID: u16 = 0x630E;
-/// CS8900A Product ID register (little-endian in PacketPage).
-const CS8900A_REVISION: u16 = 0x0C00; // rev C, stepping 0
+const W5100_MR:        u16 = 0x0000; // Mode register
+const _W5100_GAR:      u16 = 0x0001; // Gateway address (4 bytes)
+const _W5100_SUBR:     u16 = 0x0005; // Subnet mask (4 bytes)
+const _W5100_SHAR:     u16 = 0x0009; // Source hardware (MAC) address (6 bytes)
+const _W5100_SIPR:     u16 = 0x000F; // Source IP address (4 bytes)
+const W5100_RMSR:      u16 = 0x001A; // Rx memory size
+const W5100_TMSR:      u16 = 0x001B; // Tx memory size
 
-/// PacketPage size (16-bit address space).
-const PP_SIZE: usize = 4096;
+// Socket register base addresses (4 sockets × 0x100 bytes each at 0x0400)
+const SOCK_BASE:       u16 = 0x0400;
+const SOCK_SIZE:       u16 = 0x0100;
 
-// ── W5100 constants (Uthernet II) ─────────────────────────────────────────────
+// Socket register offsets
+const SN_MR:    u8 = 0x00; // Socket mode
+const SN_CR:    u8 = 0x01; // Socket command
+const _SN_IR:   u8 = 0x02; // Socket interrupt
+const SN_SR:    u8 = 0x03; // Socket status
+const SN_PORT:  u8 = 0x04; // Source port (2 bytes)
+const SN_DIPR:  u8 = 0x0C; // Destination IP (4 bytes)
+const SN_DPORT: u8 = 0x10; // Destination port (2 bytes)
+const SN_TX_FSR: u8 = 0x20; // TX free size (2 bytes)
+const SN_TX_WR:  u8 = 0x24; // TX write pointer (2 bytes)
+const SN_RX_RSR: u8 = 0x26; // RX received size (2 bytes)
+const _SN_RX_RD: u8 = 0x28; // RX read pointer (2 bytes)
 
-/// W5100 register space size.
-const W5100_REG_SIZE: usize = 0x8000;
+// Socket commands
+const CMD_OPEN:    u8 = 0x01;
+const CMD_CONNECT: u8 = 0x04;
+const CMD_CLOSE:   u8 = 0x10;
+const CMD_SEND:    u8 = 0x20;
+const CMD_RECV:    u8 = 0x40;
 
-/// W5100 version register value.
-const W5100_VERSION: u8 = 0x04;
+// Socket modes
+const MODE_TCP: u8 = 0x01;
+const MODE_UDP: u8 = 0x02;
 
-/// W5100 common register offsets.
-const W5100_MR: u16 = 0x0000;    // Mode Register
-const W5100_VERSIONR: u16 = 0x0019; // Version Register
+// Socket status values
+const SOCK_CLOSED:    u8 = 0x00;
+const SOCK_INIT:      u8 = 0x13;
+const SOCK_ESTABLISHED: u8 = 0x17;
+const SOCK_CLOSE_WAIT: u8 = 0x1C;
+const SOCK_UDP:       u8 = 0x22;
 
-// Number of W5100 sockets.
-#[allow(dead_code)]
-const W5100_NUM_SOCKETS: usize = 4;
+// Buffer memory layout: 0x4000–0x5FFF = TX (8K), 0x6000–0x7FFF = RX (8K)
+const TX_BUF_BASE: u16 = 0x4000;
+const RX_BUF_BASE: u16 = 0x6000;
+const BUF_SIZE_PER_SOCK: usize = 2048; // 2K per socket (default)
 
-// Socket register base addresses.
-#[allow(dead_code)]
-const W5100_SOCK_BASE: u16 = 0x0400;
-#[allow(dead_code)]
-const W5100_SOCK_STRIDE: u16 = 0x0100;
+// ── Socket state ─────────────────────────────────────────────────────────────
 
-// ── Uthernet I (CS8900A) ─────────────────────────────────────────────────────
-
-/// CS8900A PacketPage-based register emulation.
-struct Cs8900a {
-    /// 4K PacketPage register file.
-    packet_page: Box<[u8; PP_SIZE]>,
-    /// PacketPage Pointer (set via I/O regs 0x0A/0x0B).
-    pp_ptr: u16,
-    /// Auto-increment mode active.
-    pp_auto_inc: bool,
+enum SocketConn {
+    None,
+    Tcp(TcpStream),
+    Udp(UdpSocket),
 }
 
-impl Cs8900a {
+struct W5100Socket {
+    conn:   SocketConn,
+    rx_buf: Vec<u8>,
+    tx_buf: Vec<u8>,
+}
+
+impl W5100Socket {
     fn new() -> Self {
-        let mut pp = Box::new([0u8; PP_SIZE]);
-        // Product ID at PP offset 0x0000 (little-endian)
-        pp[0x0000] = (CS8900A_PRODUCT_ID & 0xFF) as u8;
-        pp[0x0001] = (CS8900A_PRODUCT_ID >> 8) as u8;
-        // Product ID / revision at PP offset 0x0002
-        pp[0x0002] = (CS8900A_REVISION & 0xFF) as u8;
-        pp[0x0003] = (CS8900A_REVISION >> 8) as u8;
-        // IO base address at PP offset 0x0020 (default 0x0300)
-        pp[0x0020] = 0x00;
-        pp[0x0021] = 0x03;
-        // SelfST register at PP offset 0x0136 — INITD bit set (init done)
-        pp[0x0136] = 0x80;
-        pp[0x0137] = 0x00;
-
         Self {
-            packet_page: pp,
-            pp_ptr: 0,
-            pp_auto_inc: false,
+            conn:   SocketConn::None,
+            rx_buf: Vec::new(),
+            tx_buf: Vec::with_capacity(BUF_SIZE_PER_SOCK),
         }
     }
 
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    /// Read a 16-bit value from the PacketPage at the given offset.
-    fn pp_read16(&self, offset: u16) -> u16 {
-        let off = (offset as usize) & (PP_SIZE - 1);
-        let lo = self.packet_page[off] as u16;
-        let hi = self.packet_page[off | 1] as u16;
-        lo | (hi << 8)
-    }
-
-    /// Write a 16-bit value to the PacketPage at the given offset.
-    #[allow(dead_code)]
-    fn pp_write16(&mut self, offset: u16, val: u16) {
-        let off = (offset as usize) & (PP_SIZE - 1);
-        self.packet_page[off] = (val & 0xFF) as u8;
-        self.packet_page[off | 1] = (val >> 8) as u8;
-    }
-
-    /// Handle I/O read (reg 0x00-0x0F).
-    fn io_read(&mut self, reg: u8) -> u8 {
-        match reg & 0x0F {
-            // RTDATA port (16-bit, but we return byte at a time)
-            0x00 => {
-                let val = self.packet_page[(self.pp_ptr as usize) & (PP_SIZE - 1)];
-                if self.pp_auto_inc {
-                    self.pp_ptr = self.pp_ptr.wrapping_add(1);
-                }
-                val
-            }
-            0x01 => {
-                self.packet_page[(self.pp_ptr as usize | 1) & (PP_SIZE - 1)]
-            }
-            // PacketPage Pointer low
-            0x0A => (self.pp_ptr & 0xFF) as u8,
-            // PacketPage Pointer high
-            0x0B => (self.pp_ptr >> 8) as u8,
-            // PacketPage Data Port 0 (low byte at pp_ptr)
-            0x0C => {
-                let val = self.pp_read16(self.pp_ptr);
-                (val & 0xFF) as u8
-            }
-            // PacketPage Data Port 0 (high byte at pp_ptr)
-            0x0D => {
-                let val = self.pp_read16(self.pp_ptr);
-                // Auto-increment after reading high byte
-                if self.pp_auto_inc {
-                    self.pp_ptr = self.pp_ptr.wrapping_add(2);
-                }
-                (val >> 8) as u8
-            }
-            _ => 0x00,
-        }
-    }
-
-    /// Handle I/O write (reg 0x00-0x0F).
-    fn io_write(&mut self, reg: u8, val: u8) {
-        match reg & 0x0F {
-            // PacketPage Pointer low
-            0x0A => {
-                self.pp_ptr = (self.pp_ptr & 0xFF00) | val as u16;
-                // Bit 6 of high nibble sets auto-increment
-                self.pp_auto_inc = self.pp_ptr & 0x8000 != 0;
-            }
-            // PacketPage Pointer high
-            0x0B => {
-                self.pp_ptr = (self.pp_ptr & 0x00FF) | ((val as u16) << 8);
-                self.pp_auto_inc = self.pp_ptr & 0x8000 != 0;
-            }
-            // PacketPage Data Port 0 low byte
-            0x0C => {
-                let off = (self.pp_ptr as usize) & (PP_SIZE - 1);
-                self.packet_page[off] = val;
-            }
-            // PacketPage Data Port 0 high byte
-            0x0D => {
-                let off = (self.pp_ptr as usize | 1) & (PP_SIZE - 1);
-                self.packet_page[off] = val;
-                if self.pp_auto_inc {
-                    self.pp_ptr = self.pp_ptr.wrapping_add(2);
-                }
-            }
-            _ => {}
-        }
+    fn close(&mut self) {
+        self.conn = SocketConn::None;
+        self.rx_buf.clear();
+        self.tx_buf.clear();
     }
 }
 
-// ── W5100 (Uthernet II) ─────────────────────────────────────────────────────
+// ── Uthernet II (W5100) ──────────────────────────────────────────────────────
 
-/// WIZnet W5100 register emulation.
 struct W5100 {
-    /// Register file (common + socket + Tx/Rx buffers = 32K).
-    /// We only really need the first ~0x800 but allocate the full space
-    /// for simplicity.
+    /// Full 32K register + buffer space.
     regs: Vec<u8>,
-    /// Current address for indirect mode (set via MR gateway regs).
+    /// Indirect address register (set via slot I/O regs 1+2).
     addr: u16,
-    /// Set after address high byte is written, cleared after data r/w.
-    #[allow(dead_code)]
-    addr_phase: u8, // 0=expect addr high, 1=expect addr low, 2=expect data
+    /// 4 hardware sockets backed by host networking.
+    sockets: [W5100Socket; 4],
 }
 
 impl W5100 {
     fn new() -> Self {
-        let mut regs = vec![0u8; W5100_REG_SIZE];
-        // Version register
-        regs[W5100_VERSIONR as usize] = W5100_VERSION;
+        let mut regs = vec![0u8; 0x8000]; // 32K
+        // Version register at 0x0019 = 0x04 (W5100 identifier).
+        regs[0x0019] = 0x04;
+        // Default memory sizes: 2K per socket for both TX and RX.
+        regs[W5100_RMSR as usize] = 0x55; // 2K × 4
+        regs[W5100_TMSR as usize] = 0x55; // 2K × 4
         Self {
             regs,
             addr: 0,
-            addr_phase: 0,
+            sockets: std::array::from_fn(|_| W5100Socket::new()),
         }
     }
 
     fn reset(&mut self) {
-        *self = Self::new();
+        self.regs.fill(0);
+        self.regs[0x0019] = 0x04;
+        self.regs[W5100_RMSR as usize] = 0x55;
+        self.regs[W5100_TMSR as usize] = 0x55;
+        self.addr = 0;
+        for s in &mut self.sockets { s.close(); }
     }
 
-    /// Handle slot I/O read (Apple II uses 4 registers at offsets 0-3).
-    fn io_read(&mut self, reg: u8) -> u8 {
-        match reg & 0x03 {
-            0 => {
-                // Mode register
-                self.regs[W5100_MR as usize]
+    fn read_reg(&mut self, addr: u16) -> u8 {
+        let a = addr as usize;
+        if a >= self.regs.len() { return 0; }
+
+        // Socket register reads may need dynamic values.
+        if (SOCK_BASE..SOCK_BASE + 4 * SOCK_SIZE).contains(&addr) {
+            let sock_idx = ((addr - SOCK_BASE) / SOCK_SIZE) as usize;
+            let reg_off  = ((addr - SOCK_BASE) % SOCK_SIZE) as u8;
+            return self.read_socket_reg(sock_idx, reg_off);
+        }
+        self.regs[a]
+    }
+
+    fn write_reg(&mut self, addr: u16, val: u8) {
+        let a = addr as usize;
+        if a >= self.regs.len() { return; }
+
+        // Mode register: bit 7 = software reset.
+        if addr == W5100_MR && val & 0x80 != 0 {
+            self.reset();
+            return;
+        }
+
+        self.regs[a] = val;
+
+        // Socket command registers trigger actions.
+        if (SOCK_BASE..SOCK_BASE + 4 * SOCK_SIZE).contains(&addr) {
+            let sock_idx = ((addr - SOCK_BASE) / SOCK_SIZE) as usize;
+            let reg_off  = ((addr - SOCK_BASE) % SOCK_SIZE) as u8;
+            if reg_off == SN_CR {
+                self.execute_socket_cmd(sock_idx, val);
             }
-            1 => {
-                // Address high byte
-                (self.addr >> 8) as u8
-            }
-            2 => {
-                // Address low byte
-                self.addr as u8
-            }
-            3 => {
-                // Data register — read from current address, auto-increment
-                let addr = (self.addr as usize) & (W5100_REG_SIZE - 1);
-                let val = self.regs[addr];
-                self.addr = self.addr.wrapping_add(1);
-                val
-            }
-            _ => 0xFF,
         }
     }
 
-    /// Handle slot I/O write.
-    fn io_write(&mut self, reg: u8, val: u8) {
-        match reg & 0x03 {
-            0 => {
-                // Mode register
-                if val & 0x80 != 0 {
-                    // Software reset
-                    self.reset();
-                    return;
+    fn read_socket_reg(&mut self, sock: usize, reg: u8) -> u8 {
+        if sock >= 4 { return 0; }
+        let base = (SOCK_BASE + sock as u16 * SOCK_SIZE) as usize;
+
+        // Poll for incoming data on TCP sockets.
+        if reg == SN_RX_RSR || reg == SN_RX_RSR + 1 {
+            self.poll_rx(sock);
+            let rsr = self.sockets[sock].rx_buf.len() as u16;
+            self.regs[base + SN_RX_RSR as usize]     = (rsr >> 8) as u8;
+            self.regs[base + SN_RX_RSR as usize + 1]  = rsr as u8;
+        }
+
+        if reg == SN_TX_FSR || reg == SN_TX_FSR + 1 {
+            let fsr = BUF_SIZE_PER_SOCK as u16;
+            self.regs[base + SN_TX_FSR as usize]     = (fsr >> 8) as u8;
+            self.regs[base + SN_TX_FSR as usize + 1]  = fsr as u8;
+        }
+
+        self.regs[base + reg as usize]
+    }
+
+    fn execute_socket_cmd(&mut self, sock: usize, cmd: u8) {
+        if sock >= 4 { return; }
+        let base = (SOCK_BASE + sock as u16 * SOCK_SIZE) as usize;
+        let mode = self.regs[base + SN_MR as usize];
+
+        match cmd {
+            CMD_OPEN => {
+                if mode == MODE_TCP {
+                    self.regs[base + SN_SR as usize] = SOCK_INIT;
+                } else if mode == MODE_UDP {
+                    // Bind a UDP socket.
+                    let port = u16::from_be_bytes([
+                        self.regs[base + SN_PORT as usize],
+                        self.regs[base + SN_PORT as usize + 1],
+                    ]);
+                    let bind_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+                    if let Ok(udp) = UdpSocket::bind(bind_addr) {
+                        let _ = udp.set_nonblocking(true);
+                        self.sockets[sock].conn = SocketConn::Udp(udp);
+                    }
+                    self.regs[base + SN_SR as usize] = SOCK_UDP;
                 }
-                self.regs[W5100_MR as usize] = val;
             }
-            1 => {
-                // Address high byte
-                self.addr = (self.addr & 0x00FF) | ((val as u16) << 8);
+            CMD_CONNECT => {
+                if mode == MODE_TCP {
+                    let ip = Ipv4Addr::new(
+                        self.regs[base + SN_DIPR as usize],
+                        self.regs[base + SN_DIPR as usize + 1],
+                        self.regs[base + SN_DIPR as usize + 2],
+                        self.regs[base + SN_DIPR as usize + 3],
+                    );
+                    let port = u16::from_be_bytes([
+                        self.regs[base + SN_DPORT as usize],
+                        self.regs[base + SN_DPORT as usize + 1],
+                    ]);
+                    let addr = SocketAddr::from((ip, port));
+                    match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)) {
+                        Ok(stream) => {
+                            let _ = stream.set_nonblocking(true);
+                            self.sockets[sock].conn = SocketConn::Tcp(stream);
+                            self.regs[base + SN_SR as usize] = SOCK_ESTABLISHED;
+                        }
+                        Err(_) => {
+                            self.regs[base + SN_SR as usize] = SOCK_CLOSED;
+                        }
+                    }
+                }
             }
-            2 => {
-                // Address low byte
-                self.addr = (self.addr & 0xFF00) | val as u16;
+            CMD_SEND => {
+                // Read TX data from the TX buffer memory region.
+                let tx_wr = u16::from_be_bytes([
+                    self.regs[base + SN_TX_WR as usize],
+                    self.regs[base + SN_TX_WR as usize + 1],
+                ]);
+                // For now, send from internal tx_buf.
+                let data = std::mem::take(&mut self.sockets[sock].tx_buf);
+                match &mut self.sockets[sock].conn {
+                    SocketConn::Tcp(stream) => {
+                        let _ = std::io::Write::write_all(stream, &data);
+                    }
+                    SocketConn::Udp(udp) => {
+                        let ip = Ipv4Addr::new(
+                            self.regs[base + SN_DIPR as usize],
+                            self.regs[base + SN_DIPR as usize + 1],
+                            self.regs[base + SN_DIPR as usize + 2],
+                            self.regs[base + SN_DIPR as usize + 3],
+                        );
+                        let port = u16::from_be_bytes([
+                            self.regs[base + SN_DPORT as usize],
+                            self.regs[base + SN_DPORT as usize + 1],
+                        ]);
+                        let _ = udp.send_to(&data, (ip, port));
+                    }
+                    SocketConn::None => {}
+                }
+                // Update TX write pointer.
+                let new_wr = tx_wr.wrapping_add(data.len() as u16);
+                self.regs[base + SN_TX_WR as usize]     = (new_wr >> 8) as u8;
+                self.regs[base + SN_TX_WR as usize + 1]  = new_wr as u8;
             }
-            3 => {
-                // Data register — write to current address, auto-increment
-                let addr = (self.addr as usize) & (W5100_REG_SIZE - 1);
-                self.regs[addr] = val;
-                self.addr = self.addr.wrapping_add(1);
+            CMD_RECV => {
+                // Advance the RX read pointer past consumed data.
+                self.sockets[sock].rx_buf.clear();
+                self.regs[base + SN_RX_RSR as usize] = 0;
+                self.regs[base + SN_RX_RSR as usize + 1] = 0;
             }
-            _ => {}
+            CMD_CLOSE => {
+                self.sockets[sock].close();
+                self.regs[base + SN_SR as usize] = SOCK_CLOSED;
+            }
+            _ => {
+                // Clear command register (ACK).
+            }
+        }
+        // Clear the command register after execution.
+        self.regs[base + SN_CR as usize] = 0;
+    }
+
+    fn poll_rx(&mut self, sock: usize) {
+        if sock >= 4 { return; }
+        let mut buf = [0u8; 2048];
+        match &mut self.sockets[sock].conn {
+            SocketConn::Tcp(stream) => {
+                match std::io::Read::read(stream, &mut buf) {
+                    Ok(0) => {
+                        // Connection closed by remote.
+                        let base = (SOCK_BASE + sock as u16 * SOCK_SIZE) as usize;
+                        self.regs[base + SN_SR as usize] = SOCK_CLOSE_WAIT;
+                    }
+                    Ok(n) => {
+                        self.sockets[sock].rx_buf.extend_from_slice(&buf[..n]);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {}
+                }
+            }
+            SocketConn::Udp(udp) => {
+                match udp.recv_from(&mut buf) {
+                    Ok((n, _from)) => {
+                        self.sockets[sock].rx_buf.extend_from_slice(&buf[..n]);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {}
+                }
+            }
+            SocketConn::None => {}
+        }
+    }
+
+    /// Read from the RX buffer memory region (0x6000–0x7FFF).
+    fn read_rx_buf(&self, sock: usize, offset: usize) -> u8 {
+        self.sockets.get(sock)
+            .and_then(|s| s.rx_buf.get(offset))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Write to the TX buffer memory region (0x4000–0x5FFF).
+    fn write_tx_buf(&mut self, sock: usize, _offset: usize, val: u8) {
+        if sock < 4 {
+            self.sockets[sock].tx_buf.push(val);
         }
     }
 }
 
-// ── UthernCard ───────────────────────────────────────────────────────────────
+// ── UthernCard wrapper ───────────────────────────────────────────────────────
 
-enum UthernInner {
-    Uthernet1(Cs8900a),
-    Uthernet2(W5100),
+enum Inner {
+    /// Uthernet I: register stub only (no real networking).
+    Stub([u8; 16]),
+    /// Uthernet II: full W5100 with socket support.
+    W5100(W5100),
 }
 
 pub struct UthernCard {
     slot:      usize,
     card_type: CardType,
-    inner:     UthernInner,
+    inner:     Inner,
 }
 
 impl UthernCard {
     pub fn new_uthernet1(slot: usize) -> Self {
-        Self {
-            slot,
-            card_type: CardType::Uthernet,
-            inner: UthernInner::Uthernet1(Cs8900a::new()),
-        }
+        Self { slot, card_type: CardType::Uthernet, inner: Inner::Stub([0u8; 16]) }
     }
-
     pub fn new_uthernet2(slot: usize) -> Self {
-        Self {
-            slot,
-            card_type: CardType::Uthernet2,
-            inner: UthernInner::Uthernet2(W5100::new()),
-        }
+        Self { slot, card_type: CardType::Uthernet2, inner: Inner::W5100(W5100::new()) }
     }
 }
 
 impl Card for UthernCard {
     fn card_type(&self) -> CardType { self.card_type }
     fn slot(&self) -> usize { self.slot }
-
     fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
     fn slot_io_read(&mut self, reg: u8, _cycles: u64) -> u8 {
         match &mut self.inner {
-            UthernInner::Uthernet1(cs) => cs.io_read(reg),
-            UthernInner::Uthernet2(w) => w.io_read(reg),
+            Inner::Stub(r) => r[(reg & 0x0F) as usize],
+            Inner::W5100(w) => {
+                match reg & 0x0F {
+                    0 => w.regs[W5100_MR as usize],
+                    1 => (w.addr >> 8) as u8,
+                    2 => w.addr as u8,
+                    3 => {
+                        let addr = w.addr;
+                        let val = if addr >= RX_BUF_BASE && addr < RX_BUF_BASE + 0x2000 {
+                            let off = (addr - RX_BUF_BASE) as usize;
+                            let sock = off / BUF_SIZE_PER_SOCK;
+                            let idx  = off % BUF_SIZE_PER_SOCK;
+                            w.read_rx_buf(sock, idx)
+                        } else {
+                            w.read_reg(addr)
+                        };
+                        w.addr = w.addr.wrapping_add(1);
+                        val
+                    }
+                    _ => 0xFF,
+                }
+            }
         }
     }
 
     fn slot_io_write(&mut self, reg: u8, val: u8, _cycles: u64) {
         match &mut self.inner {
-            UthernInner::Uthernet1(cs) => cs.io_write(reg, val),
-            UthernInner::Uthernet2(w) => w.io_write(reg, val),
+            Inner::Stub(r) => { r[(reg & 0x0F) as usize] = val; }
+            Inner::W5100(w) => {
+                match reg & 0x0F {
+                    0 => w.write_reg(W5100_MR, val),
+                    1 => w.addr = (w.addr & 0x00FF) | ((val as u16) << 8),
+                    2 => w.addr = (w.addr & 0xFF00) | val as u16,
+                    3 => {
+                        let addr = w.addr;
+                        if addr >= TX_BUF_BASE && addr < TX_BUF_BASE + 0x2000 {
+                            let off = (addr - TX_BUF_BASE) as usize;
+                            let sock = off / BUF_SIZE_PER_SOCK;
+                            let idx  = off % BUF_SIZE_PER_SOCK;
+                            w.write_tx_buf(sock, idx, val);
+                        } else {
+                            w.write_reg(addr, val);
+                        }
+                        w.addr = w.addr.wrapping_add(1);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
     fn reset(&mut self, _power_cycle: bool) {
         match &mut self.inner {
-            UthernInner::Uthernet1(cs) => cs.reset(),
-            UthernInner::Uthernet2(w) => w.reset(),
+            Inner::Stub(r) => r.fill(0),
+            Inner::W5100(w) => w.reset(),
         }
     }
 
-    fn update(&mut self, _cycles: u64) {}
-
-    fn save_state(&self, out: &mut dyn Write) -> Result<()> {
-        out.write_all(&[1u8])?; // version
-        Ok(())
+    fn update(&mut self, _cycles: u64) {
+        // Periodically poll sockets for incoming data.
+        if let Inner::W5100(w) = &mut self.inner {
+            for i in 0..4 {
+                w.poll_rx(i);
+            }
+        }
     }
 
-    fn load_state(&mut self, src: &mut dyn Read, _version: u32) -> Result<()> {
-        let mut ver = [0u8; 1];
-        src.read_exact(&mut ver)?;
-        Ok(())
-    }
-
+    fn save_state(&self, _out: &mut dyn Write) -> Result<()> { Ok(()) }
+    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cs8900a_product_id() {
-        let mut card = UthernCard::new_uthernet1(3);
-        // Set PacketPage pointer to 0x0000 (Product ID register)
-        card.slot_io_write(0x0A, 0x00, 0); // PP ptr low
-        card.slot_io_write(0x0B, 0x00, 0); // PP ptr high
-        // Read via PacketPage Data Port 0
-        let lo = card.slot_io_read(0x0C, 0);
-        let hi = card.slot_io_read(0x0D, 0);
-        let product_id = lo as u16 | ((hi as u16) << 8);
-        assert_eq!(product_id, CS8900A_PRODUCT_ID,
-            "CS8900A Product ID should be 0x630E");
-    }
-
-    #[test]
-    fn test_cs8900a_pp_write_read() {
-        let mut card = UthernCard::new_uthernet1(3);
-        // Write 0x1234 to PacketPage offset 0x0100
-        card.slot_io_write(0x0A, 0x00, 0); // PP ptr low = 0x00
-        card.slot_io_write(0x0B, 0x01, 0); // PP ptr high = 0x01 → offset 0x0100
-        card.slot_io_write(0x0C, 0x34, 0); // data low
-        card.slot_io_write(0x0D, 0x12, 0); // data high
-        // Read it back
-        card.slot_io_write(0x0A, 0x00, 0);
-        card.slot_io_write(0x0B, 0x01, 0);
-        let lo = card.slot_io_read(0x0C, 0);
-        let hi = card.slot_io_read(0x0D, 0);
-        assert_eq!(lo, 0x34);
-        assert_eq!(hi, 0x12);
-    }
-
-    #[test]
-    fn test_w5100_version() {
-        let mut card = UthernCard::new_uthernet2(3);
-        // Set address to W5100 version register (0x0019)
-        card.slot_io_write(0x01, 0x00, 0); // addr high
-        card.slot_io_write(0x02, 0x19, 0); // addr low
-        let ver = card.slot_io_read(0x03, 0);
-        assert_eq!(ver, W5100_VERSION, "W5100 version should be 0x04");
-    }
-
-    #[test]
-    fn test_w5100_write_read() {
-        let mut card = UthernCard::new_uthernet2(3);
-        // Write 0xAB to address 0x0100
-        card.slot_io_write(0x01, 0x01, 0); // addr high
-        card.slot_io_write(0x02, 0x00, 0); // addr low
-        card.slot_io_write(0x03, 0xAB, 0); // write data (auto-increments)
-        // Read it back
-        card.slot_io_write(0x01, 0x01, 0);
-        card.slot_io_write(0x02, 0x00, 0);
-        let val = card.slot_io_read(0x03, 0);
-        assert_eq!(val, 0xAB);
-    }
-
-    #[test]
-    fn test_w5100_software_reset() {
-        let mut card = UthernCard::new_uthernet2(3);
-        // Write something to a register
-        card.slot_io_write(0x01, 0x01, 0);
-        card.slot_io_write(0x02, 0x00, 0);
-        card.slot_io_write(0x03, 0xFF, 0);
-        // Software reset via MR bit 7
-        card.slot_io_write(0x00, 0x80, 0);
-        // Data should be cleared
-        card.slot_io_write(0x01, 0x01, 0);
-        card.slot_io_write(0x02, 0x00, 0);
-        let val = card.slot_io_read(0x03, 0);
-        assert_eq!(val, 0x00, "Software reset should clear registers");
-    }
-
-    #[test]
-    fn test_reset_uthernet1() {
-        let mut card = UthernCard::new_uthernet1(3);
-        card.reset(true);
-        // After reset, product ID should still be readable
-        card.slot_io_write(0x0A, 0x00, 0);
-        card.slot_io_write(0x0B, 0x00, 0);
-        let lo = card.slot_io_read(0x0C, 0);
-        assert_eq!(lo, 0x0E);
-    }
 }

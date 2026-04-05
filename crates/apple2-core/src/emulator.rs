@@ -29,8 +29,6 @@ pub struct Emulator {
     pub bus:   Bus,
     pub model: Apple2Model,
     pub mode:  AppMode,
-    /// Consecutive iterations where PC didn't change (tight-loop detection).
-    stuck_count: u64,
 }
 
 impl Emulator {
@@ -45,7 +43,6 @@ impl Emulator {
             bus,
             model,
             mode: AppMode::Logo,
-            stuck_count: 0,
         }
     }
 
@@ -53,7 +50,7 @@ impl Emulator {
     /// Returns the number of cycles actually executed (may overshoot by up to
     /// the longest instruction — 7 cycles for BRK).
     pub fn execute(&mut self, cycles: u64) -> u64 {
-        // Jammed / stopped CPUs just advance time.
+        // Jammed CPUs just advance time — check once, outside the hot loop.
         if self.cpu.jammed {
             self.cpu.cycles += cycles;
             return cycles;
@@ -62,28 +59,6 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
         while self.cpu.cycles < target {
-            // 65C02 WAI: CPU is halted waiting for an interrupt.
-            // Advance time and poll cards until an IRQ or NMI arrives.
-            if self.cpu.waiting {
-                // Advance to the next card-update boundary or target, whichever comes first.
-                let advance_to = target.min(next_update);
-                self.cpu.cycles = advance_to;
-                if self.cpu.cycles >= next_update {
-                    self.bus.cards.update_all(self.cpu.cycles);
-                    next_update += 17_030;
-                }
-                // Check if an interrupt has arrived to wake us up.
-                self.bus.irq_line = self.bus.cards.any_irq_active();
-                if self.bus.irq_line || self.cpu.nmi_pending != 0 {
-                    self.cpu.waiting = false;
-                    // Let the normal interrupt handling below take effect.
-                    if self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
-                        self.cpu.irq_pending |= 0x01;
-                    }
-                }
-                continue;
-            }
-
             // Snapshot the IRQ line *before* executing the instruction so we can
             // detect an edge (IRQ asserted during this opcode's last cycle).
             let irq_before = self.bus.irq_line;
@@ -101,30 +76,12 @@ impl Emulator {
                     // IRQ is asserted; will decide after the instruction whether to defer.
                     self.cpu.irq_pending |= 0x01;
                 }
-            } else if !self.bus.irq_line {
-                // IRQ line deasserted — clear pending and defer.
-                // When I flag is set but irq_line is still asserted, keep
-                // irq_pending so it fires when I is cleared (CLI/RTI).
+            } else {
                 self.cpu.irq_pending &= !0x01;
                 self.cpu.irq_defer = false;
             }
 
-            let pc_before = self.cpu.pc;
             dispatch::step(&mut self.cpu, &mut self.bus);
-
-            // Tight-loop detection: if PC returns to the same address repeatedly,
-            // log it once so we can diagnose where ProDOS (or any program) is stuck.
-            if self.cpu.pc == pc_before {
-                self.stuck_count += 1;
-                if self.stuck_count == 500_000 {
-                    tracing::warn!(
-                        "CPU appears stuck at PC=${:04X} A=${:02X} X=${:02X} Y=${:02X} SP=${:02X} P=${:02X}",
-                        self.cpu.pc, self.cpu.a, self.cpu.x, self.cpu.y, self.cpu.sp, self.cpu.flags.bits()
-                    );
-                }
-            } else {
-                self.stuck_count = 0;
-            }
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
             // the last cycle of this opcode → defer by one opcode (if I flag is clear).
@@ -148,64 +105,29 @@ impl Emulator {
         dispatch::step(&mut self.cpu, &mut self.bus)
     }
 
-    /// Execute instructions with a per-instruction callback.
+    /// Hard reset (power cycle).
     ///
-    /// The callback receives the PC before each instruction executes.
-    /// Return `true` from the callback to continue, `false` to stop.
-    /// Returns the total cycles executed.
-    pub fn execute_with_callback<F>(&mut self, cycles: u64, mut callback: F) -> u64
-    where
-        F: FnMut(u16) -> bool,
-    {
-        if self.cpu.jammed {
-            self.cpu.cycles += cycles;
-            return cycles;
+    /// `mem_init_pattern` selects the RAM fill pattern (0–7).
+    /// The C++ AppleWin calls these "Memory Initialization Patterns" (MIP).
+    pub fn reset_with_pattern(&mut self, power_cycle: bool, mem_init_pattern: u8) {
+        if power_cycle {
+            init_memory_pattern(&mut self.bus.main_ram, mem_init_pattern);
+            init_memory_pattern(&mut self.bus.aux_ram, mem_init_pattern);
         }
-        let start = self.cpu.cycles;
-        let target = start + cycles;
-        let mut next_update = start + 17_030;
-        while self.cpu.cycles < target {
-            // Call the callback with current PC; stop if it returns false
-            if !callback(self.cpu.pc) {
-                break;
-            }
-
-            let irq_before = self.bus.irq_line;
-
-            if self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
-                if self.cpu.irq_defer {
-                    self.cpu.irq_defer = false;
-                    self.cpu.irq_pending |= 0x01;
-                } else {
-                    self.cpu.irq_pending |= 0x01;
-                }
-            } else {
-                self.cpu.irq_pending &= !0x01;
-                self.cpu.irq_defer = false;
-            }
-
-            dispatch::step(&mut self.cpu, &mut self.bus);
-
-            if !irq_before && self.bus.irq_line
-                && !self.cpu.flags.contains(super::cpu::Flags::I)
-            {
-                self.cpu.irq_pending &= !0x01;
-                self.cpu.irq_defer = true;
-            }
-            if self.cpu.cycles >= next_update {
-                self.bus.cards.update_all(self.cpu.cycles);
-                next_update += 17_030;
-            }
-        }
-        self.cpu.cycles - start
+        self.finish_reset(power_cycle);
     }
 
-    /// Hard reset (power cycle).
+    /// Hard reset (power cycle) — pattern 0 (all zeros).
     pub fn reset(&mut self, power_cycle: bool) {
         if power_cycle {
             self.bus.main_ram.fill(0);
             self.bus.aux_ram.fill(0);
         }
+        self.finish_reset(power_cycle);
+    }
+
+    /// Common reset tail shared by `reset()` and `reset_with_pattern()`.
+    fn finish_reset(&mut self, power_cycle: bool) {
         // Reset memory soft-switches so the ROM is mapped at $D000-$FFFF before
         // reading the reset vector.  On real hardware the ROM is always accessible
         // during the vector fetch regardless of language-card state.
@@ -218,81 +140,59 @@ impl Emulator {
     }
 }
 
-/// Result of a debugger-aware execution call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecuteResult {
-    /// Ran to completion (consumed all requested cycles).
-    Completed(u64),
-    /// Stopped early because the breakpoint callback returned true.
-    Break(u64),
-}
+// ── Memory Initialization Patterns ───────────────────────────────────────────
 
-impl Emulator {
-    /// Execute cycles, calling `should_break(pc)` after each instruction.
-    ///
-    /// `should_break` receives the PC of the instruction that just executed
-    /// and returns `true` to halt.  The memory-access trace slice from
-    /// `bus.mem_trace` (if enabled) is available for the caller to inspect
-    /// *after* the method returns — it is drained per-instruction inside
-    /// this loop only when the break fires.
-    pub fn execute_debugged<F>(&mut self, cycles: u64, mut should_break: F) -> ExecuteResult
-    where
-        F: FnMut(u16, &[(u16, u8, bool)]) -> bool,
-    {
-        if self.cpu.jammed {
-            self.cpu.cycles += cycles;
-            return ExecuteResult::Completed(cycles);
-        }
-        let start = self.cpu.cycles;
-        let target = start + cycles;
-        let mut next_update = start + 17_030;
-
-        while self.cpu.cycles < target {
-            let irq_before = self.bus.irq_line;
-            let pc_before = self.cpu.pc;
-
-            if self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
-                if self.cpu.irq_defer {
-                    self.cpu.irq_defer = false;
-                    self.cpu.irq_pending |= 0x01;
-                } else {
-                    self.cpu.irq_pending |= 0x01;
-                }
-            } else {
-                self.cpu.irq_pending &= !0x01;
-                self.cpu.irq_defer = false;
-            }
-
-            // Clear the per-instruction memory trace before executing.
-            if self.bus.mem_trace_enabled {
-                self.bus.mem_trace.clear();
-            }
-
-            dispatch::step(&mut self.cpu, &mut self.bus);
-
-            if !irq_before && self.bus.irq_line
-                && !self.cpu.flags.contains(super::cpu::Flags::I)
-            {
-                self.cpu.irq_pending &= !0x01;
-                self.cpu.irq_defer = true;
-            }
-
-            if self.cpu.cycles >= next_update {
-                self.bus.cards.update_all(self.cpu.cycles);
-                next_update += 17_030;
-            }
-
-            // Check breakpoint after step.
-            let mem_accesses = if self.bus.mem_trace_enabled {
-                self.bus.mem_trace.as_slice()
-            } else {
-                &[]
-            };
-            if should_break(pc_before, mem_accesses) {
-                return ExecuteResult::Break(self.cpu.cycles - start);
+/// Fill 64K RAM with one of the 8 Memory Initialization Patterns (MIP)
+/// from the C++ AppleWin `Memory.cpp`.  Pattern 0 is the default (all zeros).
+///
+/// These patterns emulate the semi-random power-on state of real DRAM chips.
+/// Some copy-protected software depends on specific patterns to detect
+/// "cold boot" vs "warm boot" or to seed random numbers.
+pub fn init_memory_pattern(ram: &mut [u8; 65536], pattern: u8) {
+    match pattern {
+        0 => ram.fill(0x00),
+        1 => ram.fill(0xFF),
+        2 => {
+            // Alternating 00/FF per page (even pages = 0x00, odd pages = 0xFF).
+            for page in 0..256 {
+                let fill = if page & 1 == 0 { 0x00 } else { 0xFF };
+                let start = page * 256;
+                ram[start..start + 256].fill(fill);
             }
         }
-        ExecuteResult::Completed(self.cpu.cycles - start)
+        3 => {
+            // Alternating FF/00 per page (even pages = 0xFF, odd pages = 0x00).
+            for page in 0..256 {
+                let fill = if page & 1 == 0 { 0xFF } else { 0x00 };
+                let start = page * 256;
+                ram[start..start + 256].fill(fill);
+            }
+        }
+        4 => {
+            // Alternating 00/FF per 128-byte half-page.
+            for i in 0..65536 {
+                ram[i] = if (i >> 7) & 1 == 0 { 0x00 } else { 0xFF };
+            }
+        }
+        5 => {
+            // Alternating FF/00 per 128-byte half-page.
+            for i in 0..65536 {
+                ram[i] = if (i >> 7) & 1 == 0 { 0xFF } else { 0x00 };
+            }
+        }
+        6 => {
+            // Pseudo-random pattern seeded from address (matches MIP6 in AppleWin).
+            for i in 0..65536 {
+                ram[i] = ((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            }
+        }
+        7 => {
+            // Inverse pseudo-random.
+            for i in 0..65536 {
+                ram[i] = !((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            }
+        }
+        _ => ram.fill(0x00),
     }
 }
 

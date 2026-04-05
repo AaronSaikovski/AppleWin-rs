@@ -5,6 +5,7 @@ pub mod bus;
 pub mod card;
 pub mod cards;
 pub mod cpu;
+pub mod disk_util;
 pub mod emulator;
 pub mod error;
 pub mod model;

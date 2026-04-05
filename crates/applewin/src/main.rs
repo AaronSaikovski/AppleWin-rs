@@ -9,8 +9,55 @@ static APPLE2E_ROM: &[u8] = include_bytes!("../roms/apple2e_enhanced.rom");
 #[cfg(feature = "gui")]
 mod config;
 
-fn make_emulator(machine: Apple2Model, cpu: CpuType) -> Emulator {
-    let rom = APPLE2E_ROM.to_vec();
+fn make_emulator(machine: Apple2Model, cpu: CpuType,
+                  custom_rom: &Option<String>,
+                  custom_f8_rom: &Option<String>) -> Emulator {
+    let mut rom = if let Some(path) = custom_rom {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 16384 || data.len() == 12288 => {
+                // Pad 12K ROMs to 16K (add 4K of 0xFF at the start).
+                if data.len() == 12288 {
+                    let mut padded = vec![0xFF; 4096];
+                    padded.extend_from_slice(&data);
+                    padded
+                } else {
+                    data
+                }
+            }
+            Ok(data) => {
+                eprintln!("Custom ROM wrong size ({} bytes, expected 12K or 16K), using default",
+                          data.len());
+                APPLE2E_ROM.to_vec()
+            }
+            Err(e) => {
+                eprintln!("Failed to load custom ROM '{}': {}, using default", path, e);
+                APPLE2E_ROM.to_vec()
+            }
+        }
+    } else {
+        APPLE2E_ROM.to_vec()
+    };
+
+    // Patch $F800–$FFFF with a custom F8 ROM (2K) if configured.
+    if let Some(path) = custom_f8_rom {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 2048 => {
+                // F8 ROM goes at offset 0x3800 in the 16K ROM image
+                // ($F800 - $C000 = $3800 = 14336).
+                let offset = 0x3800;
+                if rom.len() >= offset + 2048 {
+                    rom[offset..offset + 2048].copy_from_slice(&data);
+                }
+            }
+            Ok(data) => {
+                eprintln!("Custom F8 ROM wrong size ({} bytes, expected 2K)", data.len());
+            }
+            Err(e) => {
+                eprintln!("Failed to load custom F8 ROM '{}': {}", path, e);
+            }
+        }
+    }
+
     Emulator::new(rom, machine, cpu)
     // Card insertion is handled by apply_slot_cards() in the gui module.
 }
@@ -21,7 +68,8 @@ fn main() {
     #[cfg(feature = "gui")]
     {
         let cfg = config::Config::load();
-        let emu = make_emulator(cfg.machine_type, cfg.cpu_type);
+        let emu = make_emulator(cfg.machine_type, cfg.cpu_type,
+                                &cfg.custom_rom_path, &cfg.custom_f8_rom_path);
         // Mode stays as AppMode::Logo — the GUI will show the logo screen
         // and switch to Running on the first key press.
         println!(
@@ -33,7 +81,7 @@ fn main() {
 
     #[cfg(not(feature = "gui"))]
     {
-        let mut emu = make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02);
+        let mut emu = make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02, &None, &None);
         emu.mode = apple2_core::emulator::AppMode::Running;
         headless::run(&mut emu);
     }
@@ -352,17 +400,15 @@ mod gui {
         // Debugger
         show_debugger:     bool,
         debugger:          apple2_debugger::DebuggerState,
-        debugger_cmd_input: String,
-        #[allow(dead_code)]
         debugger_bp_input: String,
-        #[allow(dead_code)]
-        debugger_mem_input: String,
-        #[allow(dead_code)]
-        debugger_reg_input: String,
-        #[allow(dead_code)]
-        debugger_tab:      usize,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
+        // RGB video renderer (used when VideoType::ColorRGB is selected)
+        rgb_renderer:      apple2_video::rgb::RgbRenderer,
+        // WAV audio recording
+        wav_recorder:      Option<apple2_audio::wav_writer::WavRecorder>,
+        // Status message (shown briefly after save/load state)
+        status_msg:        Option<String>,
     }
 
     impl EmulatorApp {
@@ -372,9 +418,13 @@ mod gui {
 
             // Build CharRom from the embedded Apple IIe video ROM
             let font_data = build_font_from_rom(VIDEO_ROM);
-            let mut renderer = NtscRenderer::new(CharRom::new(font_data), config.scanlines);
+            let char_rom = CharRom::new(font_data);
+            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines);
             renderer.mono_tint            = config.mono_tint();
             renderer.color_vertical_blend = config.color_vertical_blend;
+            let rgb_renderer = apple2_video::rgb::RgbRenderer::new(
+                char_rom, config.scanlines,
+            );
 
             // Initialise audio output (best-effort; silent if unavailable)
             let (audio_buf, _audio_stream, audio_sample_rate) =
@@ -459,23 +509,18 @@ mod gui {
                 last_frame_time:   std::time::Instant::now(),
                 paste_buf:         std::collections::VecDeque::new(),
                 show_debugger:     false,
-                debugger:          {
-                    let mut d = apple2_debugger::DebuggerState::new();
-                    d.load_apple2_symbols();
-                    d
-                },
-                debugger_cmd_input: String::new(),
+                debugger:          apple2_debugger::DebuggerState::new(),
                 debugger_bp_input: String::new(),
-                debugger_mem_input: String::new(),
-                debugger_reg_input: String::new(),
-                debugger_tab:      0,
                 slot_options_open: [false; 8],
+                rgb_renderer,
+                wav_recorder:      None,
+                status_msg:        None,
             }
         }
 
         /// Reset the emulator and clear all audio state so no stale signal leaks through.
         fn reset(&mut self, power_cycle: bool) {
-            self.emu.reset(power_cycle);
+            self.emu.reset_with_pattern(power_cycle, self.config.memory_init_pattern);
             // Silence the speaker: discard any pending toggles and reset the DC
             // filter so we don't output a fading ±0.5 hiss after the reset.
             self.speaker_state    = false;
@@ -509,39 +554,26 @@ mod gui {
 
         /// Render the Apple II screen into `self.pixel_buf` via `NtscRenderer`.
         fn render_apple2(&mut self) {
-            self.renderer.render(
-                &self.emu.bus.main_ram,
-                &self.emu.bus.aux_ram,
-                self.emu.bus.mode,
-                self.frame_no,
-                &mut self.fb,
-            );
-            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
-        }
-
-        /// Render the debugger display into the framebuffer, replacing the
-        /// Apple II screen — matching the original AppleWin behaviour.
-        fn render_debugger(&mut self) {
-            use apple2_debugger::display::{self, CpuSnapshot};
-            let cpu = CpuSnapshot {
-                pc: self.emu.cpu.pc,
-                a:  self.emu.cpu.a,
-                x:  self.emu.cpu.x,
-                y:  self.emu.cpu.y,
-                sp: self.emu.cpu.sp,
-                flags: self.emu.cpu.flags.bits(),
-                cycles: self.emu.cpu.cycles,
-            };
-            let mode_bits = self.emu.bus.mode.bits();
-            let cmd_input = self.debugger_cmd_input.clone();
-            display::render(
-                self.fb.pixels_mut(),
-                &self.debugger,
-                &cpu,
-                mode_bits,
-                &cmd_input,
-                |a| self.emu.bus.read_raw(a),
-            );
+            if self.config.video_type == crate::config::VideoType::ColorRGB {
+                self.rgb_renderer.render(
+                    &self.emu.bus.main_ram,
+                    &self.emu.bus.aux_ram,
+                    self.emu.bus.mode,
+                    self.frame_no,
+                    &mut self.fb,
+                );
+            } else {
+                self.renderer.render(
+                    &self.emu.bus.main_ram,
+                    &self.emu.bus.aux_ram,
+                    self.emu.bus.mode,
+                    self.frame_no,
+                    &mut self.fb,
+                );
+            }
+            // The framebuffer stores pixels as ABGR u32; on little-endian the
+            // in-memory byte order is [R, G, B, A] = RGBA, which egui consumes
+            // directly — no channel-swap loop needed.
             self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
     }
@@ -589,48 +621,31 @@ mod gui {
                     .min(0.1); // 100 ms cap
                 self.last_frame_time = frame_now;
 
-                // Skip execution entirely when the debugger has paused the CPU
-                let debugger_paused = self.debugger.active;
-
                 // CPU clock rate: emulation_speed * 102_300 Hz (1× = 1.023 MHz)
                 let base_hz = self.config.emulation_speed.max(1) as f64 * 102_300.0;
 
-                if debugger_paused {
-                    // Debugger is paused — do not execute any cycles.
-                    // Handle trace mode: if trace_remaining > 0, step and record
-                    if self.debugger.trace_remaining > 0 {
-                        use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                        use apple2_debugger::trace::TraceEntry;
-                        let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
-                        let text = format_instruction(&instr);
-                        self.debugger.trace.push(TraceEntry {
-                            pc: self.emu.cpu.pc,
-                            opcode: instr.opcode,
-                            a: self.emu.cpu.a,
-                            x: self.emu.cpu.x,
-                            y: self.emu.cpu.y,
-                            sp: self.emu.cpu.sp,
-                            flags: self.emu.cpu.flags.bits(),
-                            cycles: self.emu.cpu.cycles,
-                            text: text.clone(),
-                        });
-                        self.debugger.print(text);
-                        self.emu.step();
-                        self.debugger.trace_remaining -= 1;
-                        if self.debugger.trace_remaining == 0 {
-                            self.debugger.activate(apple2_debugger::state::StopReason::TraceComplete);
-                            self.debugger.print("Trace complete.");
-                        }
-                    }
-                } else if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
+                if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
                     // Full-speed mode — matches AppleWin's g_bFullSpeed behaviour
+                    // (IsConditionForFullSpeed: motor on + enhanced disk enabled).
+                    //
+                    // Run at maximum host CPU speed until the disk motor turns off,
+                    // with a 100 ms real-time budget per frame to keep the UI
+                    // responsive (same as AppleWin's per-iteration frame budget).
+                    // This makes disk-heavy boots/loads that take seconds at 1× speed
+                    // complete in well under 1 second on a modern machine.
                     const BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
-                    const BATCH: u64 = 100_000;
+                    const BATCH: u64 = 100_000; // batch size between motor & timer checks
                     let full_start = std::time::Instant::now();
                     while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
                         self.emu.execute(BATCH);
                     }
+                    // Reset timer so the next frame doesn't try to "catch up" for
+                    // the real time spent in the full-speed loop.
                     self.last_frame_time = std::time::Instant::now();
+                    // Discard all speaker toggles and stale audio samples accumulated
+                    // during the full-speed burst — they represent boot/loading sounds
+                    // that have already "happened" in emulated time and would otherwise
+                    // drain from the ring buffer as 2–3 s of audible delay.
                     self.emu.bus.speaker_toggles.clear();
                     self.last_audio_cycle = self.emu.cpu.cycles;
                     self.dc_filter_ctr    = 0;
@@ -642,56 +657,7 @@ mod gui {
                 } else {
                     let cycles = (elapsed_secs * base_hz) as u64;
                     if cycles > 0 {
-                        // Use callback-based execution to check breakpoints
-                        let bps = &self.debugger.breakpoints;
-                        let step_over = self.debugger.step_over_target;
-                        let step_out_sp = self.debugger.step_out_sp;
-                        let has_breakpoints = !bps.is_empty()
-                            || step_over.is_some()
-                            || step_out_sp.is_some();
-
-                        if has_breakpoints {
-                            let breakpoints = &self.debugger.breakpoints;
-                            let mut hit_bp: Option<u16> = None;
-                            let mut hit_step_over = false;
-                            let _hit_step_out = false;
-
-                            self.emu.execute_with_callback(cycles, |pc| {
-                                // Check step-over target
-                                if let Some(target) = step_over {
-                                    if pc == target {
-                                        hit_step_over = true;
-                                        return false;
-                                    }
-                                }
-                                // Check step-out (RTS detection)
-                                // We can't easily check SP inside callback,
-                                // so step-out is handled differently below
-                                // Check PC breakpoints
-                                if breakpoints.check_opcode(pc) {
-                                    hit_bp = Some(pc);
-                                    return false;
-                                }
-                                true
-                            });
-
-                            if let Some(addr) = hit_bp {
-                                self.debugger.activate(
-                                    apple2_debugger::state::StopReason::Breakpoint(addr),
-                                );
-                                self.debugger.print(format!("Breakpoint hit at ${addr:04X}"));
-                                self.debugger.cursor = addr;
-                                self.show_debugger = true;
-                            }
-                            if hit_step_over {
-                                self.debugger.step_over_target = None;
-                                self.debugger.activate(
-                                    apple2_debugger::state::StopReason::StepOver,
-                                );
-                            }
-                        } else {
-                            self.emu.execute(cycles);
-                        }
+                        self.emu.execute(cycles);
                     }
                 }
             } else {
@@ -802,6 +768,20 @@ mod gui {
                 }
             }
 
+            // ── WAV audio recording — tap the ring buffer ────────────────────
+            // Feed the latest samples to the WAV recorder if active.
+            if let Some(ref mut rec) = self.wav_recorder {
+                if let Some(buf) = &self.audio_buf {
+                    let locked = buf.lock().unwrap();
+                    // Record the last N samples (approximate frame's worth).
+                    let n = (self.audio_sample_rate as usize / 60).min(locked.len());
+                    let start = locked.len().saturating_sub(n);
+                    let chunk: Vec<f32> = locked.range(start..).copied().collect();
+                    drop(locked);
+                    let _ = rec.write_samples(&chunk);
+                }
+            }
+
             // ── Collect input events ──────────────────────────────────────────
             let mut key_queue:      Vec<u8>         = Vec::new();
             let mut do_reset:       bool             = false;
@@ -811,6 +791,12 @@ mod gui {
             let mut paste_text:     Option<String>   = None;
             let mut take_screenshot: bool            = false;
             let mut video_shortcut: Option<VideoType> = None;
+            let mut do_save_state:  bool             = false;
+            let mut do_load_state:  bool             = false;
+            let mut speed_shortcut: Option<u32>      = None;
+            let mut toggle_wav_rec: bool             = false;
+            let mut alt_left:       bool             = false;
+            let mut alt_right:      bool             = false;
 
             // Only process Event::Key with repeat:false — this fires exactly once
             // per physical key-down, never for OS auto-repeat.  Event::Text is
@@ -826,45 +812,32 @@ mod gui {
                     if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
                         let ctrl  = modifiers.ctrl || modifiers.command;
                         let shift = modifiers.shift;
-                        let dbg_on = self.show_debugger && self.debugger.active;
                         match key {
-                            // ── Global shortcuts (always active) ─────────
                             Key::F1                => do_hard_reset = true,
-                            // F7 — toggle debugger (original AppleWin key)
-                            Key::F7 if !ctrl && !shift => {
-                                if self.show_debugger && self.debugger.active {
-                                    self.show_debugger = false;
-                                    self.debugger.deactivate();
-                                } else {
-                                    self.show_debugger = true;
-                                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
-                                }
-                            }
-                            // F10 — also toggles debugger (compat)
                             Key::F10 if self.config.scrolllock_toggle => {
-                                if self.show_debugger && self.debugger.active {
-                                    self.show_debugger = false;
-                                    self.debugger.deactivate();
-                                } else {
-                                    self.show_debugger = true;
-                                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
-                                }
+                                self.debugger.active = !self.debugger.active;
                             }
+                            // Save / load state
+                            Key::F11 if shift      => do_load_state = true,
+                            Key::F11 if !shift     => do_save_state = true,
+                            // WAV audio recording toggle
+                            Key::F9                => toggle_wav_rec = true,
+                            // Screenshot (F12)
                             Key::F12               => take_screenshot = true,
                             Key::Escape if ctrl    => do_quit = true,
                             Key::F2 if ctrl        => do_reset = true,
-                            // Ctrl+1..5 — video mode shortcuts
-                            Key::Num1 if ctrl => { video_shortcut = Some(VideoType::ColorTV); }
-                            Key::Num2 if ctrl => { video_shortcut = Some(VideoType::ColorIdealized); }
-                            Key::Num3 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
+                            // Speed control: Ctrl+0 = full speed, Ctrl+1 = normal, Ctrl+3 = 3x
+                            Key::Num0 if ctrl => { speed_shortcut = Some(40); }
+                            Key::Num1 if ctrl => { speed_shortcut = Some(10); }
+                            Key::Num3 if ctrl => { speed_shortcut = Some(30); }
+                            // Ctrl+4..5 — video mode shortcuts
                             Key::Num4 if ctrl => { video_shortcut = Some(VideoType::MonoWhite); }
                             Key::Num5 if ctrl => { video_shortcut = Some(VideoType::MonoGreen); }
-                            // ── Apple II keys (only when debugger is NOT active) ─
-                            _ if dbg_on => {
-                                // Debugger is active — swallow keys so they don't
-                                // go to the Apple II.  The egui command bar text
-                                // field receives typed characters directly.
-                            }
+                            // Ctrl+6..9 — video mode shortcuts
+                            Key::Num6 if ctrl => { video_shortcut = Some(VideoType::ColorTV); }
+                            Key::Num7 if ctrl => { video_shortcut = Some(VideoType::ColorIdealized); }
+                            Key::Num8 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
+                            Key::Num9 if ctrl => { video_shortcut = Some(VideoType::ColorMonitorNtsc); }
                             Key::Enter             => { any_key = true; key_queue.push(0x0D); }
                             Key::Backspace         => { any_key = true; key_queue.push(0x7F); }
                             Key::Escape            => { any_key = true; key_queue.push(0x1B); }
@@ -874,6 +847,8 @@ mod gui {
                             Key::ArrowUp           => { any_key = true; key_queue.push(0x0B); }
                             Key::ArrowDown         => { any_key = true; key_queue.push(0x0A); }
                             key if ctrl => {
+                                // Ctrl+letter → Apple II control character (0x01–0x1A).
+                                // Ctrl+V is intercepted for host paste (Event::Paste above).
                                 let c: Option<u8> = match key {
                                     Key::A => Some(0x01), Key::B => Some(0x02),
                                     Key::C => Some(0x03), Key::D => Some(0x04),
@@ -885,7 +860,7 @@ mod gui {
                                     Key::O => Some(0x0F), Key::P => Some(0x10),
                                     Key::Q => Some(0x11), Key::R => Some(0x12),
                                     Key::S => Some(0x13), Key::T => Some(0x14),
-                                    Key::U => Some(0x15), Key::V => None,
+                                    Key::U => Some(0x15), Key::V => None, // paste — see Event::Paste
                                     Key::W => Some(0x17), Key::X => Some(0x18),
                                     Key::Y => Some(0x19), Key::Z => Some(0x1A),
                                     _ => None,
@@ -893,6 +868,8 @@ mod gui {
                                 if let Some(c) = c { any_key = true; key_queue.push(c); }
                             }
                             key => {
+                                // Derive printable ASCII from key + shift.
+                                // Apple II convention: letters are always uppercase.
                                 any_key = true;
                                 if let Some(c) = apple2_ascii_for_key(*key, shift) {
                                     key_queue.push(c);
@@ -966,20 +943,78 @@ mod gui {
                 save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
             }
 
+            // Save / load emulator state (F11 / Shift+F11).
+            if do_save_state && !in_logo_mode {
+                if let Some(path) = self.config.save_state_path() {
+                    let snap = self.emu.take_snapshot();
+                    if let Ok(yaml) = serde_yaml::to_string(&snap) {
+                        let _ = std::fs::write(&path, yaml);
+                        self.status_msg = Some(format!("State saved to {}", path.display()));
+                    }
+                }
+            }
+            if do_load_state && !in_logo_mode {
+                if let Some(path) = self.config.save_state_path()
+                    && let Ok(yaml) = std::fs::read_to_string(&path)
+                    && let Ok(snap) = serde_yaml::from_str(&yaml)
+                {
+                    self.emu.restore_snapshot(&snap);
+                    self.status_msg = Some("State loaded".to_string());
+                }
+            }
+
+            // Speed control shortcuts (Ctrl+0/1/3).
+            if let Some(spd) = speed_shortcut {
+                self.config.emulation_speed = spd;
+                self.config.save();
+            }
+
+            // WAV audio recording toggle (F9).
+            if toggle_wav_rec {
+                if let Some(rec) = self.wav_recorder.take() {
+                    let _ = rec.stop();
+                    self.status_msg = Some("Audio recording stopped".to_string());
+                } else {
+                    let dir = crate::config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let path = dir.join(format!("applewin_audio_{ts}.wav"));
+                    match apple2_audio::wav_writer::WavRecorder::start(&path, self.audio_sample_rate) {
+                        Ok(rec) => {
+                            self.wav_recorder = Some(rec);
+                            self.status_msg = Some(format!("Recording audio to {}", path.display()));
+                        }
+                        Err(e) => {
+                            self.status_msg = Some(format!("WAV recording failed: {e}"));
+                        }
+                    }
+                }
+            }
+
+            // Alt key as Open / Closed Apple (button 0 / button 1).
+            if self.config.alt_key_as_apple {
+                ctx.input(|i| {
+                    alt_left  = i.key_down(Key::ArrowLeft) && i.modifiers.alt
+                                || i.modifiers.alt;
+                    alt_right = false; // egui doesn't distinguish left/right Alt
+                });
+                // Map Alt to Open Apple (button 0 bit)
+                if alt_left {
+                    self.emu.bus.gamepad.buttons |= 0x01;
+                } else {
+                    self.emu.bus.gamepad.buttons &= !0x01;
+                }
+            }
+
             if do_hard_reset { self.reset(true); }
             if do_reset      { self.reset(false); }
             if do_quit       { frame.close(); return; }
 
-            // ── Render display to GPU texture ─────────────────────────────────
-            // When the debugger is active, render the debugger display into the
-            // framebuffer instead of the Apple II screen — exactly like the
-            // original AppleWin, where the debugger replaces the screen.
+            // ── Render Apple II display to GPU texture (not during logo) ─────
             if !in_logo_mode {
-                if self.show_debugger && self.debugger.active {
-                    self.render_debugger();
-                } else {
-                    self.render_apple2();
-                }
+                self.render_apple2();
                 let tex_opts = TextureOptions {
                     magnification: egui::TextureFilter::Nearest,
                     minification:  egui::TextureFilter::Nearest,
@@ -1196,9 +1231,7 @@ mod gui {
                     });
                 });
 
-            // ── Status bar (hidden when debugger is active) ──────────────────
-            let debugger_fullscreen = self.show_debugger && self.debugger.active;
-            if !debugger_fullscreen {
+            // ── Status bar ────────────────────────────────────────────────────
             egui::TopBottomPanel::bottom("statusbar")
                 .frame(
                     egui::Frame::none()
@@ -1238,11 +1271,9 @@ mod gui {
                         });
                     });
                 });
-            } // end if !debugger_fullscreen (status bar)
 
-            // ── Right button strip (hidden when debugger is active) ───────────
+            // ── Right button strip ────────────────────────────────────────────
             let icons = self.icons.as_ref();
-            if !debugger_fullscreen {
             egui::SidePanel::right("buttons")
                 .exact_width(BTN_PANEL_W)
                 .resizable(false)
@@ -1278,21 +1309,12 @@ mod gui {
                         if icon_btn(ui, icons.and_then(|ic| ic.full.as_ref()),  "⛶",  "Fullscreen (F11)",    sz, isz).clicked() { act_fullscreen = true; }
                         ui.add_space(2.0);
                         if icon_btn(ui, icons.and_then(|ic| ic.debug.as_ref()), "⚙", "Debugger", sz, isz).clicked() {
-                            if self.show_debugger && self.debugger.active {
-                                // Debugger is open and paused — close it and resume
-                                self.show_debugger = false;
-                                self.debugger.deactivate();
-                            } else {
-                                // Open the debugger and pause execution
-                                self.show_debugger = true;
-                                self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
-                            }
+                            self.show_debugger = !self.show_debugger;
                         }
                         ui.add_space(2.0);
                         if icon_btn(ui, icons.and_then(|ic| ic.setup.as_ref()), "⚙",  "Settings",            sz, isz).clicked() { act_show_settings = true; }
                     });
                 });
-            } // end if !debugger_fullscreen (button strip)
 
             // ── Confirm reboot dialog ─────────────────────────────────────────
             if let Some(power_cycle) = self.pending_reset {
@@ -1316,297 +1338,106 @@ mod gui {
                 if do_cancel { self.pending_reset = None; }
             }
 
-            // ── Debugger ──────────────────────────────────────────────────────
-            // Renders directly into the 560×384 framebuffer (replacing the
-            // Apple II screen), matching the original AppleWin debugger.
-            // Keyboard input is captured via egui events; a small command-
-            // input overlay appears at the bottom of the main screen area.
-            if self.show_debugger && self.debugger.active {
+            // ── Debugger window ───────────────────────────────────────────────
+            if self.show_debugger {
                 use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                use apple2_debugger::commands::{self, CmdResult, CpuRegs};
+                use apple2_debugger::breakpoint::Breakpoint;
 
-                // The debugger display is rendered into the framebuffer by
-                // render_debugger() above. Here we only handle keyboard
-                // input and process commands.
+                // Snapshot CPU registers before the closure borrows self
+                let pc   = self.emu.cpu.pc;
+                let a    = self.emu.cpu.a;
+                let x    = self.emu.cpu.x;
+                let y    = self.emu.cpu.y;
+                let sp   = self.emu.cpu.sp;
+                let p    = self.emu.cpu.flags.bits();
                 let paused = self.debugger.active;
 
                 let mut do_step      = false;
-                let mut do_step_over = false;
-                let mut do_step_out  = false;
+                let mut do_pause     = false;
                 let mut do_resume    = false;
-                let mut do_exec_cmd  = false;
-                let cmd_empty = self.debugger_cmd_input.is_empty();
+                let mut do_add_bp    = false;
+                let mut do_remove_bp: Option<usize> = None;
+                let mut cursor_update: Option<u16>  = None;
 
-                // ── AppleWin-compatible keyboard shortcuts ────────────────
-                // These are checked before the text field so they always work.
-                // When the command input is empty, Space/arrows act as debugger
-                // commands; when typing a command, they go to the text field.
-                ctx.input(|i| {
-                    for event in &i.events {
-                        if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
-                            let ctrl  = modifiers.ctrl || modifiers.command;
-                            let shift = modifiers.shift;
-                            match key {
-                                // F7 — toggle debugger (handled in main key loop)
-                                // Space — step into (AppleWin: trace)
-                                Key::Space if cmd_empty && !ctrl && !shift => do_step = true,
-                                // Ctrl+Space — step over
-                                Key::Space if cmd_empty && ctrl && !shift  => do_step_over = true,
-                                // Shift+Space — step out
-                                Key::Space if cmd_empty && shift && !ctrl  => do_step_out = true,
-                                // F5 — Go/resume
-                                Key::F5 => do_resume = true,
-                                // Up/Down — scroll disassembly cursor
-                                Key::ArrowUp if cmd_empty && !ctrl && !shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_sub(1)
-                                    );
-                                }
-                                Key::ArrowDown if cmd_empty && !ctrl && !shift => {
-                                    let start = self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc);
-                                    let instr = apple2_debugger::disasm::disassemble_one(
-                                        start, |a| self.emu.bus.read_raw(a)
-                                    );
-                                    self.debugger.goto_addr = Some(
-                                        start.wrapping_add(instr.bytes as u16)
-                                    );
-                                }
-                                // Shift+Up/Down — scroll by 1 byte
-                                Key::ArrowUp if cmd_empty && shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_sub(1)
-                                    );
-                                }
-                                Key::ArrowDown if cmd_empty && shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_add(1)
-                                    );
-                                }
-                                // Page Up/Down — scroll disassembly by a page
-                                Key::PageUp if !ctrl && !shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_sub(0x20)
-                                    );
-                                }
-                                Key::PageDown if !ctrl && !shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_add(0x20)
-                                    );
-                                }
-                                // Shift+Page Up/Down — 256-byte boundary
-                                Key::PageUp if shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_sub(0x100)
-                                    );
-                                }
-                                Key::PageDown if shift => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_add(0x100)
-                                    );
-                                }
-                                // Ctrl+Page Up/Down — 4K boundary
-                                Key::PageUp if ctrl => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_sub(0x1000)
-                                    );
-                                }
-                                Key::PageDown if ctrl => {
-                                    self.debugger.goto_addr = Some(
-                                        self.debugger.goto_addr
-                                            .unwrap_or(self.emu.cpu.pc)
-                                            .wrapping_add(0x1000)
-                                    );
-                                }
-                                // Home — jump to PC
-                                Key::Home => {
-                                    self.debugger.goto_addr = None; // resets to PC
-                                }
-                                // Ctrl+Right — set PC to cursor
-                                Key::ArrowRight if ctrl && cmd_empty => {
-                                    if let Some(addr) = self.debugger.goto_addr {
-                                        self.emu.cpu.pc = addr;
-                                        self.debugger.print(format!("PC set to ${addr:04X}"));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                });
-
-                // ── Command input bar ────────────────────────────────────
-                let cmd_id = egui::Id::new("dbg_cmd_input");
-                egui::TopBottomPanel::bottom("dbg_cmd")
-                    .frame(
-                        egui::Frame::none()
-                            .fill(Color32::from_rgb(16, 16, 32))
-                            .inner_margin(egui::style::Margin::symmetric(6.0, 2.0)),
-                    )
+                egui::Window::new("Debugger")
+                    .resizable(true)
+                    .min_width(460.0)
                     .show(ctx, |ui| {
+                        // ── CPU registers ──────────────────────────────────
+                        ui.monospace(format!(
+                            "PC:{:04X}  A:{:02X}  X:{:02X}  Y:{:02X}  SP:{:02X}  P:{:08b}",
+                            pc, a, x, y, sp, p
+                        ));
+                        ui.separator();
+
+                        // ── Execution controls ──────────────────────────────
                         ui.horizontal(|ui| {
-                            // Compact help reminder
-                            ui.label(RichText::new("Spc:Step C-Spc:Over S-Spc:Out F5:Go")
-                                .monospace().small().color(Color32::from_rgb(100, 100, 100)));
-                            ui.label(RichText::new(">").monospace().color(Color32::from_rgb(255, 128, 0)));
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.debugger_cmd_input)
-                                    .id(cmd_id)
-                                    .desired_width(ui.available_width() - 8.0)
-                                    .font(FontId::monospace(12.0))
-                                    .text_color(Color32::WHITE)
-                            );
-                            // Auto-focus
-                            if !resp.has_focus() {
-                                resp.request_focus();
+                            if paused {
+                                if ui.button("▶ Resume").clicked() { do_resume = true; }
+                                if ui.button("⏭ Step").clicked()   { do_step   = true; }
+                            } else {
+                                if ui.button("⏸ Pause").clicked()  { do_pause  = true; }
                             }
-                            // Execute command on Enter
-                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                                do_exec_cmd = true;
-                            }
+                        });
+                        ui.separator();
+
+                        // ── Disassembly listing ─────────────────────────────
+                        ui.label("Disassembly:");
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .id_source("dbg_disasm")
+                            .show(ui, |ui| {
+                                let start = if paused { pc } else { self.debugger.cursor };
+                                let mut addr = start;
+                                for _ in 0..20 {
+                                    let instr = disassemble_one(addr, |a| {
+                                        self.emu.bus.read_raw(a)
+                                    });
+                                    let text = format!(
+                                        "{} {}",
+                                        if addr == pc { "▶" } else { " " },
+                                        format_instruction(&instr),
+                                    );
+                                    let resp = ui.selectable_label(
+                                        addr == self.debugger.cursor,
+                                        egui::RichText::new(text).monospace(),
+                                    );
+                                    if resp.clicked() { cursor_update = Some(addr); }
+                                    addr = addr.wrapping_add(instr.bytes as u16);
+                                }
+                            });
+                        ui.separator();
+
+                        // ── Breakpoints ─────────────────────────────────────
+                        ui.label("Breakpoints:");
+                        let mut remove_idx: Option<usize> = None;
+                        for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!("{:04X}", bp.address));
+                                if ui.small_button("✕").clicked() {
+                                    remove_idx = Some(idx);
+                                }
+                            });
+                        }
+                        if let Some(idx) = remove_idx { do_remove_bp = Some(idx); }
+                        ui.horizontal(|ui| {
+                            ui.label("Add:");
+                            ui.text_edit_singleline(&mut self.debugger_bp_input);
+                            if ui.button("Add").clicked() { do_add_bp = true; }
                         });
                     });
-                if do_exec_cmd {
-                    ctx.memory_mut(|m| m.request_focus(cmd_id));
-                }
 
-                // ── Apply deferred actions ─────────────────────────────────
-                if do_resume {
-                    self.debugger.deactivate();
-                    self.show_debugger = false;
+                // Apply deferred actions after the closure releases borrows
+                if do_pause  { self.debugger.active = true; }
+                if do_resume { self.debugger.active = false; }
+                if do_step && paused { self.emu.step(); }
+                if do_add_bp
+                    && let Ok(addr) = u16::from_str_radix(self.debugger_bp_input.trim(), 16) {
+                    self.debugger.breakpoints.add(Breakpoint::at(addr));
+                    self.debugger_bp_input.clear();
                 }
-                if do_step && paused {
-                    if self.debugger.trace.enabled {
-                        use apple2_debugger::trace::TraceEntry;
-                        let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
-                        self.debugger.trace.push(TraceEntry {
-                            pc: self.emu.cpu.pc,
-                            opcode: instr.opcode,
-                            a: self.emu.cpu.a,
-                            x: self.emu.cpu.x,
-                            y: self.emu.cpu.y,
-                            sp: self.emu.cpu.sp,
-                            flags: self.emu.cpu.flags.bits(),
-                            cycles: self.emu.cpu.cycles,
-                            text: format_instruction(&instr),
-                        });
-                    }
-                    self.emu.step();
-                    self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
-                }
-                if do_step_over && paused {
-                    let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
-                    if opcode == 0x20 {
-                        self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
-                        self.debugger.deactivate();
-                    } else {
-                        self.emu.step();
-                        self.debugger.stop_reason = apple2_debugger::state::StopReason::StepOver;
-                    }
-                }
-                if do_step_out && paused {
-                    self.debugger.step_out_sp = Some(self.emu.cpu.sp);
-                    self.debugger.deactivate();
-                }
-
-                // Execute console command
-                if do_exec_cmd {
-                    let cmd_text = self.debugger_cmd_input.clone();
-                    self.debugger_cmd_input.clear();
-                    self.debugger.print(format!("> {cmd_text}"));
-
-                    let regs = CpuRegs {
-                        a: self.emu.cpu.a,
-                        x: self.emu.cpu.x,
-                        y: self.emu.cpu.y,
-                        sp: self.emu.cpu.sp,
-                        pc: self.emu.cpu.pc,
-                        flags: self.emu.cpu.flags.bits(),
-                        cycles: self.emu.cpu.cycles,
-                    };
-                    let result = commands::execute_command(
-                        &mut self.debugger,
-                        &cmd_text,
-                        self.emu.cpu.pc,
-                        regs,
-                        |a| self.emu.bus.read_raw(a),
-                    );
-                    match result {
-                        CmdResult::Output(lines) => {
-                            self.debugger.print_lines(&lines);
-                        }
-                        CmdResult::Go => {
-                            self.debugger.deactivate();
-                            self.show_debugger = false;
-                        }
-                        CmdResult::Step => {
-                            self.emu.step();
-                            self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
-                        }
-                        CmdResult::StepOver => {
-                            let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
-                            if opcode == 0x20 {
-                                self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
-                                self.debugger.deactivate();
-                            } else {
-                                self.emu.step();
-                            }
-                        }
-                        CmdResult::StepOut => {
-                            self.debugger.step_out_sp = Some(self.emu.cpu.sp);
-                            self.debugger.deactivate();
-                        }
-                        CmdResult::Trace(n) => {
-                            self.debugger.trace.enabled = true;
-                            self.debugger.trace_remaining = n;
-                        }
-                        CmdResult::SetPC(addr) => {
-                            self.emu.cpu.pc = addr;
-                            self.debugger.deactivate();
-                        }
-                        CmdResult::MemWrite(addr, val) => {
-                            self.emu.bus.write_raw(addr, val);
-                            self.debugger.print(format!("  ${addr:04X} = {val:02X}"));
-                        }
-                        CmdResult::SetReg(reg, val) => {
-                            match reg {
-                                'A' => self.emu.cpu.a = val as u8,
-                                'X' => self.emu.cpu.x = val as u8,
-                                'Y' => self.emu.cpu.y = val as u8,
-                                'S' | 'P' if val > 0xFF => self.emu.cpu.pc = val,
-                                'S' => self.emu.cpu.sp = val as u8,
-                                'P' => self.emu.cpu.pc = val,
-                                _ => {}
-                            }
-                        }
-                        CmdResult::Nop => {}
-                        CmdResult::Error(msg) => {
-                            self.debugger.print(format!("Error: {msg}"));
-                        }
-                        CmdResult::ToggleBreak => {
-                            if self.debugger.active {
-                                self.debugger.deactivate();
-                            } else {
-                                self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
-                            }
-                        }
-                    }
-                }
+                if let Some(idx) = do_remove_bp { self.debugger.breakpoints.remove(idx); }
+                if let Some(addr) = cursor_update { self.debugger.cursor = addr; }
             }
 
             // ── Settings dialog ───────────────────────────────────────────────
@@ -2014,6 +1845,8 @@ mod gui {
                         self.emu = super::make_emulator(
                             self.config.machine_type,
                             self.config.cpu_type,
+                            &self.config.custom_rom_path,
+                            &self.config.custom_f8_rom_path,
                         );
                         apply_slot_cards(&mut self.emu, &self.config);
                         self.disk_slot = self.config.disk2_slot();
@@ -2120,53 +1953,28 @@ mod gui {
             }
 
             // ── Central panel — Apple II screen framed with 3D bevel ──────────
-            // When the debugger is active: black background, no bevel, fill area.
-            let central_bg = if debugger_fullscreen { Color32::BLACK } else { WIN_FACE };
-            let central_margin = if debugger_fullscreen { 0.0 } else { 8.0 };
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(central_bg)
-                        .inner_margin(egui::style::Margin::same(central_margin)),
+                        .fill(WIN_FACE)
+                        .inner_margin(egui::style::Margin::same(8.0)),
                 )
                 .show(ctx, |ui| {
                     let avail = ui.available_rect_before_wrap();
 
                     let sw = SCREEN_W as f32;
                     let sh = SCREEN_H as f32;
+                    // Use integer scaling in PHYSICAL pixels, not egui points.
+                    // At non-100% DPI (e.g. 125%), an egui-point integer scale maps
+                    // to a fractional physical pixel count, causing the GPU to blend
+                    // adjacent framebuffer rows even with Nearest filtering.
                     let ppp = ctx.pixels_per_point();
-
-                    if debugger_fullscreen {
-                        // Debugger mode: fill available area, no bevel
-                        let avail_pw = avail.width() * ppp;
-                        let avail_ph = avail.height() * ppp;
-                        let phys_scale_w = (avail_pw / sw).floor().max(1.0);
-                        let phys_scale_h = (avail_ph / sh).floor().max(1.0);
-                        let phys_scale   = phys_scale_w.min(phys_scale_h);
-                        let scale = phys_scale / ppp;
-                        let disp_w = sw * scale;
-                        let disp_h = sh * scale;
-
-                        let ox = avail.left() + ((avail.width()  - disp_w) / 2.0).max(0.0);
-                        let oy = avail.top()  + ((avail.height() - disp_h) / 2.0).max(0.0);
-                        let screen = Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(disp_w, disp_h));
-
-                        if let Some(tid) = tex_id {
-                            ui.painter().image(
-                                tid,
-                                screen,
-                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
-                            );
-                        }
-                        ui.allocate_rect(avail, Sense::hover());
-                    } else {
-                    // Normal mode: bevel + centred screen
                     let avail_pw = (avail.width()  - BEVEL * 2.0) * ppp;
                     let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
                     let phys_scale_w = (avail_pw / sw).floor().max(1.0);
                     let phys_scale_h = (avail_ph / sh).floor().max(1.0);
                     let phys_scale   = phys_scale_w.min(phys_scale_h);
+                    // Convert back to egui points for layout
                     let scale = phys_scale / ppp;
                     let outer_w = sw * scale + BEVEL * 2.0;
                     let outer_h = sh * scale + BEVEL * 2.0;
@@ -2241,7 +2049,6 @@ mod gui {
                     }
 
                     ui.allocate_rect(outer, Sense::hover());
-                    } // end else (normal mode)
                 });
 
             // ── Apply deferred actions ────────────────────────────────────────
@@ -2501,6 +2308,9 @@ mod gui {
         use apple2_core::cards::vidhd::VidHdCard;
         use apple2_core::cards::z80card::Z80Card;
         use apple2_core::cards::uthernet::UthernCard;
+        use apple2_core::cards::languagecard::LanguageCardCard;
+        use apple2_core::cards::megaaudio::MegaAudioCard;
+        use apple2_core::cards::sdmusic::SdMusicCard;
         // Clear all slots first
         for slot in 0..apple2_core::card::NUM_SLOTS {
             emu.bus.cards.remove(slot);
@@ -2576,6 +2386,15 @@ mod gui {
                 }
                 CardType::Uthernet2 => {
                     emu.bus.cards.insert(Box::new(UthernCard::new_uthernet2(slot)));
+                }
+                CardType::LanguageCard => {
+                    emu.bus.cards.insert(Box::new(LanguageCardCard::new(slot)));
+                }
+                CardType::MegaAudio => {
+                    emu.bus.cards.insert(Box::new(MegaAudioCard::new(slot)));
+                }
+                CardType::SdMusic => {
+                    emu.bus.cards.insert(Box::new(SdMusicCard::new(slot)));
                 }
                 _ => {} // not yet implemented — leave slot empty
             }
@@ -2768,7 +2587,7 @@ mod gui {
             .set_title(title)
             .add_filter(
                 "Apple II Disk Images",
-                &["dsk", "do", "po", "nib", "woz", "hdv", "2mg", "img"],
+                &["dsk", "do", "po", "nib", "nb2", "woz", "hdv", "2mg", "2img", "img", "gz", "zip"],
             )
             .add_filter("All Files", &["*"]);
         if let Some(dir) = start_dir {
@@ -2780,7 +2599,7 @@ mod gui {
     fn open_hdd_dialog(title: &str, start_dir: Option<&str>) -> Option<PathBuf> {
         let mut d = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("Apple II HDD Images", &["hdv", "po", "2mg", "img"])
+            .add_filter("Apple II HDD Images", &["hdv", "po", "2mg", "2img", "img", "gz", "zip"])
             .add_filter("All Files", &["*"]);
         if let Some(dir) = start_dir {
             d = d.set_directory(dir);

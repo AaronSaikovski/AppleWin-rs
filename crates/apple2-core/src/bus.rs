@@ -62,6 +62,44 @@ impl Default for MemMode {
     }
 }
 
+// ── Copy protection dongles ──────────────────────────────────────────────────
+
+/// Game I/O connector copy-protection dongle types.
+///
+/// These dongles present specific resistance values on the paddle inputs,
+/// used by vintage software to verify that the original hardware dongle
+/// is plugged in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DongleType {
+    /// SDS SpeedStar (Southwestern Data Systems).
+    SdsSpeedStar,
+    /// CodeWriter (Dynatech/Cortechs).
+    CodeWriter,
+    /// Robocom Interface Module (500 variant).
+    Robocom500,
+    /// Robocom Interface Module (1500 variant).
+    Robocom1500,
+    /// Hayden's Applesoft Compiler Key.
+    Hayden,
+}
+
+impl DongleType {
+    /// Return the paddle values (paddle0, paddle1) and button overrides
+    /// (PB0, PB1, PB2) for this dongle type.
+    ///
+    /// Values are derived from the resistance tables in the C++ AppleWin
+    /// `source/Configuration/PropertySheetHelper.cpp`.
+    fn overrides(&self) -> (u8, u8, u8) {
+        match self {
+            DongleType::SdsSpeedStar => (255, 255, 0x04),  // PB2 set
+            DongleType::CodeWriter   => (128, 128, 0x00),
+            DongleType::Robocom500   => (  0, 255, 0x00),
+            DongleType::Robocom1500  => (255,   0, 0x00),
+            DongleType::Hayden       => (255, 255, 0x06),  // PB1+PB2 set
+        }
+    }
+}
+
 // ── GamepadState ──────────────────────────────────────────────────────────────
 
 /// Joystick / paddle state for the Apple II game I/O connector.
@@ -81,11 +119,14 @@ pub struct GamepadState {
     paddle0_end: u64,
     /// CPU cycle at which the paddle-1 one-shot timer expires.
     paddle1_end: u64,
+    /// Optional copy-protection dongle.  When set, overrides paddle and button
+    /// values with fixed dongle-specific values.
+    pub dongle: Option<DongleType>,
 }
 
 impl Default for GamepadState {
     fn default() -> Self {
-        Self { paddle0: 127, paddle1: 127, buttons: 0, paddle0_end: 0, paddle1_end: 0 }
+        Self { paddle0: 127, paddle1: 127, buttons: 0, paddle0_end: 0, paddle1_end: 0, dongle: None }
     }
 }
 
@@ -95,8 +136,24 @@ impl GamepadState {
     /// Timer duration = `value × 11 + 3` CPU cycles, matching the Apple II
     /// hardware spec (~11.149 µs per increment at 1.023 MHz).
     pub fn strobe(&mut self, cycles: u64) {
-        self.paddle0_end = cycles + self.paddle0 as u64 * 11 + 3;
-        self.paddle1_end = cycles + self.paddle1 as u64 * 11 + 3;
+        let (p0, p1) = if let Some(d) = &self.dongle {
+            let (dp0, dp1, _) = d.overrides();
+            (dp0, dp1)
+        } else {
+            (self.paddle0, self.paddle1)
+        };
+        self.paddle0_end = cycles + p0 as u64 * 11 + 3;
+        self.paddle1_end = cycles + p1 as u64 * 11 + 3;
+    }
+
+    /// Return the effective button state, including dongle overrides.
+    pub fn effective_buttons(&self) -> u8 {
+        if let Some(d) = &self.dongle {
+            let (_, _, btn_or) = d.overrides();
+            self.buttons | btn_or
+        } else {
+            self.buttons
+        }
     }
 }
 
@@ -574,9 +631,9 @@ impl Bus {
             0x1E => self.flag_byte(MemMode::MF_ALTCHAR),
             0x1F => self.flag_byte(MemMode::MF_VID80),
             // $C061–$C063: game port buttons (bit 7 = pressed)
-            0x61 => if self.gamepad.buttons & 0x01 != 0 { 0x80 } else { 0x00 },
-            0x62 => if self.gamepad.buttons & 0x02 != 0 { 0x80 } else { 0x00 },
-            0x63 => if self.gamepad.buttons & 0x04 != 0 { 0x80 } else { 0x00 },
+            0x61 => if self.gamepad.effective_buttons() & 0x01 != 0 { 0x80 } else { 0x00 },
+            0x62 => if self.gamepad.effective_buttons() & 0x02 != 0 { 0x80 } else { 0x00 },
+            0x63 => if self.gamepad.effective_buttons() & 0x04 != 0 { 0x80 } else { 0x00 },
             // $C064–$C067: paddle one-shot timers (bit 7 high until timer expires)
             0x64 => if cycles < self.gamepad.paddle0_end { 0x80 } else { 0x00 },
             0x65 => if cycles < self.gamepad.paddle1_end { 0x80 } else { 0x00 },
@@ -913,13 +970,24 @@ impl Bus {
     }
 
     /// Load a disk image into the Disk2Card in `slot` (0–7), drive 0 or 1.
-    /// Returns `true` if the card was found and accepted the image.
+    ///
+    /// Automatically decompresses `.gz` / `.zip` wrappers and strips 2IMG
+    /// headers before passing the raw image data to the Disk2 controller.
     pub fn load_disk(&mut self, slot: usize, drive: usize, data: &[u8], ext: &str) -> bool {
         use crate::cards::disk2::Disk2Card;
+        use crate::disk_util;
+
+        // Decompress if gzip/zip, then unwrap 2IMG if present.
+        let (data, ext) = disk_util::decompress(data, ext);
+        let (data, ext) = match disk_util::unwrap_2img(&data) {
+            Some((inner, fmt)) => (inner, fmt.to_string()),
+            None => (data, ext),
+        };
+
         if let Some(card) = self.cards.slot_mut(slot)
             && let Some(disk2) = card.as_any_mut().downcast_mut::<Disk2Card>()
         {
-            return disk2.load_drive(drive, data, ext);
+            return disk2.load_drive(drive, &data, &ext);
         }
         false
     }

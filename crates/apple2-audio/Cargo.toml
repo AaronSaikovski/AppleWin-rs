@@ -9,3 +9,4 @@ description = "Apple II audio synthesis: Speaker, AY8910, SSI263"
 thiserror = { workspace = true }
 tracing   = { workspace = true }
 serde     = { workspace = true }
+hound     = { workspace = true }
