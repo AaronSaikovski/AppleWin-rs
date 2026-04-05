@@ -10,6 +10,7 @@
 pub mod breakpoint;
 pub mod commands;
 pub mod disasm;
+pub mod display;
 pub mod softswitch;
 pub mod state;
 pub mod symbols;

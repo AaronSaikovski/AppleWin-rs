@@ -353,7 +353,9 @@ mod gui {
         show_debugger:     bool,
         debugger:          apple2_debugger::DebuggerState,
         debugger_cmd_input: String,
+        #[allow(dead_code)]
         debugger_bp_input: String,
+        #[allow(dead_code)]
         debugger_mem_input: String,
         #[allow(dead_code)]
         debugger_reg_input: String,
@@ -514,9 +516,32 @@ mod gui {
                 self.frame_no,
                 &mut self.fb,
             );
-            // The framebuffer stores pixels as ABGR u32; on little-endian the
-            // in-memory byte order is [R, G, B, A] = RGBA, which egui consumes
-            // directly — no channel-swap loop needed.
+            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
+        }
+
+        /// Render the debugger display into the framebuffer, replacing the
+        /// Apple II screen — matching the original AppleWin behaviour.
+        fn render_debugger(&mut self) {
+            use apple2_debugger::display::{self, CpuSnapshot};
+            let cpu = CpuSnapshot {
+                pc: self.emu.cpu.pc,
+                a:  self.emu.cpu.a,
+                x:  self.emu.cpu.x,
+                y:  self.emu.cpu.y,
+                sp: self.emu.cpu.sp,
+                flags: self.emu.cpu.flags.bits(),
+                cycles: self.emu.cpu.cycles,
+            };
+            let mode_bits = self.emu.bus.mode.bits();
+            let cmd_input = self.debugger_cmd_input.clone();
+            display::render(
+                self.fb.pixels_mut(),
+                &self.debugger,
+                &cpu,
+                mode_bits,
+                &cmd_input,
+                |a| self.emu.bus.read_raw(a),
+            );
             self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
     }
@@ -924,9 +949,16 @@ mod gui {
             if do_reset      { self.reset(false); }
             if do_quit       { frame.close(); return; }
 
-            // ── Render Apple II display to GPU texture (not during logo) ─────
+            // ── Render display to GPU texture ─────────────────────────────────
+            // When the debugger is active, render the debugger display into the
+            // framebuffer instead of the Apple II screen — exactly like the
+            // original AppleWin, where the debugger replaces the screen.
             if !in_logo_mode {
-                self.render_apple2();
+                if self.show_debugger && self.debugger.active {
+                    self.render_debugger();
+                } else {
+                    self.render_apple2();
+                }
                 let tex_opts = TextureOptions {
                     magnification: egui::TextureFilter::Nearest,
                     minification:  egui::TextureFilter::Nearest,
@@ -1250,408 +1282,61 @@ mod gui {
                 if do_cancel { self.pending_reset = None; }
             }
 
-            // ── Debugger window ───────────────────────────────────────────────
-            // Matches the original AppleWin debugger layout: black background,
-            // monospace text, all panels visible simultaneously.
-            //   Left:  Disassembly listing
-            //   Right: Registers, Stack, Breakpoints, Watches, Soft-switches
-            //   Bottom: Memory dump (Data window)
-            //   Very bottom: Console output + command input
-            if self.show_debugger {
+            // ── Debugger ──────────────────────────────────────────────────────
+            // Renders directly into the 560×384 framebuffer (replacing the
+            // Apple II screen), matching the original AppleWin debugger.
+            // Keyboard input is captured via egui events; a small command-
+            // input overlay appears at the bottom of the main screen area.
+            if self.show_debugger && self.debugger.active {
                 use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                use apple2_debugger::breakpoint::{Breakpoint, BreakpointKind};
                 use apple2_debugger::commands::{self, CmdResult, CpuRegs};
-                use apple2_debugger::softswitch::decode_soft_switches;
 
-                // AppleWin debugger color palette
-                const DBG_BG:        Color32 = Color32::from_rgb(0, 0, 0);
-                const DBG_TEXT:      Color32 = Color32::from_rgb(204, 204, 204);
-                const DBG_ADDR:      Color32 = Color32::from_rgb(255, 255, 0);     // yellow addresses
-                #[allow(dead_code)]
-                const DBG_OPCODE:    Color32 = Color32::from_rgb(255, 255, 255);    // white mnemonics
-                #[allow(dead_code)]
-                const DBG_OPERAND:   Color32 = Color32::from_rgb(0, 255, 255);      // cyan operands
-                const DBG_LABEL:     Color32 = Color32::from_rgb(0, 128, 0);        // green section headers
-                const DBG_REGS:      Color32 = Color32::from_rgb(255, 128, 0);      // orange register values
-                const DBG_BP:        Color32 = Color32::from_rgb(255, 0, 0);        // red breakpoints
-                const DBG_CURSOR:    Color32 = Color32::from_rgb(64, 64, 192);      // blue cursor bg
-                const DBG_PC_BG:     Color32 = Color32::from_rgb(192, 192, 0);      // yellow PC bg
-                const DBG_CONSOLE:   Color32 = Color32::from_rgb(192, 192, 192);    // console text
-                const DBG_FLAG_SET:  Color32 = Color32::from_rgb(255, 255, 255);    // set flag
-                const DBG_FLAG_CLR:  Color32 = Color32::from_rgb(100, 100, 100);    // clear flag
-                const DBG_DATA:      Color32 = Color32::from_rgb(0, 192, 255);      // data bytes
-                const DBG_ASCII:     Color32 = Color32::from_rgb(0, 255, 255);      // ascii column
-                const DBG_WATCH_VAL: Color32 = Color32::from_rgb(128, 255, 128);    // watch values
-                const DBG_SWITCH_ON: Color32 = Color32::from_rgb(0, 255, 0);        // switch on
-                const DBG_SWITCH_OFF:Color32 = Color32::from_rgb(128, 0, 0);        // switch off
-
-                let pc   = self.emu.cpu.pc;
-                let a    = self.emu.cpu.a;
-                let x    = self.emu.cpu.x;
-                let y    = self.emu.cpu.y;
-                let sp   = self.emu.cpu.sp;
-                let p    = self.emu.cpu.flags.bits();
-                let cpu_cycles = self.emu.cpu.cycles;
+                // The debugger display is rendered into the framebuffer by
+                // render_debugger() above. Here we only handle keyboard
+                // input and process commands.
                 let paused = self.debugger.active;
-                let mode_bits = self.emu.bus.mode.bits();
 
-                let mono = FontId::monospace(11.0);
+                let mut do_step      = false;
+                let mut do_step_over = false;
+                let mut do_step_out  = false;
+                let mut do_resume    = false;
+                let mut do_exec_cmd  = false;
 
-                // Deferred actions
-                let mut do_step       = false;
-                let mut do_step_over  = false;
-                let mut do_step_out   = false;
-                let mut do_pause      = false;
-                let mut do_resume     = false;
-                let mut do_add_bp     = false;
-                let mut do_exec_cmd   = false;
-                let mut do_remove_bp: Option<usize> = None;
-                let do_toggle_bp: Option<usize> = None;
-                let mut cursor_update: Option<u16>  = None;
-                let do_goto_addr  = false;
-
-                let dbg_frame = egui::Frame::none()
-                    .fill(DBG_BG)
-                    .inner_margin(egui::style::Margin::same(4.0));
-
-                egui::Window::new("Debugger")
-                    .resizable(true)
-                    .min_width(800.0)
-                    .default_width(900.0)
-                    .min_height(580.0)
-                    .default_height(680.0)
-                    .frame(dbg_frame)
-                    .show(ctx, |ui| {
-                        // ────────────────────────────────────────────────────
-                        // TOP: Execution controls
-                        // ────────────────────────────────────────────────────
-                        ui.horizontal(|ui| {
-                            if paused {
-                                if ui.button(RichText::new("G Go").monospace().color(Color32::WHITE)).clicked() { do_resume = true; }
-                                if ui.button(RichText::new("S Step").monospace().color(Color32::WHITE)).clicked() { do_step = true; }
-                                if ui.button(RichText::new("SO Over").monospace().color(Color32::WHITE)).clicked() { do_step_over = true; }
-                                if ui.button(RichText::new("OUT").monospace().color(Color32::WHITE)).clicked() { do_step_out = true; }
-                            } else {
-                                if ui.button(RichText::new("Break").monospace().color(Color32::WHITE)).clicked() { do_pause = true; }
-                            }
-                            ui.add_space(12.0);
-                            let status = match &self.debugger.stop_reason {
-                                apple2_debugger::state::StopReason::Breakpoint(addr) => format!("*BREAK* ${addr:04X}"),
-                                apple2_debugger::state::StopReason::Step => "*STEP*".into(),
-                                apple2_debugger::state::StopReason::StepOver => "*STEP OVER*".into(),
-                                apple2_debugger::state::StopReason::StepOut => "*STEP OUT*".into(),
-                                apple2_debugger::state::StopReason::TraceComplete => "*TRACE DONE*".into(),
-                                apple2_debugger::state::StopReason::UserBreak => "*USER BREAK*".into(),
-                                apple2_debugger::state::StopReason::Running => "Running...".into(),
-                                _ => "*STOPPED*".into(),
-                            };
-                            let sc = if paused { DBG_BP } else { Color32::from_rgb(0, 200, 0) };
-                            ui.label(RichText::new(status).font(mono.clone()).color(sc));
-                        });
-                        ui.add_space(2.0);
-
-                        // ────────────────────────────────────────────────────
-                        // MAIN AREA: Left=Disasm, Right=Info panels
-                        // ────────────────────────────────────────────────────
-                        let main_height = (ui.available_height() - 140.0).max(200.0);
-                        ui.horizontal(|ui| {
-
-                        // ═══════════════════════════════════════════════════
-                        // LEFT: Disassembly (Code Window)
-                        // ═══════════════════════════════════════════════════
-                        ui.vertical(|ui| {
-                            ui.set_width(420.0);
-                            ui.label(RichText::new(" Code").font(mono.clone()).color(DBG_LABEL));
-
-                            egui::ScrollArea::vertical()
-                                .max_height(main_height)
-                                .id_source("dbg_code")
-                                .show(ui, |ui| {
-                                    let start = if let Some(goto) = self.debugger.goto_addr {
-                                        goto
-                                    } else if paused {
-                                        pc
-                                    } else {
-                                        self.debugger.cursor
-                                    };
-                                    let mut addr = start;
-                                    for _ in 0..30 {
-                                        let instr = disassemble_one(addr, |a| self.emu.bus.read_raw(a));
-                                        let has_bp = self.debugger.breakpoints.breakpoints.iter()
-                                            .any(|bp| bp.enabled && bp.kind == BreakpointKind::Opcode && bp.address == addr);
-                                        let sym_name = self.debugger.symbols.name_at(addr);
-                                        let is_pc = addr == pc;
-
-                                        // Build line: marker + address + bytes + mnemonic + operand
-                                        let marker = if is_pc { ">" } else if has_bp { "*" } else { " " };
-
-                                        // Raw bytes
-                                        let mut raw = String::new();
-                                        for i in 0..instr.bytes {
-                                            raw.push_str(&format!("{:02X} ", self.emu.bus.read_raw(addr.wrapping_add(i as u16))));
-                                        }
-                                        while raw.len() < 9 { raw.push(' '); }
-
-                                        let line = format!(
-                                            "{marker}{:04X}:{raw}{:3} {}{}",
-                                            addr,
-                                            instr.mnemonic,
-                                            // Format operand without the address prefix
-                                            &format_instruction(&instr)[6..], // skip "XXXX: "
-                                            sym_name.map(|s| format!(" ;{s}")).unwrap_or_default(),
-                                        );
-
-                                        let (fg, bg) = if is_pc {
-                                            (Color32::BLACK, DBG_PC_BG)
-                                        } else if has_bp {
-                                            (Color32::WHITE, Color32::from_rgb(128, 0, 0))
-                                        } else if addr == self.debugger.cursor {
-                                            (Color32::WHITE, DBG_CURSOR)
-                                        } else {
-                                            (DBG_TEXT, DBG_BG)
-                                        };
-
-                                        let resp = ui.selectable_label(
-                                            false,
-                                            RichText::new(&line).font(mono.clone()).color(fg).background_color(bg),
-                                        );
-                                        if resp.clicked() { cursor_update = Some(addr); }
-                                        if resp.secondary_clicked() {
-                                            let existing = self.debugger.breakpoints.breakpoints.iter()
-                                                .position(|bp| bp.kind == BreakpointKind::Opcode && bp.address == addr);
-                                            if let Some(idx) = existing {
-                                                do_remove_bp = Some(idx);
-                                            } else {
-                                                self.debugger_bp_input = format!("{:04X}", addr);
-                                                do_add_bp = true;
-                                            }
-                                        }
-                                        addr = addr.wrapping_add(instr.bytes as u16);
-                                    }
-                                });
-                        });
-
-                        ui.add_space(4.0);
-
-                        // ═══════════════════════════════════════════════════
-                        // RIGHT: Registers, Stack, Breakpoints, Watches, Switches
-                        // ═══════════════════════════════════════════════════
-                        ui.vertical(|ui| {
-                            ui.set_min_width(300.0);
-
-                            egui::ScrollArea::vertical()
-                                .max_height(main_height)
-                                .id_source("dbg_right")
-                                .show(ui, |ui| {
-
-                            // ── Registers ────────────────────────────────────
-                            ui.label(RichText::new(" Registers").font(mono.clone()).color(DBG_LABEL));
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("PC ").font(mono.clone()).color(DBG_TEXT));
-                                ui.label(RichText::new(format!("{:04X}", pc)).font(mono.clone()).color(DBG_REGS));
-                                ui.add_space(8.0);
-                                ui.label(RichText::new("A ").font(mono.clone()).color(DBG_TEXT));
-                                ui.label(RichText::new(format!("{:02X}", a)).font(mono.clone()).color(DBG_REGS));
-                                ui.add_space(8.0);
-                                ui.label(RichText::new("X ").font(mono.clone()).color(DBG_TEXT));
-                                ui.label(RichText::new(format!("{:02X}", x)).font(mono.clone()).color(DBG_REGS));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("SP ").font(mono.clone()).color(DBG_TEXT));
-                                ui.label(RichText::new(format!("  {:02X}", sp)).font(mono.clone()).color(DBG_REGS));
-                                ui.add_space(8.0);
-                                ui.label(RichText::new("Y ").font(mono.clone()).color(DBG_TEXT));
-                                ui.label(RichText::new(format!("{:02X}", y)).font(mono.clone()).color(DBG_REGS));
-                                ui.add_space(8.0);
-                                ui.label(RichText::new("P ").font(mono.clone()).color(DBG_TEXT));
-                                ui.label(RichText::new(format!("{:02X}", p)).font(mono.clone()).color(DBG_REGS));
-                            });
-                            // Flags with set/clear coloring
-                            ui.horizontal(|ui| {
-                                for (bit, name) in [(0x80, "N"), (0x40, "V"), (0x20, "-"), (0x10, "B"),
-                                                     (0x08, "D"), (0x04, "I"), (0x02, "Z"), (0x01, "C")] {
-                                    let set = p & bit != 0;
-                                    let (fg, bg) = if name == "-" {
-                                        (DBG_FLAG_CLR, DBG_BG)
-                                    } else if set {
-                                        (Color32::BLACK, DBG_FLAG_SET)
-                                    } else {
-                                        (DBG_FLAG_CLR, DBG_BG)
-                                    };
-                                    let label = if set { name.to_uppercase() } else { name.to_lowercase() };
-                                    ui.label(RichText::new(label).font(mono.clone()).color(fg).background_color(bg));
-                                }
-                                ui.add_space(8.0);
-                                ui.label(RichText::new(format!("Cyc:{cpu_cycles}")).font(mono.clone()).color(DBG_TEXT));
-                            });
-                            ui.add_space(4.0);
-
-                            // ── Stack ────────────────────────────────────────
-                            ui.label(RichText::new(" Stack").font(mono.clone()).color(DBG_LABEL));
-                            {
-                                let top = sp.wrapping_add(1);
-                                let mut saddr = 0x0100u16 | top as u16;
-                                let mut count = 0;
-                                while saddr <= 0x01FF && count < 8 {
-                                    let b = self.emu.bus.read_raw(saddr);
-                                    let marker = if count == 0 { ">" } else { " " };
-                                    ui.label(RichText::new(format!(
-                                        "{marker}{:04X}: {:02X}", saddr, b
-                                    )).font(mono.clone()).color(DBG_DATA));
-                                    saddr += 1;
-                                    count += 1;
-                                }
-                                if count == 0 {
-                                    ui.label(RichText::new(" (empty)").font(mono.clone()).color(DBG_TEXT));
-                                }
-                            }
-                            ui.add_space(4.0);
-
-                            // ── Breakpoints ──────────────────────────────────
-                            ui.label(RichText::new(" Breakpoints").font(mono.clone()).color(DBG_LABEL));
-                            if self.debugger.breakpoints.is_empty() {
-                                ui.label(RichText::new(" (none)").font(mono.clone()).color(DBG_TEXT));
-                            } else {
-                                for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
-                                    let kind = match bp.kind {
-                                        BreakpointKind::Opcode   => "PC",
-                                        BreakpointKind::MemRead  => "MR",
-                                        BreakpointKind::MemWrite => "MW",
-                                        _ => "??",
-                                    };
-                                    let en = if bp.enabled { " " } else { "D" };
-                                    let c = if bp.enabled { DBG_BP } else { DBG_FLAG_CLR };
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!(
-                                            " {idx}:{en} ${:04X} {kind}", bp.address
-                                        )).font(mono.clone()).color(c));
-                                        if ui.small_button("x").clicked() { do_remove_bp = Some(idx); }
-                                    });
-                                }
-                            }
-                            ui.add_space(4.0);
-
-                            // ── Watches ──────────────────────────────────────
-                            ui.label(RichText::new(" Watches").font(mono.clone()).color(DBG_LABEL));
-                            if self.debugger.watches.items.is_empty() {
-                                ui.label(RichText::new(" (none)").font(mono.clone()).color(DBG_TEXT));
-                            } else {
-                                for (idx, w) in self.debugger.watches.items.iter().enumerate() {
-                                    let b = self.emu.bus.read_raw(w.address);
-                                    ui.label(RichText::new(format!(
-                                        " {idx}: ${:04X}={:02X} ({b:3})", w.address, b
-                                    )).font(mono.clone()).color(DBG_WATCH_VAL));
-                                }
-                            }
-                            ui.add_space(4.0);
-
-                            // ── Soft Switches (compact) ──────────────────────
-                            ui.label(RichText::new(" Switches").font(mono.clone()).color(DBG_LABEL));
-                            let info = decode_soft_switches(mode_bits);
-                            for row in info.items.chunks(3) {
-                                ui.horizontal(|ui| {
-                                    for sw in row {
-                                        let c = if sw.active { DBG_SWITCH_ON } else { DBG_SWITCH_OFF };
-                                        let state = if sw.active { "+" } else { "-" };
-                                        ui.label(RichText::new(format!("{state}{:<9}", sw.name))
-                                            .font(mono.clone()).color(c));
-                                    }
-                                });
-                            }
-                            // Video mode summary
-                            {
-                                let graphics = mode_bits & 0x4000 != 0;
-                                let hires = mode_bits & 0x0040 != 0;
-                                let mixed = mode_bits & 0x8000 != 0;
-                                let vid80 = mode_bits & 0x0001_0000 != 0;
-                                let dhires = mode_bits & 0x0004_0000 != 0;
-                                let page2 = mode_bits & 0x0080 != 0;
-                                let mode_str = if !graphics {
-                                    if vid80 { "TEXT 80" } else { "TEXT 40" }
-                                } else if hires {
-                                    if dhires { "DHGR" } else { "HGR" }
-                                } else {
-                                    if dhires { "DGR" } else { "GR" }
-                                };
-                                let page = if page2 { "P2" } else { "P1" };
-                                let mix = if mixed { "+M" } else { "" };
-                                ui.label(RichText::new(format!(" Video: {mode_str} {page}{mix}"))
-                                    .font(mono.clone()).color(DBG_TEXT));
-                            }
-
-                            }); // end right scroll area
-                        });
-                        }); // end main horizontal
-
-                        // ────────────────────────────────────────────────────
-                        // BOTTOM: Data window (Memory dump)
-                        // ────────────────────────────────────────────────────
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(" Data").font(mono.clone()).color(DBG_LABEL));
-                            ui.add_space(8.0);
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.debugger_mem_input)
-                                    .desired_width(50.0)
-                                    .font(mono.clone())
-                                    .text_color(DBG_REGS)
-                            );
-                            if ui.small_button("Go").clicked()
-                                || (resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
-                            {
-                                if let Ok(addr) = u16::from_str_radix(
-                                    self.debugger_mem_input.trim().trim_start_matches('$'), 16
-                                ) {
-                                    self.debugger.mem_view_addr = addr;
-                                }
-                            }
-                            if ui.small_button("PgUp").clicked() {
-                                self.debugger.mem_view_addr = self.debugger.mem_view_addr.wrapping_sub(0x80);
-                            }
-                            if ui.small_button("PgDn").clicked() {
-                                self.debugger.mem_view_addr = self.debugger.mem_view_addr.wrapping_add(0x80);
-                            }
-                        });
-                        {
-                            let start = self.debugger.mem_view_addr;
-                            let mut addr = start;
-                            for _ in 0..8 {
-                                let mut hex = String::new();
-                                let mut asc = String::new();
-                                for i in 0..8u16 {
-                                    let b = self.emu.bus.read_raw(addr.wrapping_add(i));
-                                    hex.push_str(&format!("{b:02X} "));
-                                    asc.push(if (0x20..=0x7E).contains(&b) { b as char } else { '.' });
-                                }
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{addr:04X}:")).font(mono.clone()).color(DBG_ADDR));
-                                    ui.label(RichText::new(&hex).font(mono.clone()).color(DBG_DATA));
-                                    ui.label(RichText::new(&asc).font(mono.clone()).color(DBG_ASCII));
-                                });
-                                addr = addr.wrapping_add(8);
+                // Keyboard shortcuts (when no text field has focus)
+                ctx.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
+                            match key {
+                                Key::F5  => do_resume = true,     // Go
+                                Key::F10 => do_step_over = true,  // Step Over
+                                Key::F11 => do_step = true,       // Step Into
+                                Key::F7 if modifiers.shift => do_step_out = true,
+                                _ => {}
                             }
                         }
+                    }
+                });
 
-                        // ────────────────────────────────────────────────────
-                        // VERY BOTTOM: Console + Command line
-                        // ────────────────────────────────────────────────────
-                        ui.add_space(2.0);
-                        ui.label(RichText::new(" Console").font(mono.clone()).color(DBG_LABEL));
-                        egui::ScrollArea::vertical()
-                            .max_height(48.0)
-                            .id_source("dbg_console")
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                for line in self.debugger.console_output.iter().rev().take(5).collect::<Vec<_>>().into_iter().rev() {
-                                    ui.label(RichText::new(line).font(mono.clone()).color(DBG_CONSOLE));
-                                }
-                            });
+                // Small command input bar overlaid at bottom of screen area
+                egui::TopBottomPanel::bottom("dbg_cmd")
+                    .frame(
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(16, 16, 32))
+                            .inner_margin(egui::style::Margin::symmetric(6.0, 2.0)),
+                    )
+                    .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(">").font(mono.clone()).color(DBG_REGS));
+                            if paused {
+                                if ui.button("G").clicked() { do_resume = true; }
+                                if ui.button("S").clicked() { do_step = true; }
+                                if ui.button("SO").clicked() { do_step_over = true; }
+                                if ui.button("OUT").clicked() { do_step_out = true; }
+                            }
+                            ui.label(RichText::new(">").monospace().color(Color32::from_rgb(255, 128, 0)));
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut self.debugger_cmd_input)
-                                    .desired_width(ui.available_width() - 40.0)
-                                    .font(mono.clone())
+                                    .desired_width(ui.available_width() - 8.0)
+                                    .font(FontId::monospace(12.0))
                                     .text_color(Color32::WHITE)
                             );
                             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -1662,14 +1347,10 @@ mod gui {
                     });
 
                 // ── Apply deferred actions ─────────────────────────────────
-                if do_pause {
-                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
-                }
                 if do_resume {
                     self.debugger.deactivate();
                 }
                 if do_step && paused {
-                    // Record trace if enabled
                     if self.debugger.trace.enabled {
                         use apple2_debugger::trace::TraceEntry;
                         let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
@@ -1689,46 +1370,19 @@ mod gui {
                     self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
                 }
                 if do_step_over && paused {
-                    // If current instruction is JSR, set step-over target to PC+3
                     let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
                     if opcode == 0x20 {
-                        // JSR — step over it
                         self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
                         self.debugger.deactivate();
                     } else {
-                        // Not a JSR — just single-step
                         self.emu.step();
                         self.debugger.stop_reason = apple2_debugger::state::StopReason::StepOver;
                     }
                 }
                 if do_step_out && paused {
-                    // Run until RTS: set step-out target
                     self.debugger.step_out_sp = Some(self.emu.cpu.sp);
                     self.debugger.deactivate();
-                    // Step-out runs until we see RTS with SP >= saved SP
-                    // This is approximated by running with a breakpoint-like check
                 }
-                if do_goto_addr {
-                    if let Ok(addr) = u16::from_str_radix(
-                        self.debugger_mem_input.trim().trim_start_matches('$'), 16
-                    ) {
-                        self.debugger.goto_addr = Some(addr);
-                        self.debugger.cursor = addr;
-                    }
-                } else {
-                    self.debugger.goto_addr = None;
-                }
-                if do_add_bp {
-                    if let Ok(addr) = u16::from_str_radix(
-                        self.debugger_bp_input.trim().trim_start_matches('$'), 16
-                    ) {
-                        self.debugger.breakpoints.add(Breakpoint::at(addr));
-                        self.debugger_bp_input.clear();
-                    }
-                }
-                if let Some(idx) = do_remove_bp { self.debugger.breakpoints.remove(idx); }
-                if let Some(idx) = do_toggle_bp { self.debugger.breakpoints.toggle(idx); }
-                if let Some(addr) = cursor_update { self.debugger.cursor = addr; }
 
                 // Execute console command
                 if do_exec_cmd {
