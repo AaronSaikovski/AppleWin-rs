@@ -1340,7 +1340,9 @@ mod gui {
                     }
                 });
 
-                // Small command input bar overlaid at bottom of screen area
+                // Command input bar at the bottom of the screen area.
+                // Uses a stable egui Id so we can force focus onto it.
+                let cmd_id = egui::Id::new("dbg_cmd_input");
                 egui::TopBottomPanel::bottom("dbg_cmd")
                     .frame(
                         egui::Frame::none()
@@ -1358,16 +1360,25 @@ mod gui {
                             ui.label(RichText::new(">").monospace().color(Color32::from_rgb(255, 128, 0)));
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut self.debugger_cmd_input)
+                                    .id(cmd_id)
                                     .desired_width(ui.available_width() - 8.0)
                                     .font(FontId::monospace(12.0))
                                     .text_color(Color32::WHITE)
                             );
+                            // Auto-focus the command input whenever the debugger is active
+                            if !resp.has_focus() {
+                                resp.request_focus();
+                            }
+                            // Execute command on Enter
                             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                                 do_exec_cmd = true;
-                                resp.request_focus();
                             }
                         });
                     });
+                // Re-grab focus after command execution so typing continues
+                if do_exec_cmd {
+                    ctx.memory_mut(|m| m.request_focus(cmd_id));
+                }
 
                 // ── Apply deferred actions ─────────────────────────────────
                 if do_resume {
