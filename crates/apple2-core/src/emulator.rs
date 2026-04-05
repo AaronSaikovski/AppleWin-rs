@@ -50,7 +50,7 @@ impl Emulator {
     /// Returns the number of cycles actually executed (may overshoot by up to
     /// the longest instruction — 7 cycles for BRK).
     pub fn execute(&mut self, cycles: u64) -> u64 {
-        // Jammed CPUs just advance time — check once, outside the hot loop.
+        // Jammed / stopped CPUs just advance time.
         if self.cpu.jammed {
             self.cpu.cycles += cycles;
             return cycles;
@@ -59,6 +59,28 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
         while self.cpu.cycles < target {
+            // 65C02 WAI: CPU is halted waiting for an interrupt.
+            // Advance time and poll cards until an IRQ or NMI arrives.
+            if self.cpu.waiting {
+                // Advance to the next card-update boundary or target, whichever comes first.
+                let advance_to = target.min(next_update);
+                self.cpu.cycles = advance_to;
+                if self.cpu.cycles >= next_update {
+                    self.bus.cards.update_all(self.cpu.cycles);
+                    next_update += 17_030;
+                }
+                // Check if an interrupt has arrived to wake us up.
+                self.bus.irq_line = self.bus.cards.any_irq_active();
+                if self.bus.irq_line || self.cpu.nmi_pending != 0 {
+                    self.cpu.waiting = false;
+                    // Let the normal interrupt handling below take effect.
+                    if self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
+                        self.cpu.irq_pending |= 0x01;
+                    }
+                }
+                continue;
+            }
+
             // Snapshot the IRQ line *before* executing the instruction so we can
             // detect an edge (IRQ asserted during this opcode's last cycle).
             let irq_before = self.bus.irq_line;

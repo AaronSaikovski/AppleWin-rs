@@ -33,6 +33,12 @@ pub struct Cpu {
     /// When an IRQ first asserts on the last cycle of an opcode, we defer by
     /// one opcode before taking the interrupt — matching 6502 hardware behaviour.
     pub irq_defer: bool,
+
+    /// 65C02 WAI: CPU is halted waiting for an interrupt (IRQ or NMI).
+    /// When true, the CPU does not execute instructions; it just advances
+    /// time until an interrupt arrives, at which point `waiting` is cleared
+    /// and the interrupt is serviced normally.
+    pub waiting: bool,
 }
 
 impl Default for Cpu {
@@ -50,6 +56,7 @@ impl Default for Cpu {
             jammed: false,
             is_65c02: true,
             irq_defer: false,
+            waiting: false,
         }
     }
 }
@@ -71,6 +78,7 @@ impl Cpu {
         self.sp = 0xFF;
         self.flags = Flags::power_on();
         self.jammed = false;
+        self.waiting = false;
         self.irq_pending = 0;
         self.nmi_pending = 0;
         self.irq_defer = false;

@@ -1998,12 +1998,12 @@ pub static DISPATCH_65C02: [OpFn; 256] = [
 
     op_cpy_imm,      op_cmp_indx,    op_nop,      op_nop, // Cx
     op_cpy_zp,       op_cmp_zp,      op_dec_zp,   op_nop,
-    op_iny,          op_cmp_imm,     op_dex,      op_nop,
+    op_iny,          op_cmp_imm,     op_dex,      op_wai,
     op_cpy_abs,      op_cmp_abs,     op_dec_abs,  op_nop,
 
     op_bne,          op_cmp_indy,    op_cmp_ind_zp,op_nop, // Dx
     op_nop,          op_cmp_zpx,     op_dec_zpx,  op_nop,
-    op_cld,          op_cmp_absy,    op_phx,      op_nop,
+    op_cld,          op_cmp_absy,    op_phx,      op_stp,
     op_nop,          op_cmp_absx,    op_dec_absx, op_nop,
 
     op_cpx_imm,      op_sbc_indx,    op_nop,      op_nop, // Ex
@@ -2020,4 +2020,19 @@ pub static DISPATCH_65C02: [OpFn; 256] = [
 // 65C02 BRA (branch always)
 fn op_bra(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.branch_target(bus, true)
+}
+
+/// 65C02 WAI ($CB): halt CPU until an interrupt (IRQ or NMI) arrives.
+/// Sets `cpu.waiting = true`; the emulator execute loop must check this flag
+/// and skip instruction dispatch while it is set, advancing time instead.
+fn op_wai(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
+    cpu.waiting = true;
+    0
+}
+
+/// 65C02 STP ($DB): stop the processor entirely (only a RESET can restart).
+/// Reuses the existing `jammed` flag.
+fn op_stp(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
+    cpu.jammed = true;
+    0
 }

@@ -56,7 +56,9 @@ bitflags! {
 
 impl Default for MemMode {
     fn default() -> Self {
-        MemMode::empty()
+        // Apple IIe power-on state: bank 2 selected, LC write-enabled.
+        // Matches AppleWin C++ `kMemModeInitialState = MF_BANK2 | MF_WRITERAM`.
+        MemMode::MF_BANK2 | MemMode::MF_WRITERAM
     }
 }
 
