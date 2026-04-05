@@ -1181,7 +1181,9 @@ mod gui {
                     });
                 });
 
-            // ── Status bar ────────────────────────────────────────────────────
+            // ── Status bar (hidden when debugger is active) ──────────────────
+            let debugger_fullscreen = self.show_debugger && self.debugger.active;
+            if !debugger_fullscreen {
             egui::TopBottomPanel::bottom("statusbar")
                 .frame(
                     egui::Frame::none()
@@ -1221,9 +1223,11 @@ mod gui {
                         });
                     });
                 });
+            } // end if !debugger_fullscreen (status bar)
 
-            // ── Right button strip ────────────────────────────────────────────
+            // ── Right button strip (hidden when debugger is active) ───────────
             let icons = self.icons.as_ref();
+            if !debugger_fullscreen {
             egui::SidePanel::right("buttons")
                 .exact_width(BTN_PANEL_W)
                 .resizable(false)
@@ -1273,6 +1277,7 @@ mod gui {
                         if icon_btn(ui, icons.and_then(|ic| ic.setup.as_ref()), "⚙",  "Settings",            sz, isz).clicked() { act_show_settings = true; }
                     });
                 });
+            } // end if !debugger_fullscreen (button strip)
 
             // ── Confirm reboot dialog ─────────────────────────────────────────
             if let Some(power_cycle) = self.pending_reset {
@@ -1995,28 +2000,53 @@ mod gui {
             }
 
             // ── Central panel — Apple II screen framed with 3D bevel ──────────
+            // When the debugger is active: black background, no bevel, fill area.
+            let central_bg = if debugger_fullscreen { Color32::BLACK } else { WIN_FACE };
+            let central_margin = if debugger_fullscreen { 0.0 } else { 8.0 };
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(WIN_FACE)
-                        .inner_margin(egui::style::Margin::same(8.0)),
+                        .fill(central_bg)
+                        .inner_margin(egui::style::Margin::same(central_margin)),
                 )
                 .show(ctx, |ui| {
                     let avail = ui.available_rect_before_wrap();
 
                     let sw = SCREEN_W as f32;
                     let sh = SCREEN_H as f32;
-                    // Use integer scaling in PHYSICAL pixels, not egui points.
-                    // At non-100% DPI (e.g. 125%), an egui-point integer scale maps
-                    // to a fractional physical pixel count, causing the GPU to blend
-                    // adjacent framebuffer rows even with Nearest filtering.
                     let ppp = ctx.pixels_per_point();
+
+                    if debugger_fullscreen {
+                        // Debugger mode: fill available area, no bevel
+                        let avail_pw = avail.width() * ppp;
+                        let avail_ph = avail.height() * ppp;
+                        let phys_scale_w = (avail_pw / sw).floor().max(1.0);
+                        let phys_scale_h = (avail_ph / sh).floor().max(1.0);
+                        let phys_scale   = phys_scale_w.min(phys_scale_h);
+                        let scale = phys_scale / ppp;
+                        let disp_w = sw * scale;
+                        let disp_h = sh * scale;
+
+                        let ox = avail.left() + ((avail.width()  - disp_w) / 2.0).max(0.0);
+                        let oy = avail.top()  + ((avail.height() - disp_h) / 2.0).max(0.0);
+                        let screen = Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(disp_w, disp_h));
+
+                        if let Some(tid) = tex_id {
+                            ui.painter().image(
+                                tid,
+                                screen,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        ui.allocate_rect(avail, Sense::hover());
+                    } else {
+                    // Normal mode: bevel + centred screen
                     let avail_pw = (avail.width()  - BEVEL * 2.0) * ppp;
                     let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
                     let phys_scale_w = (avail_pw / sw).floor().max(1.0);
                     let phys_scale_h = (avail_ph / sh).floor().max(1.0);
                     let phys_scale   = phys_scale_w.min(phys_scale_h);
-                    // Convert back to egui points for layout
                     let scale = phys_scale / ppp;
                     let outer_w = sw * scale + BEVEL * 2.0;
                     let outer_h = sh * scale + BEVEL * 2.0;
@@ -2091,6 +2121,7 @@ mod gui {
                     }
 
                     ui.allocate_rect(outer, Sense::hover());
+                    } // end else (normal mode)
                 });
 
             // ── Apply deferred actions ────────────────────────────────────────
