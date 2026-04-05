@@ -29,6 +29,8 @@ pub struct Emulator {
     pub bus:   Bus,
     pub model: Apple2Model,
     pub mode:  AppMode,
+    /// Consecutive iterations where PC didn't change (tight-loop detection).
+    stuck_count: u64,
 }
 
 impl Emulator {
@@ -43,6 +45,7 @@ impl Emulator {
             bus,
             model,
             mode: AppMode::Logo,
+            stuck_count: 0,
         }
     }
 
@@ -106,7 +109,22 @@ impl Emulator {
                 self.cpu.irq_defer = false;
             }
 
+            let pc_before = self.cpu.pc;
             dispatch::step(&mut self.cpu, &mut self.bus);
+
+            // Tight-loop detection: if PC returns to the same address repeatedly,
+            // log it once so we can diagnose where ProDOS (or any program) is stuck.
+            if self.cpu.pc == pc_before {
+                self.stuck_count += 1;
+                if self.stuck_count == 500_000 {
+                    tracing::warn!(
+                        "CPU appears stuck at PC=${:04X} A=${:02X} X=${:02X} Y=${:02X} SP=${:02X} P=${:02X}",
+                        self.cpu.pc, self.cpu.a, self.cpu.x, self.cpu.y, self.cpu.sp, self.cpu.flags.bits()
+                    );
+                }
+            } else {
+                self.stuck_count = 0;
+            }
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
             // the last cycle of this opcode → defer by one opcode (if I flag is clear).

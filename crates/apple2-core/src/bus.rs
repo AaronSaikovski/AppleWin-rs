@@ -333,10 +333,16 @@ impl Bus {
         self.pages_w[0xC0] = PageDst::Inhibit;
 
         // Pages 0xC1–0xCF: peripheral ROM or internal ROM
+        let slotc3rom = self.mode.contains(MemMode::MF_SLOTC3ROM);
         for slot in 1u8..=0xF {
             let page = (0xC0 + slot) as usize;
             if intcxrom {
+                // INTCXROM on: all slots read from internal ROM
                 self.pages_r[page] = PageSrc::Rom(0xC000 + (slot as u16) * 0x100);
+            } else if slot == 3 && !slotc3rom {
+                // Apple IIe special: when SLOTC3ROM is off, $C300–$C3FF always
+                // shows the internal 80-column firmware, not an external card.
+                self.pages_r[page] = PageSrc::Rom(0xC300);
             } else {
                 self.pages_r[page] = PageSrc::Io; // card Cx ROM — dispatched per read
             }
