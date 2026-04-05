@@ -102,4 +102,33 @@ impl BreakpointManager {
                 && addr < bp.address.saturating_add(bp.length)
         })
     }
+
+    /// Clear all breakpoints.
+    pub fn clear_all(&mut self) {
+        self.breakpoints.clear();
+    }
+
+    /// Enable or disable a breakpoint by index.
+    pub fn set_enabled(&mut self, index: usize, enabled: bool) {
+        if let Some(bp) = self.breakpoints.get_mut(index) {
+            bp.enabled = enabled;
+        }
+    }
+
+    /// Toggle a breakpoint's enabled state.
+    pub fn toggle(&mut self, index: usize) {
+        if let Some(bp) = self.breakpoints.get_mut(index) {
+            bp.enabled = !bp.enabled;
+        }
+    }
+
+    /// Number of breakpoints.
+    pub fn len(&self) -> usize {
+        self.breakpoints.len()
+    }
+
+    /// Whether there are no breakpoints.
+    pub fn is_empty(&self) -> bool {
+        self.breakpoints.is_empty()
+    }
 }

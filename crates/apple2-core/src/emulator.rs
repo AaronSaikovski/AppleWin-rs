@@ -105,6 +105,58 @@ impl Emulator {
         dispatch::step(&mut self.cpu, &mut self.bus)
     }
 
+    /// Execute instructions with a per-instruction callback.
+    ///
+    /// The callback receives the PC before each instruction executes.
+    /// Return `true` from the callback to continue, `false` to stop.
+    /// Returns the total cycles executed.
+    pub fn execute_with_callback<F>(&mut self, cycles: u64, mut callback: F) -> u64
+    where
+        F: FnMut(u16) -> bool,
+    {
+        if self.cpu.jammed {
+            self.cpu.cycles += cycles;
+            return cycles;
+        }
+        let start = self.cpu.cycles;
+        let target = start + cycles;
+        let mut next_update = start + 17_030;
+        while self.cpu.cycles < target {
+            // Call the callback with current PC; stop if it returns false
+            if !callback(self.cpu.pc) {
+                break;
+            }
+
+            let irq_before = self.bus.irq_line;
+
+            if self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
+                if self.cpu.irq_defer {
+                    self.cpu.irq_defer = false;
+                    self.cpu.irq_pending |= 0x01;
+                } else {
+                    self.cpu.irq_pending |= 0x01;
+                }
+            } else {
+                self.cpu.irq_pending &= !0x01;
+                self.cpu.irq_defer = false;
+            }
+
+            dispatch::step(&mut self.cpu, &mut self.bus);
+
+            if !irq_before && self.bus.irq_line
+                && !self.cpu.flags.contains(super::cpu::Flags::I)
+            {
+                self.cpu.irq_pending &= !0x01;
+                self.cpu.irq_defer = true;
+            }
+            if self.cpu.cycles >= next_update {
+                self.bus.cards.update_all(self.cpu.cycles);
+                next_update += 17_030;
+            }
+        }
+        self.cpu.cycles - start
+    }
+
     /// Hard reset (power cycle).
     pub fn reset(&mut self, power_cycle: bool) {
         if power_cycle {
