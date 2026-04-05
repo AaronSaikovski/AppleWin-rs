@@ -170,26 +170,26 @@ pub fn init_memory_pattern(ram: &mut [u8; 65536], pattern: u8) {
         }
         4 => {
             // Alternating 00/FF per 128-byte half-page.
-            for i in 0..65536 {
-                ram[i] = if (i >> 7) & 1 == 0 { 0x00 } else { 0xFF };
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = if (i >> 7) & 1 == 0 { 0x00 } else { 0xFF };
             }
         }
         5 => {
             // Alternating FF/00 per 128-byte half-page.
-            for i in 0..65536 {
-                ram[i] = if (i >> 7) & 1 == 0 { 0xFF } else { 0x00 };
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = if (i >> 7) & 1 == 0 { 0xFF } else { 0x00 };
             }
         }
         6 => {
             // Pseudo-random pattern seeded from address (matches MIP6 in AppleWin).
-            for i in 0..65536 {
-                ram[i] = ((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = ((i as u16).wrapping_mul(0x0101) >> 8) as u8;
             }
         }
         7 => {
             // Inverse pseudo-random.
-            for i in 0..65536 {
-                ram[i] = !((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = !((i as u16).wrapping_mul(0x0101) >> 8) as u8;
             }
         }
         _ => ram.fill(0x00),

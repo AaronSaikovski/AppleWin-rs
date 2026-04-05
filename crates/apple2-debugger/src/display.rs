@@ -163,7 +163,7 @@ fn glyph(ch: u8) -> [u8; 7] {
         [0x00,0x10,0x2A,0x04,0x00,0x00,0x00], // '~'
     ];
 
-    if ch >= 0x20 && ch <= 0x7E {
+    if (0x20..=0x7E).contains(&ch) {
         FONT[(ch - 0x20) as usize]
     } else {
         [0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E] // filled box
@@ -177,10 +177,10 @@ fn draw_char(fb: &mut [u32], col: usize, row: usize, ch: u8, fg: u32, bg: u32) {
     let px = col * CHAR_W;
     let py = row * CHAR_H;
     let bitmap = glyph(ch);
-    for dy in 0..CHAR_H {
+    for (dy, &row_bits) in bitmap.iter().enumerate().take(CHAR_H) {
         for dx in 0..CHAR_W {
             let pixel = if dy < 7 && dx < 7 {
-                if bitmap[dy] & (0x20 >> dx) != 0 { fg } else { bg }
+                if row_bits & (0x20 >> dx) != 0 { fg } else { bg }
             } else {
                 bg // right column and bottom row are spacing
             };
@@ -341,11 +341,10 @@ where
             }
 
             // Symbol annotation
-            if let Some(name) = state.symbols.name_at(addr) {
-                if col < 40 {
+            if let Some(name) = state.symbols.name_at(addr)
+                && col < 40 {
                     col = draw_str(fb, col + 1, row, ";", GREY, line_bg);
                     draw_str(fb, col, row, name, GREEN, line_bg);
-                }
             }
             let _ = col; // suppress unused
 

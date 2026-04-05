@@ -88,10 +88,9 @@ where
     match cmd.as_str() {
         // ── Execution ────────────────────────────────────────────────────
         "G" | "GO" => {
-            if let Some(addr_str) = args.first() {
-                if let Some(addr) = parse_hex(addr_str) {
+            if let Some(addr_str) = args.first()
+                && let Some(addr) = parse_hex(addr_str) {
                     return CmdResult::SetPC(addr);
-                }
             }
             CmdResult::Go
         }
@@ -107,13 +106,12 @@ where
         "R" | "REG" | "REGISTERS" => {
             if let Some(reg_str) = args.first() {
                 let reg = reg_str.to_uppercase();
-                if let Some(val_str) = args.get(1) {
-                    if let Some(val) = parse_hex(val_str) {
+                if let Some(val_str) = args.get(1)
+                    && let Some(val) = parse_hex(val_str) {
                         let ch = reg.chars().next().unwrap_or('?');
                         return CmdResult::SetReg(ch, val);
-                    }
                 }
-                return CmdResult::Error(format!("Usage: R <reg> <value>  (e.g. R A 42)"));
+                return CmdResult::Error("Usage: R <reg> <value>  (e.g. R A 42)".to_string());
             }
             let lines = format_registers(regs);
             CmdResult::Output(lines)
@@ -166,12 +164,11 @@ where
 
         // ── Breakpoints ──────────────────────────────────────────────────
         "BP" | "BRK" => {
-            if let Some(addr_str) = args.first() {
-                if let Some(addr) = parse_hex(addr_str) {
+            if let Some(addr_str) = args.first()
+                && let Some(addr) = parse_hex(addr_str) {
                     let bp = Breakpoint::at(addr);
                     let idx = state.breakpoints.add(bp);
                     return CmdResult::Output(vec![format!("Breakpoint #{idx} set at ${addr:04X}")]);
-                }
             }
             // List breakpoints
             let lines = list_breakpoints(state);
@@ -179,8 +176,8 @@ where
         }
         "BPM" => {
             // Break on memory access
-            if let Some(addr_str) = args.first() {
-                if let Some(addr) = parse_hex(addr_str) {
+            if let Some(addr_str) = args.first()
+                && let Some(addr) = parse_hex(addr_str) {
                     let kind = if args.get(1).is_some_and(|s| s.eq_ignore_ascii_case("W")) {
                         BreakpointKind::MemWrite
                     } else {
@@ -189,41 +186,37 @@ where
                     let bp = Breakpoint { kind, address: addr, length: 1, enabled: true, label: None };
                     let idx = state.breakpoints.add(bp);
                     return CmdResult::Output(vec![format!("Memory breakpoint #{idx} at ${addr:04X}")]);
-                }
             }
             CmdResult::Error("Usage: BPM <addr> [R|W]".into())
         }
         "BPC" => {
             // Clear breakpoint
-            if let Some(idx_str) = args.first() {
-                if let Some(idx) = parse_value(idx_str) {
+            if let Some(idx_str) = args.first()
+                && let Some(idx) = parse_value(idx_str) {
                     state.breakpoints.remove(idx as usize);
                     return CmdResult::Output(vec![format!("Breakpoint #{idx} cleared")]);
-                }
-                if *idx_str == "*" {
+            } else if let Some(idx_str) = args.first()
+                && *idx_str == "*" {
                     state.breakpoints.clear_all();
                     return CmdResult::Output(vec!["All breakpoints cleared".into()]);
-                }
             }
             CmdResult::Error("Usage: BPC <index> | BPC *".into())
         }
         "BPD" => {
             // Disable breakpoint
-            if let Some(idx_str) = args.first() {
-                if let Some(idx) = parse_value(idx_str) {
+            if let Some(idx_str) = args.first()
+                && let Some(idx) = parse_value(idx_str) {
                     state.breakpoints.set_enabled(idx as usize, false);
                     return CmdResult::Output(vec![format!("Breakpoint #{idx} disabled")]);
-                }
             }
             CmdResult::Error("Usage: BPD <index>".into())
         }
         "BPE" => {
             // Enable breakpoint
-            if let Some(idx_str) = args.first() {
-                if let Some(idx) = parse_value(idx_str) {
+            if let Some(idx_str) = args.first()
+                && let Some(idx) = parse_value(idx_str) {
                     state.breakpoints.set_enabled(idx as usize, true);
                     return CmdResult::Output(vec![format!("Breakpoint #{idx} enabled")]);
-                }
             }
             CmdResult::Error("Usage: BPE <index>".into())
         }
@@ -234,12 +227,11 @@ where
 
         // ── Watch points ─────────────────────────────────────────────────
         "W" | "WATCH" => {
-            if let Some(addr_str) = args.first() {
-                if let Some(addr) = parse_hex(addr_str) {
+            if let Some(addr_str) = args.first()
+                && let Some(addr) = parse_hex(addr_str) {
                     let len = args.get(1).and_then(|s| parse_value(s)).unwrap_or(1);
                     state.watches.add(addr, len);
                     return CmdResult::Output(vec![format!("Watch added at ${addr:04X} len {len}")]);
-                }
             }
             // List watches
             let lines = format_watches(state, &mut read_mem);
@@ -261,11 +253,10 @@ where
 
         // ── Symbols ──────────────────────────────────────────────────────
         "SYM" | "SYMBOL" => {
-            if args.len() >= 2 {
-                if let Some(addr) = parse_hex(args[1]) {
+            if args.len() >= 2
+                && let Some(addr) = parse_hex(args[1]) {
                     state.symbols.insert(args[0], addr);
                     return CmdResult::Output(vec![format!("{} = ${addr:04X}", args[0])]);
-                }
             }
             if let Some(name) = args.first() {
                 if let Some(addr) = state.symbols.addr_of(name) {
@@ -370,7 +361,7 @@ where
 {
     let mut lines = Vec::new();
     let mut addr = start;
-    let rows = (count + 15) / 16;
+    let rows = count.div_ceil(16);
     for _ in 0..rows {
         let mut hex = String::new();
         let mut ascii = String::new();

@@ -808,8 +808,8 @@ mod gui {
 
             // ── WAV audio recording — tap the ring buffer ────────────────────
             // Feed the latest samples to the WAV recorder if active.
-            if let Some(ref mut rec) = self.wav_recorder {
-                if let Some(buf) = &self.audio_buf {
+            if let Some(ref mut rec) = self.wav_recorder
+                && let Some(buf) = &self.audio_buf {
                     let locked = buf.lock().unwrap();
                     // Record the last N samples (approximate frame's worth).
                     let n = (self.audio_sample_rate as usize / 60).min(locked.len());
@@ -817,7 +817,6 @@ mod gui {
                     let chunk: Vec<f32> = locked.range(start..).copied().collect();
                     drop(locked);
                     let _ = rec.write_samples(&chunk);
-                }
             }
 
             // ── Collect input events ──────────────────────────────────────────
@@ -997,23 +996,21 @@ mod gui {
             }
 
             // Save / load emulator state (F11 / Shift+F11).
-            if do_save_state && !in_logo_mode {
-                if let Some(path) = self.config.save_state_path() {
+            if do_save_state && !in_logo_mode
+                && let Some(path) = self.config.save_state_path() {
                     let snap = self.emu.take_snapshot();
                     if let Ok(yaml) = serde_yaml::to_string(&snap) {
                         let _ = std::fs::write(&path, yaml);
                         self.status_msg = Some(format!("State saved to {}", path.display()));
                     }
-                }
             }
-            if do_load_state && !in_logo_mode {
-                if let Some(path) = self.config.save_state_path()
-                    && let Ok(yaml) = std::fs::read_to_string(&path)
-                    && let Ok(snap) = serde_yaml::from_str(&yaml)
-                {
-                    self.emu.restore_snapshot(&snap);
-                    self.status_msg = Some("State loaded".to_string());
-                }
+            if do_load_state && !in_logo_mode
+                && let Some(path) = self.config.save_state_path()
+                && let Ok(yaml) = std::fs::read_to_string(&path)
+                && let Ok(snap) = serde_yaml::from_str(&yaml)
+            {
+                self.emu.restore_snapshot(&snap);
+                self.status_msg = Some("State loaded".to_string());
             }
 
             // Speed control shortcuts (Ctrl+0/1/3).
@@ -1049,8 +1046,7 @@ mod gui {
             // Alt key as Open / Closed Apple (button 0 / button 1).
             if self.config.alt_key_as_apple {
                 ctx.input(|i| {
-                    alt_left  = i.key_down(Key::ArrowLeft) && i.modifiers.alt
-                                || i.modifiers.alt;
+                    alt_left  = i.modifiers.alt;
                     alt_right = false; // egui doesn't distinguish left/right Alt
                 });
                 // Map Alt to Open Apple (button 0 bit)

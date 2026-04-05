@@ -141,8 +141,7 @@ impl RgbRenderer {
                 let (f, b) = if invert { (bg, fg) } else { (fg, bg) };
                 // Each character is 7 pixels wide × 8 scanlines high.
                 // In 40-col mode, each pixel is doubled to 14 px (560 / 40 = 14).
-                for glyph_y in 0..8 {
-                    let row_byte = glyph[glyph_y];
+                for (glyph_y, &row_byte) in glyph.iter().enumerate() {
                     let fb_y = row * 16 + glyph_y * 2; // 2× vertical
                     let fb_x_base = col * 14;
                     for bit in 0..7 {
@@ -158,6 +157,7 @@ impl RgbRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_text80_rows(
         &self, main_ram: &[u8; 65536], aux_ram: &[u8; 65536],
         text_base: usize, row_start: usize, row_end: usize,
@@ -176,8 +176,7 @@ impl RgbRenderer {
                 let ch = ram[offset];
                 let (glyph, invert) = self.char_rom.decode_char(ch, flash_on);
                 let (f, b) = if invert { (bg, fg) } else { (fg, bg) };
-                for glyph_y in 0..8 {
-                    let row_byte = glyph[glyph_y];
+                for (glyph_y, &row_byte) in glyph.iter().enumerate() {
                     let fb_y = row * 16 + glyph_y * 2;
                     let fb_x_base = col * 7;
                     for bit in 0..7 {

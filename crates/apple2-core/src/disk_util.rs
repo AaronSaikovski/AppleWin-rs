@@ -10,20 +10,18 @@ use std::io::Read;
 /// original bytes and extension are returned unchanged.
 pub fn decompress(data: &[u8], ext: &str) -> (Vec<u8>, String) {
     // gzip: magic 0x1F 0x8B
-    if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B {
-        if let Ok(decompressed) = decompress_gz(data) {
+    if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B
+        && let Ok(decompressed) = decompress_gz(data) {
             let inner = strip_gz_ext(ext);
             return (decompressed, inner);
-        }
     }
 
     // zip: magic PK (0x50 0x4B)
-    if data.len() >= 4 && data[0] == 0x50 && data[1] == 0x4B {
-        if let Ok((decompressed, inner_name)) = decompress_zip(data) {
+    if data.len() >= 4 && data[0] == 0x50 && data[1] == 0x4B
+        && let Ok((decompressed, inner_name)) = decompress_zip(data) {
             let inner = ext_from_filename(&inner_name)
                 .unwrap_or_else(|| strip_gz_ext(ext));
             return (decompressed, inner);
-        }
     }
 
     (data.to_vec(), ext.to_string())

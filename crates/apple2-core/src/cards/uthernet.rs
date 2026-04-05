@@ -336,7 +336,7 @@ enum Inner {
     /// Uthernet I: register stub only (no real networking).
     Stub([u8; 16]),
     /// Uthernet II: full W5100 with socket support.
-    W5100(W5100),
+    W5100(Box<W5100>),
 }
 
 pub struct UthernCard {
@@ -350,7 +350,7 @@ impl UthernCard {
         Self { slot, card_type: CardType::Uthernet, inner: Inner::Stub([0u8; 16]) }
     }
     pub fn new_uthernet2(slot: usize) -> Self {
-        Self { slot, card_type: CardType::Uthernet2, inner: Inner::W5100(W5100::new()) }
+        Self { slot, card_type: CardType::Uthernet2, inner: Inner::W5100(Box::new(W5100::new())) }
     }
 }
 
@@ -370,7 +370,7 @@ impl Card for UthernCard {
                     2 => w.addr as u8,
                     3 => {
                         let addr = w.addr;
-                        let val = if addr >= RX_BUF_BASE && addr < RX_BUF_BASE + 0x2000 {
+                        let val = if (RX_BUF_BASE..RX_BUF_BASE + 0x2000).contains(&addr) {
                             let off = (addr - RX_BUF_BASE) as usize;
                             let sock = off / BUF_SIZE_PER_SOCK;
                             let idx  = off % BUF_SIZE_PER_SOCK;
@@ -397,7 +397,7 @@ impl Card for UthernCard {
                     2 => w.addr = (w.addr & 0xFF00) | val as u16,
                     3 => {
                         let addr = w.addr;
-                        if addr >= TX_BUF_BASE && addr < TX_BUF_BASE + 0x2000 {
+                        if (TX_BUF_BASE..TX_BUF_BASE + 0x2000).contains(&addr) {
                             let off = (addr - TX_BUF_BASE) as usize;
                             let sock = off / BUF_SIZE_PER_SOCK;
                             let idx  = off % BUF_SIZE_PER_SOCK;
