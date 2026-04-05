@@ -400,6 +400,8 @@ mod gui {
         // Debugger
         show_debugger:     bool,
         debugger:          apple2_debugger::DebuggerState,
+        debugger_cmd_input: String,
+        #[allow(dead_code)]
         debugger_bp_input: String,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
@@ -509,7 +511,12 @@ mod gui {
                 last_frame_time:   std::time::Instant::now(),
                 paste_buf:         std::collections::VecDeque::new(),
                 show_debugger:     false,
-                debugger:          apple2_debugger::DebuggerState::new(),
+                debugger:          {
+                    let mut d = apple2_debugger::DebuggerState::new();
+                    d.load_apple2_symbols();
+                    d
+                },
+                debugger_cmd_input: String::new(),
                 debugger_bp_input: String::new(),
                 slot_options_open: [false; 8],
                 rgb_renderer,
@@ -576,6 +583,32 @@ mod gui {
             // directly — no channel-swap loop needed.
             self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
+
+        /// Render the debugger display into the framebuffer, replacing the
+        /// Apple II screen — matching the original AppleWin behaviour.
+        fn render_debugger(&mut self) {
+            use apple2_debugger::display::{self, CpuSnapshot};
+            let cpu = CpuSnapshot {
+                pc: self.emu.cpu.pc,
+                a:  self.emu.cpu.a,
+                x:  self.emu.cpu.x,
+                y:  self.emu.cpu.y,
+                sp: self.emu.cpu.sp,
+                flags: self.emu.cpu.flags.bits(),
+                cycles: self.emu.cpu.cycles,
+            };
+            let mode_bits = self.emu.bus.mode.bits();
+            let cmd_input = self.debugger_cmd_input.clone();
+            display::render(
+                self.fb.pixels_mut(),
+                &self.debugger,
+                &cpu,
+                mode_bits,
+                &cmd_input,
+                |a| self.emu.bus.read_raw(a),
+            );
+            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
+        }
     }
 
     // ── eframe App impl ───────────────────────────────────────────────────────
@@ -621,10 +654,15 @@ mod gui {
                     .min(0.1); // 100 ms cap
                 self.last_frame_time = frame_now;
 
+                // Skip execution when the debugger has paused the CPU
+                let debugger_paused = self.debugger.active;
+
                 // CPU clock rate: emulation_speed * 102_300 Hz (1× = 1.023 MHz)
                 let base_hz = self.config.emulation_speed.max(1) as f64 * 102_300.0;
 
-                if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
+                if debugger_paused {
+                    // Debugger is paused — do not execute any cycles
+                } else if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
                     // Full-speed mode — matches AppleWin's g_bFullSpeed behaviour
                     // (IsConditionForFullSpeed: motor on + enhanced disk enabled).
                     //
@@ -812,32 +850,51 @@ mod gui {
                     if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
                         let ctrl  = modifiers.ctrl || modifiers.command;
                         let shift = modifiers.shift;
+                        let dbg_on = self.show_debugger && self.debugger.active;
                         match key {
+                            // ── Global shortcuts (always active) ─────────
                             Key::F1                => do_hard_reset = true,
+                            // F7 — toggle debugger (original AppleWin key)
+                            Key::F7 if !ctrl && !shift => {
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
+                            }
+                            // F10 — also toggles debugger (compat)
                             Key::F10 if self.config.scrolllock_toggle => {
-                                self.debugger.active = !self.debugger.active;
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
                             }
                             // Save / load state
                             Key::F11 if shift      => do_load_state = true,
                             Key::F11 if !shift     => do_save_state = true,
-                            // WAV audio recording toggle
                             Key::F9                => toggle_wav_rec = true,
-                            // Screenshot (F12)
                             Key::F12               => take_screenshot = true,
                             Key::Escape if ctrl    => do_quit = true,
                             Key::F2 if ctrl        => do_reset = true,
-                            // Speed control: Ctrl+0 = full speed, Ctrl+1 = normal, Ctrl+3 = 3x
+                            // Speed control
                             Key::Num0 if ctrl => { speed_shortcut = Some(40); }
                             Key::Num1 if ctrl => { speed_shortcut = Some(10); }
                             Key::Num3 if ctrl => { speed_shortcut = Some(30); }
-                            // Ctrl+4..5 — video mode shortcuts
+                            // Video mode shortcuts
                             Key::Num4 if ctrl => { video_shortcut = Some(VideoType::MonoWhite); }
                             Key::Num5 if ctrl => { video_shortcut = Some(VideoType::MonoGreen); }
-                            // Ctrl+6..9 — video mode shortcuts
                             Key::Num6 if ctrl => { video_shortcut = Some(VideoType::ColorTV); }
                             Key::Num7 if ctrl => { video_shortcut = Some(VideoType::ColorIdealized); }
                             Key::Num8 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
                             Key::Num9 if ctrl => { video_shortcut = Some(VideoType::ColorMonitorNtsc); }
+                            // ── Swallow keys when debugger is active ─────
+                            _ if dbg_on => {}
+                            // ── Apple II keys (only when debugger is NOT active) ─
                             Key::Enter             => { any_key = true; key_queue.push(0x0D); }
                             Key::Backspace         => { any_key = true; key_queue.push(0x7F); }
                             Key::Escape            => { any_key = true; key_queue.push(0x1B); }
@@ -847,8 +904,6 @@ mod gui {
                             Key::ArrowUp           => { any_key = true; key_queue.push(0x0B); }
                             Key::ArrowDown         => { any_key = true; key_queue.push(0x0A); }
                             key if ctrl => {
-                                // Ctrl+letter → Apple II control character (0x01–0x1A).
-                                // Ctrl+V is intercepted for host paste (Event::Paste above).
                                 let c: Option<u8> = match key {
                                     Key::A => Some(0x01), Key::B => Some(0x02),
                                     Key::C => Some(0x03), Key::D => Some(0x04),
@@ -860,7 +915,7 @@ mod gui {
                                     Key::O => Some(0x0F), Key::P => Some(0x10),
                                     Key::Q => Some(0x11), Key::R => Some(0x12),
                                     Key::S => Some(0x13), Key::T => Some(0x14),
-                                    Key::U => Some(0x15), Key::V => None, // paste — see Event::Paste
+                                    Key::U => Some(0x15), Key::V => None,
                                     Key::W => Some(0x17), Key::X => Some(0x18),
                                     Key::Y => Some(0x19), Key::Z => Some(0x1A),
                                     _ => None,
@@ -868,8 +923,6 @@ mod gui {
                                 if let Some(c) = c { any_key = true; key_queue.push(c); }
                             }
                             key => {
-                                // Derive printable ASCII from key + shift.
-                                // Apple II convention: letters are always uppercase.
                                 any_key = true;
                                 if let Some(c) = apple2_ascii_for_key(*key, shift) {
                                     key_queue.push(c);
@@ -1012,9 +1065,15 @@ mod gui {
             if do_reset      { self.reset(false); }
             if do_quit       { frame.close(); return; }
 
-            // ── Render Apple II display to GPU texture (not during logo) ─────
+            // ── Render display to GPU texture ─────────────────────────────────
+            // When debugger is active, render debugger into the framebuffer
+            // instead of the Apple II screen, matching original AppleWin.
             if !in_logo_mode {
-                self.render_apple2();
+                if self.show_debugger && self.debugger.active {
+                    self.render_debugger();
+                } else {
+                    self.render_apple2();
+                }
                 let tex_opts = TextureOptions {
                     magnification: egui::TextureFilter::Nearest,
                     minification:  egui::TextureFilter::Nearest,
@@ -1231,7 +1290,9 @@ mod gui {
                     });
                 });
 
-            // ── Status bar ────────────────────────────────────────────────────
+            // ── Status bar (hidden when debugger is active) ──────────────────
+            let debugger_fullscreen = self.show_debugger && self.debugger.active;
+            if !debugger_fullscreen {
             egui::TopBottomPanel::bottom("statusbar")
                 .frame(
                     egui::Frame::none()
@@ -1271,9 +1332,11 @@ mod gui {
                         });
                     });
                 });
+            } // end if !debugger_fullscreen (status bar)
 
-            // ── Right button strip ────────────────────────────────────────────
+            // ── Right button strip (hidden when debugger is active) ───────────
             let icons = self.icons.as_ref();
+            if !debugger_fullscreen {
             egui::SidePanel::right("buttons")
                 .exact_width(BTN_PANEL_W)
                 .resizable(false)
@@ -1309,12 +1372,19 @@ mod gui {
                         if icon_btn(ui, icons.and_then(|ic| ic.full.as_ref()),  "⛶",  "Fullscreen (F11)",    sz, isz).clicked() { act_fullscreen = true; }
                         ui.add_space(2.0);
                         if icon_btn(ui, icons.and_then(|ic| ic.debug.as_ref()), "⚙", "Debugger", sz, isz).clicked() {
-                            self.show_debugger = !self.show_debugger;
+                            if self.show_debugger && self.debugger.active {
+                                self.show_debugger = false;
+                                self.debugger.deactivate();
+                            } else {
+                                self.show_debugger = true;
+                                self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                            }
                         }
                         ui.add_space(2.0);
                         if icon_btn(ui, icons.and_then(|ic| ic.setup.as_ref()), "⚙",  "Settings",            sz, isz).clicked() { act_show_settings = true; }
                     });
                 });
+            } // end if !debugger_fullscreen (button strip)
 
             // ── Confirm reboot dialog ─────────────────────────────────────────
             if let Some(power_cycle) = self.pending_reset {
@@ -1338,106 +1408,173 @@ mod gui {
                 if do_cancel { self.pending_reset = None; }
             }
 
-            // ── Debugger window ───────────────────────────────────────────────
-            if self.show_debugger {
+            // ── Debugger (renders into framebuffer, command bar at bottom) ────
+            if self.show_debugger && self.debugger.active {
                 use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                use apple2_debugger::breakpoint::Breakpoint;
+                use apple2_debugger::commands::{self, CmdResult, CpuRegs};
 
-                // Snapshot CPU registers before the closure borrows self
-                let pc   = self.emu.cpu.pc;
-                let a    = self.emu.cpu.a;
-                let x    = self.emu.cpu.x;
-                let y    = self.emu.cpu.y;
-                let sp   = self.emu.cpu.sp;
-                let p    = self.emu.cpu.flags.bits();
                 let paused = self.debugger.active;
-
                 let mut do_step      = false;
-                let mut do_pause     = false;
+                let mut do_step_over = false;
+                let mut do_step_out  = false;
                 let mut do_resume    = false;
-                let mut do_add_bp    = false;
-                let mut do_remove_bp: Option<usize> = None;
-                let mut cursor_update: Option<u16>  = None;
+                let mut do_exec_cmd  = false;
+                let cmd_empty = self.debugger_cmd_input.is_empty();
 
-                egui::Window::new("Debugger")
-                    .resizable(true)
-                    .min_width(460.0)
+                // AppleWin-compatible keyboard shortcuts
+                ctx.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
+                            let ctrl  = modifiers.ctrl || modifiers.command;
+                            let shift = modifiers.shift;
+                            match key {
+                                Key::Space if cmd_empty && !ctrl && !shift => do_step = true,
+                                Key::Space if cmd_empty && ctrl && !shift  => do_step_over = true,
+                                Key::Space if cmd_empty && shift && !ctrl  => do_step_out = true,
+                                Key::F5 => do_resume = true,
+                                Key::ArrowUp if cmd_empty && !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc).wrapping_sub(1)
+                                    );
+                                }
+                                Key::ArrowDown if cmd_empty && !ctrl && !shift => {
+                                    let start = self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc);
+                                    let instr = apple2_debugger::disasm::disassemble_one(start, |a| self.emu.bus.read_raw(a));
+                                    self.debugger.goto_addr = Some(start.wrapping_add(instr.bytes as u16));
+                                }
+                                Key::PageUp if !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc).wrapping_sub(0x20));
+                                }
+                                Key::PageDown if !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc).wrapping_add(0x20));
+                                }
+                                Key::PageUp if shift => {
+                                    self.debugger.goto_addr = Some(self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc).wrapping_sub(0x100));
+                                }
+                                Key::PageDown if shift => {
+                                    self.debugger.goto_addr = Some(self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc).wrapping_add(0x100));
+                                }
+                                Key::Home => { self.debugger.goto_addr = None; }
+                                Key::ArrowRight if ctrl && cmd_empty => {
+                                    if let Some(addr) = self.debugger.goto_addr {
+                                        self.emu.cpu.pc = addr;
+                                        self.debugger.print(format!("PC set to ${addr:04X}"));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                });
+
+                // Command input bar
+                let cmd_id = egui::Id::new("dbg_cmd_input");
+                egui::TopBottomPanel::bottom("dbg_cmd")
+                    .frame(egui::Frame::none()
+                        .fill(Color32::from_rgb(16, 16, 32))
+                        .inner_margin(egui::style::Margin::symmetric(6.0, 2.0)))
                     .show(ctx, |ui| {
-                        // ── CPU registers ──────────────────────────────────
-                        ui.monospace(format!(
-                            "PC:{:04X}  A:{:02X}  X:{:02X}  Y:{:02X}  SP:{:02X}  P:{:08b}",
-                            pc, a, x, y, sp, p
-                        ));
-                        ui.separator();
-
-                        // ── Execution controls ──────────────────────────────
                         ui.horizontal(|ui| {
-                            if paused {
-                                if ui.button("▶ Resume").clicked() { do_resume = true; }
-                                if ui.button("⏭ Step").clicked()   { do_step   = true; }
-                            } else {
-                                if ui.button("⏸ Pause").clicked()  { do_pause  = true; }
+                            ui.label(RichText::new("Spc:Step C-Spc:Over S-Spc:Out F5:Go F7:Exit")
+                                .monospace().small().color(Color32::from_rgb(100, 100, 100)));
+                            ui.label(RichText::new(">").monospace().color(Color32::from_rgb(255, 128, 0)));
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.debugger_cmd_input)
+                                    .id(cmd_id)
+                                    .desired_width(ui.available_width() - 8.0)
+                                    .font(FontId::monospace(12.0))
+                                    .text_color(Color32::WHITE)
+                            );
+                            if !resp.has_focus() { resp.request_focus(); }
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                do_exec_cmd = true;
                             }
                         });
-                        ui.separator();
-
-                        // ── Disassembly listing ─────────────────────────────
-                        ui.label("Disassembly:");
-                        egui::ScrollArea::vertical()
-                            .max_height(200.0)
-                            .id_source("dbg_disasm")
-                            .show(ui, |ui| {
-                                let start = if paused { pc } else { self.debugger.cursor };
-                                let mut addr = start;
-                                for _ in 0..20 {
-                                    let instr = disassemble_one(addr, |a| {
-                                        self.emu.bus.read_raw(a)
-                                    });
-                                    let text = format!(
-                                        "{} {}",
-                                        if addr == pc { "▶" } else { " " },
-                                        format_instruction(&instr),
-                                    );
-                                    let resp = ui.selectable_label(
-                                        addr == self.debugger.cursor,
-                                        egui::RichText::new(text).monospace(),
-                                    );
-                                    if resp.clicked() { cursor_update = Some(addr); }
-                                    addr = addr.wrapping_add(instr.bytes as u16);
-                                }
-                            });
-                        ui.separator();
-
-                        // ── Breakpoints ─────────────────────────────────────
-                        ui.label("Breakpoints:");
-                        let mut remove_idx: Option<usize> = None;
-                        for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!("{:04X}", bp.address));
-                                if ui.small_button("✕").clicked() {
-                                    remove_idx = Some(idx);
-                                }
-                            });
-                        }
-                        if let Some(idx) = remove_idx { do_remove_bp = Some(idx); }
-                        ui.horizontal(|ui| {
-                            ui.label("Add:");
-                            ui.text_edit_singleline(&mut self.debugger_bp_input);
-                            if ui.button("Add").clicked() { do_add_bp = true; }
-                        });
                     });
-
-                // Apply deferred actions after the closure releases borrows
-                if do_pause  { self.debugger.active = true; }
-                if do_resume { self.debugger.active = false; }
-                if do_step && paused { self.emu.step(); }
-                if do_add_bp
-                    && let Ok(addr) = u16::from_str_radix(self.debugger_bp_input.trim(), 16) {
-                    self.debugger.breakpoints.add(Breakpoint::at(addr));
-                    self.debugger_bp_input.clear();
+                if do_exec_cmd {
+                    ctx.memory_mut(|m| m.request_focus(cmd_id));
                 }
-                if let Some(idx) = do_remove_bp { self.debugger.breakpoints.remove(idx); }
-                if let Some(addr) = cursor_update { self.debugger.cursor = addr; }
+
+                // Apply deferred actions
+                if do_resume {
+                    self.debugger.deactivate();
+                    self.show_debugger = false;
+                }
+                if do_step && paused {
+                    if self.debugger.trace.enabled {
+                        use apple2_debugger::trace::TraceEntry;
+                        let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
+                        self.debugger.trace.push(TraceEntry {
+                            pc: self.emu.cpu.pc, opcode: instr.opcode,
+                            a: self.emu.cpu.a, x: self.emu.cpu.x, y: self.emu.cpu.y,
+                            sp: self.emu.cpu.sp, flags: self.emu.cpu.flags.bits(),
+                            cycles: self.emu.cpu.cycles, text: format_instruction(&instr),
+                        });
+                    }
+                    self.emu.step();
+                    self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
+                }
+                if do_step_over && paused {
+                    let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
+                    if opcode == 0x20 {
+                        self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
+                        self.debugger.deactivate();
+                    } else {
+                        self.emu.step();
+                        self.debugger.stop_reason = apple2_debugger::state::StopReason::StepOver;
+                    }
+                }
+                if do_step_out && paused {
+                    self.debugger.step_out_sp = Some(self.emu.cpu.sp);
+                    self.debugger.deactivate();
+                }
+
+                // Execute console command
+                if do_exec_cmd {
+                    let cmd_text = self.debugger_cmd_input.clone();
+                    self.debugger_cmd_input.clear();
+                    self.debugger.print(format!("> {cmd_text}"));
+                    let regs = CpuRegs {
+                        a: self.emu.cpu.a, x: self.emu.cpu.x, y: self.emu.cpu.y,
+                        sp: self.emu.cpu.sp, pc: self.emu.cpu.pc,
+                        flags: self.emu.cpu.flags.bits(), cycles: self.emu.cpu.cycles,
+                    };
+                    let result = commands::execute_command(
+                        &mut self.debugger, &cmd_text, self.emu.cpu.pc, regs,
+                        |a| self.emu.bus.read_raw(a),
+                    );
+                    match result {
+                        CmdResult::Output(lines) => { self.debugger.print_lines(&lines); }
+                        CmdResult::Go => { self.debugger.deactivate(); self.show_debugger = false; }
+                        CmdResult::Step => { self.emu.step(); self.debugger.stop_reason = apple2_debugger::state::StopReason::Step; }
+                        CmdResult::StepOver => {
+                            let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
+                            if opcode == 0x20 { self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3)); self.debugger.deactivate(); }
+                            else { self.emu.step(); }
+                        }
+                        CmdResult::StepOut => { self.debugger.step_out_sp = Some(self.emu.cpu.sp); self.debugger.deactivate(); }
+                        CmdResult::Trace(n) => { self.debugger.trace.enabled = true; self.debugger.trace_remaining = n; }
+                        CmdResult::SetPC(addr) => { self.emu.cpu.pc = addr; self.debugger.deactivate(); }
+                        CmdResult::MemWrite(addr, val) => { self.emu.bus.write_raw(addr, val); self.debugger.print(format!("  ${addr:04X} = {val:02X}")); }
+                        CmdResult::SetReg(reg, val) => {
+                            match reg {
+                                'A' => self.emu.cpu.a = val as u8,
+                                'X' => self.emu.cpu.x = val as u8,
+                                'Y' => self.emu.cpu.y = val as u8,
+                                'S' | 'P' if val > 0xFF => self.emu.cpu.pc = val,
+                                'S' => self.emu.cpu.sp = val as u8,
+                                'P' => self.emu.cpu.pc = val,
+                                _ => {}
+                            }
+                        }
+                        CmdResult::Nop => {}
+                        CmdResult::Error(msg) => { self.debugger.print(format!("Error: {msg}")); }
+                        CmdResult::ToggleBreak => {
+                            if self.debugger.active { self.debugger.deactivate(); }
+                            else { self.debugger.activate(apple2_debugger::state::StopReason::UserBreak); }
+                        }
+                    }
+                }
             }
 
             // ── Settings dialog ───────────────────────────────────────────────
@@ -1952,29 +2089,43 @@ mod gui {
                     });
             }
 
-            // ── Central panel — Apple II screen framed with 3D bevel ──────────
+            // ── Central panel — Apple II screen / debugger display ─────────────
+            let central_bg = if debugger_fullscreen { Color32::BLACK } else { WIN_FACE };
+            let central_margin = if debugger_fullscreen { 0.0 } else { 8.0 };
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(WIN_FACE)
-                        .inner_margin(egui::style::Margin::same(8.0)),
+                        .fill(central_bg)
+                        .inner_margin(egui::style::Margin::same(central_margin)),
                 )
                 .show(ctx, |ui| {
                     let avail = ui.available_rect_before_wrap();
-
                     let sw = SCREEN_W as f32;
                     let sh = SCREEN_H as f32;
-                    // Use integer scaling in PHYSICAL pixels, not egui points.
-                    // At non-100% DPI (e.g. 125%), an egui-point integer scale maps
-                    // to a fractional physical pixel count, causing the GPU to blend
-                    // adjacent framebuffer rows even with Nearest filtering.
                     let ppp = ctx.pixels_per_point();
+
+                    if debugger_fullscreen {
+                        // Debugger mode: fill area, no bevel
+                        let avail_pw = avail.width() * ppp;
+                        let avail_ph = avail.height() * ppp;
+                        let phys_scale = (avail_pw / sw).floor().min((avail_ph / sh).floor()).max(1.0);
+                        let scale = phys_scale / ppp;
+                        let disp_w = sw * scale;
+                        let disp_h = sh * scale;
+                        let ox = avail.left() + ((avail.width() - disp_w) / 2.0).max(0.0);
+                        let oy = avail.top() + ((avail.height() - disp_h) / 2.0).max(0.0);
+                        let screen = Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(disp_w, disp_h));
+                        if let Some(tid) = tex_id {
+                            ui.painter().image(tid, screen, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                        }
+                        ui.allocate_rect(avail, Sense::hover());
+                    } else {
+                    // Normal mode: bevel + centred screen
                     let avail_pw = (avail.width()  - BEVEL * 2.0) * ppp;
                     let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
                     let phys_scale_w = (avail_pw / sw).floor().max(1.0);
                     let phys_scale_h = (avail_ph / sh).floor().max(1.0);
                     let phys_scale   = phys_scale_w.min(phys_scale_h);
-                    // Convert back to egui points for layout
                     let scale = phys_scale / ppp;
                     let outer_w = sw * scale + BEVEL * 2.0;
                     let outer_h = sh * scale + BEVEL * 2.0;
@@ -2049,6 +2200,7 @@ mod gui {
                     }
 
                     ui.allocate_rect(outer, Sense::hover());
+                    } // end else (normal mode)
                 });
 
             // ── Apply deferred actions ────────────────────────────────────────
