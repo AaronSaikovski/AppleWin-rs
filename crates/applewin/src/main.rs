@@ -826,7 +826,9 @@ mod gui {
                     if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
                         let ctrl  = modifiers.ctrl || modifiers.command;
                         let shift = modifiers.shift;
+                        let dbg_on = self.show_debugger && self.debugger.active;
                         match key {
+                            // ── Global shortcuts (always active) ─────────
                             Key::F1                => do_hard_reset = true,
                             Key::F10 if self.config.scrolllock_toggle => {
                                 if self.show_debugger && self.debugger.active {
@@ -846,6 +848,12 @@ mod gui {
                             Key::Num3 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
                             Key::Num4 if ctrl => { video_shortcut = Some(VideoType::MonoWhite); }
                             Key::Num5 if ctrl => { video_shortcut = Some(VideoType::MonoGreen); }
+                            // ── Apple II keys (only when debugger is NOT active) ─
+                            _ if dbg_on => {
+                                // Debugger is active — swallow keys so they don't
+                                // go to the Apple II.  The egui command bar text
+                                // field receives typed characters directly.
+                            }
                             Key::Enter             => { any_key = true; key_queue.push(0x0D); }
                             Key::Backspace         => { any_key = true; key_queue.push(0x7F); }
                             Key::Escape            => { any_key = true; key_queue.push(0x1B); }
@@ -855,8 +863,6 @@ mod gui {
                             Key::ArrowUp           => { any_key = true; key_queue.push(0x0B); }
                             Key::ArrowDown         => { any_key = true; key_queue.push(0x0A); }
                             key if ctrl => {
-                                // Ctrl+letter → Apple II control character (0x01–0x1A).
-                                // Ctrl+V is intercepted for host paste (Event::Paste above).
                                 let c: Option<u8> = match key {
                                     Key::A => Some(0x01), Key::B => Some(0x02),
                                     Key::C => Some(0x03), Key::D => Some(0x04),
@@ -868,7 +874,7 @@ mod gui {
                                     Key::O => Some(0x0F), Key::P => Some(0x10),
                                     Key::Q => Some(0x11), Key::R => Some(0x12),
                                     Key::S => Some(0x13), Key::T => Some(0x14),
-                                    Key::U => Some(0x15), Key::V => None, // paste — see Event::Paste
+                                    Key::U => Some(0x15), Key::V => None,
                                     Key::W => Some(0x17), Key::X => Some(0x18),
                                     Key::Y => Some(0x19), Key::Z => Some(0x1A),
                                     _ => None,
@@ -876,8 +882,6 @@ mod gui {
                                 if let Some(c) = c { any_key = true; key_queue.push(c); }
                             }
                             key => {
-                                // Derive printable ASCII from key + shift.
-                                // Apple II convention: letters are always uppercase.
                                 any_key = true;
                                 if let Some(c) = apple2_ascii_for_key(*key, shift) {
                                     key_queue.push(c);
