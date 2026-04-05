@@ -55,7 +55,7 @@ mod headless {
 
 #[cfg(feature = "gui")]
 mod gui {
-    use apple2_core::emulator::{Emulator, ExecuteResult};
+    use apple2_core::emulator::Emulator;
     use apple2_video::{
         framebuffer::Framebuffer,
         ntsc::{CharRom, NtscRenderer},
@@ -102,7 +102,6 @@ mod gui {
     static BMP_DEBUG: &[u8] = include_bytes!("../icons/DEBUG.BMP");
     static BMP_SETUP: &[u8] = include_bytes!("../icons/SETUP.BMP");
     static BMP_LOGO:  &[u8] = include_bytes!("../icons/ApplewinLogo.bmp");
-    static ICO_APP:   &[u8] = include_bytes!("../icons/Applewin.ico");
 
     /// Decode a Windows indexed-colour BMP (4bpp or 8bpp) to RGBA8888 pixels.
     ///
@@ -193,122 +192,6 @@ mod gui {
             }
         }
         Some((w, h, rgba))
-    }
-
-    /// Decode the largest image from a .ico file to RGBA8888 pixels.
-    ///
-    /// Supports 4bpp, 8bpp, 24bpp, and 32bpp BMP images embedded in the ICO
-    /// container. PNG-encoded entries (uncommon at toolbar sizes) are skipped.
-    fn decode_ico_rgba(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-        if data.len() < 6 { return None; }
-        if u16::from_le_bytes([data[0], data[1]]) != 0 { return None; }
-        if u16::from_le_bytes([data[2], data[3]]) != 1 { return None; }
-        let count = u16::from_le_bytes([data[4], data[5]]) as usize;
-
-        // Pick the largest image by area.
-        let mut best: Option<(usize, usize, usize)> = None; // (w, h, offset)
-        for i in 0..count {
-            let e = 6 + i * 16;
-            if e + 16 > data.len() { break; }
-            let w = if data[e]   == 0 { 256usize } else { data[e]   as usize };
-            let h = if data[e+1] == 0 { 256usize } else { data[e+1] as usize };
-            let offset = u32::from_le_bytes(data[e+12..e+16].try_into().ok()?) as usize;
-            if best.is_none_or(|(bw, bh, _)| w * h > bw * bh) {
-                best = Some((w, h, offset));
-            }
-        }
-        let (_, _, offset) = best?;
-        let img = &data[offset..];
-
-        // Skip PNG-encoded entries (start with PNG magic).
-        if img.starts_with(b"\x89PNG\r\n\x1a\n") { return None; }
-
-        // Parse embedded DIB (BITMAPINFOHEADER, no "BM" file header).
-        if img.len() < 40 { return None; }
-        let dib_w    = u32::from_le_bytes(img[4..8].try_into().ok()?)  as usize;
-        let dib_h    = u32::from_le_bytes(img[8..12].try_into().ok()?) as usize;
-        let bpp      = u16::from_le_bytes(img[14..16].try_into().ok()?);
-        let actual_h = dib_h / 2; // ICO DIB height counts XOR rows + AND mask rows
-
-        let colors_used = u32::from_le_bytes(img[32..36].try_into().ok()?) as usize;
-        let num_colors: usize = match bpp {
-            4 => if colors_used > 0 { colors_used } else { 16 },
-            8 => if colors_used > 0 { colors_used } else { 256 },
-            _ => 0,
-        };
-        let pal_start   = 40usize;
-        let pixel_start = pal_start + num_colors * 4;
-        if img.len() < pixel_start { return None; }
-
-        match bpp {
-            32 => {
-                let row_bytes = dib_w * 4;
-                let mut rgba = vec![0u8; dib_w * actual_h * 4];
-                for row in 0..actual_h {
-                    let src = pixel_start + (actual_h - 1 - row) * row_bytes;
-                    let dst = row * dib_w * 4;
-                    for x in 0..dib_w {
-                        let s = src + x * 4;
-                        rgba[dst + x*4]     = *img.get(s+2)?; // R
-                        rgba[dst + x*4 + 1] = *img.get(s+1)?; // G
-                        rgba[dst + x*4 + 2] = *img.get(s)?;   // B
-                        rgba[dst + x*4 + 3] = *img.get(s+3)?; // A
-                    }
-                }
-                Some((dib_w as u32, actual_h as u32, rgba))
-            }
-            24 => {
-                let row_bytes = (dib_w * 3 + 3) & !3;
-                let mut rgba = vec![255u8; dib_w * actual_h * 4];
-                for row in 0..actual_h {
-                    let src = pixel_start + (actual_h - 1 - row) * row_bytes;
-                    let dst = row * dib_w * 4;
-                    for x in 0..dib_w {
-                        let s = src + x * 3;
-                        rgba[dst + x*4]     = *img.get(s+2)?;
-                        rgba[dst + x*4 + 1] = *img.get(s+1)?;
-                        rgba[dst + x*4 + 2] = *img.get(s)?;
-                    }
-                }
-                Some((dib_w as u32, actual_h as u32, rgba))
-            }
-            4 | 8 => {
-                let mut palette = [(0u8, 0u8, 0u8); 256];
-                for (i, entry) in palette.iter_mut().enumerate().take(num_colors) {
-                    let p = pal_start + i * 4;
-                    *entry = (*img.get(p+2)?, *img.get(p+1)?, *img.get(p)?);
-                }
-                let xor_row_bytes = match bpp {
-                    4 => (dib_w.div_ceil(2) + 3) & !3,
-                    8 => (dib_w             + 3) & !3,
-                    _ => unreachable!(),
-                };
-                let and_row_bytes = dib_w.div_ceil(32) * 4;
-                let and_start = pixel_start + actual_h * xor_row_bytes;
-                let mut rgba = vec![0u8; dib_w * actual_h * 4];
-                for row in 0..actual_h {
-                    let src_row = actual_h - 1 - row;
-                    let src     = pixel_start + src_row * xor_row_bytes;
-                    let and_src = and_start   + src_row * and_row_bytes;
-                    let dst     = row * dib_w * 4;
-                    for x in 0..dib_w {
-                        let idx = match bpp {
-                            4 => { let b = *img.get(src + x/2)?; (if x%2==0 { b>>4 } else { b&0xF }) as usize }
-                            8 => *img.get(src + x)? as usize,
-                            _ => unreachable!(),
-                        };
-                        let (r, g, b) = palette[idx];
-                        let transparent = (*img.get(and_src + x/8)? >> (7 - x%8)) & 1;
-                        rgba[dst + x*4]     = r;
-                        rgba[dst + x*4 + 1] = g;
-                        rgba[dst + x*4 + 2] = b;
-                        rgba[dst + x*4 + 3] = if transparent == 1 { 0 } else { 255 };
-                    }
-                }
-                Some((dib_w as u32, actual_h as u32, rgba))
-            }
-            _ => None,
-        }
     }
 
     // ── Audio ─────────────────────────────────────────────────────────────────
@@ -467,18 +350,17 @@ mod gui {
         /// Characters queued for paste injection into the Apple II keyboard.
         paste_buf:         std::collections::VecDeque<u8>,
         // Debugger
-        show_debugger:       bool,
-        debugger:            apple2_debugger::DebuggerState,
-        debugger_bp_input:   String,
-        debugger_cmd_input:  String,
-        debugger_mem_input:  String,
+        show_debugger:     bool,
+        debugger:          apple2_debugger::DebuggerState,
+        debugger_cmd_input: String,
+        debugger_bp_input: String,
+        debugger_mem_input: String,
+        #[allow(dead_code)]
+        debugger_reg_input: String,
+        #[allow(dead_code)]
+        debugger_tab:      usize,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
-        /// Transient status message shown in the status bar (e.g. "Screenshot saved").
-        /// Cleared after a few seconds.
-        status_msg:        Option<String>,
-        /// Frame number at which the status message was set; cleared after ~180 frames (~3 s).
-        status_msg_frame:  u32,
     }
 
     impl EmulatorApp {
@@ -575,13 +457,17 @@ mod gui {
                 last_frame_time:   std::time::Instant::now(),
                 paste_buf:         std::collections::VecDeque::new(),
                 show_debugger:     false,
-                debugger:          apple2_debugger::DebuggerState::new(),
-                debugger_bp_input:  String::new(),
+                debugger:          {
+                    let mut d = apple2_debugger::DebuggerState::new();
+                    d.load_apple2_symbols();
+                    d
+                },
                 debugger_cmd_input: String::new(),
-                debugger_mem_input: String::from("0400"),
+                debugger_bp_input: String::new(),
+                debugger_mem_input: String::new(),
+                debugger_reg_input: String::new(),
+                debugger_tab:      0,
                 slot_options_open: [false; 8],
-                status_msg:        None,
-                status_msg_frame:  0,
             }
         }
 
@@ -597,292 +483,6 @@ mod gui {
             self.last_frame_time  = std::time::Instant::now();
         }
 
-        /// Execute a parsed debugger command, updating emulator and debugger state.
-        fn execute_debug_command(&mut self, cmd: apple2_debugger::commands::DebugCommand) {
-            use apple2_debugger::commands::{self, DebugCommand};
-            use apple2_debugger::breakpoint::{Breakpoint, BreakpointKind};
-
-            match cmd {
-                DebugCommand::Go(None) => {
-                    self.debugger.active = false;
-                    self.debugger.console_output.push("Resuming...".into());
-                }
-                DebugCommand::Go(Some(addr)) => {
-                    self.debugger.step_over_target = Some(addr);
-                    self.debugger.active = false;
-                    self.debugger.console_output.push(format!("Running to ${addr:04X}..."));
-                }
-                DebugCommand::Trace => {
-                    if self.debugger.active {
-                        self.emu.step();
-                        let pc = self.emu.cpu.pc;
-                        self.debugger.console_output.push(format!("PC=${pc:04X}"));
-                    } else {
-                        self.debugger.console_output.push("Not paused.".into());
-                    }
-                }
-                DebugCommand::StepOver => {
-                    if self.debugger.active {
-                        let pc = self.emu.cpu.pc;
-                        let opcode = self.emu.bus.read_raw(pc);
-                        if opcode == 0x20 {
-                            self.debugger.step_over_target = Some(pc.wrapping_add(3));
-                            self.debugger.active = false;
-                        } else {
-                            self.emu.step();
-                        }
-                    }
-                }
-                DebugCommand::StepOut => {
-                    if self.debugger.active {
-                        let sp = self.emu.cpu.sp;
-                        let lo = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(1) as u16) as u16;
-                        let hi = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(2) as u16) as u16;
-                        let ret_addr = ((hi << 8) | lo).wrapping_add(1);
-                        self.debugger.step_over_target = Some(ret_addr);
-                        self.debugger.active = false;
-                    }
-                }
-                DebugCommand::Unassemble(addr) => {
-                    let target = addr.unwrap_or(self.emu.cpu.pc);
-                    self.debugger.cursor = target;
-                    // Show a few lines of disassembly in the console
-                    use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                    let mut a = target;
-                    for _ in 0..8 {
-                        let instr = disassemble_one(a, |x| self.emu.bus.read_raw(x));
-                        self.debugger.console_output.push(format_instruction(&instr));
-                        a = a.wrapping_add(instr.bytes as u16);
-                    }
-                }
-                DebugCommand::BreakpointAdd(addr) => {
-                    let idx = self.debugger.breakpoints.add(Breakpoint::at(addr));
-                    self.debugger.console_output.push(format!("BP #{idx} at ${addr:04X}"));
-                }
-                DebugCommand::BreakpointAddMem(addr) => {
-                    let bp_r = commands::make_mem_breakpoint(BreakpointKind::MemRead, addr);
-                    let bp_w = commands::make_mem_breakpoint(BreakpointKind::MemWrite, addr);
-                    self.debugger.breakpoints.add(bp_r);
-                    self.debugger.breakpoints.add(bp_w);
-                    self.debugger.console_output.push(format!("BPM (R+W) at ${addr:04X}"));
-                }
-                DebugCommand::BreakpointAddMemRead(addr) => {
-                    let bp = commands::make_mem_breakpoint(BreakpointKind::MemRead, addr);
-                    self.debugger.breakpoints.add(bp);
-                    self.debugger.console_output.push(format!("BPMR at ${addr:04X}"));
-                }
-                DebugCommand::BreakpointAddMemWrite(addr) => {
-                    let bp = commands::make_mem_breakpoint(BreakpointKind::MemWrite, addr);
-                    self.debugger.breakpoints.add(bp);
-                    self.debugger.console_output.push(format!("BPMW at ${addr:04X}"));
-                }
-                DebugCommand::BreakpointClear(idx) => {
-                    if idx < self.debugger.breakpoints.breakpoints.len() {
-                        self.debugger.breakpoints.remove(idx);
-                        self.debugger.console_output.push(format!("BP #{idx} removed"));
-                    } else {
-                        self.debugger.console_output.push(format!("No breakpoint #{idx}"));
-                    }
-                }
-                DebugCommand::BreakpointList => {
-                    if self.debugger.breakpoints.breakpoints.is_empty() {
-                        self.debugger.console_output.push("No breakpoints.".into());
-                    } else {
-                        for (i, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
-                            let kind = match bp.kind {
-                                BreakpointKind::Opcode   => "PC",
-                                BreakpointKind::MemRead  => "MR",
-                                BreakpointKind::MemWrite => "MW",
-                                _ => "??",
-                            };
-                            let en = if bp.enabled { "+" } else { "-" };
-                            self.debugger.console_output.push(
-                                format!("  #{i} {en} {kind} ${:04X}", bp.address)
-                            );
-                        }
-                    }
-                }
-                DebugCommand::Register(None) => {
-                    let cpu = &self.emu.cpu;
-                    self.debugger.console_output.push(format!(
-                        "PC:{:04X} A:{:02X} X:{:02X} Y:{:02X} SP:{:02X} P:{:08b}",
-                        cpu.pc, cpu.a, cpu.x, cpu.y, cpu.sp, cpu.flags.bits()
-                    ));
-                }
-                DebugCommand::Register(Some((reg, val))) => {
-                    match reg.as_str() {
-                        "A"  => self.emu.cpu.a  = val as u8,
-                        "X"  => self.emu.cpu.x  = val as u8,
-                        "Y"  => self.emu.cpu.y  = val as u8,
-                        "SP" | "S" => self.emu.cpu.sp = val as u8,
-                        "PC" => self.emu.cpu.pc = val,
-                        "P"  => self.emu.cpu.flags = apple2_core::cpu::Flags::from_bits_truncate(val as u8),
-                        _ => {
-                            self.debugger.console_output.push(format!("Unknown register: {reg}"));
-                            return;
-                        }
-                    }
-                    self.debugger.console_output.push(format!("{reg} = ${val:04X}"));
-                }
-                DebugCommand::MemoryDump(addr, len) => {
-                    let lines = commands::format_memory_dump(addr, len, |a| self.emu.bus.read_raw(a));
-                    for line in lines {
-                        self.debugger.console_output.push(line);
-                    }
-                }
-                DebugCommand::SymbolAdd(name, addr) => {
-                    self.debugger.symbols.insert(&name, addr);
-                    self.debugger.console_output.push(format!("SYM {name} = ${addr:04X}"));
-                }
-                DebugCommand::SymbolRemove(name) => {
-                    self.debugger.symbols.remove_name(&name);
-                    self.debugger.console_output.push(format!("Removed symbol {name}"));
-                }
-                DebugCommand::BreakpointSave(path) => {
-                    match serde_yaml::to_string(&self.debugger.breakpoints) {
-                        Ok(yaml) => match std::fs::write(&path, &yaml) {
-                            Ok(_) => self.debugger.console_output.push(format!("Saved to {path}")),
-                            Err(e) => self.debugger.console_output.push(format!("Write error: {e}")),
-                        },
-                        Err(e) => self.debugger.console_output.push(format!("Serialize error: {e}")),
-                    }
-                }
-                DebugCommand::BreakpointLoad(path) => {
-                    match std::fs::read_to_string(&path) {
-                        Ok(yaml) => match serde_yaml::from_str(&yaml) {
-                            Ok(bps) => {
-                                self.debugger.breakpoints = bps;
-                                let count = self.debugger.breakpoints.breakpoints.len();
-                                self.debugger.console_output.push(format!("Loaded {count} breakpoints from {path}"));
-                            }
-                            Err(e) => self.debugger.console_output.push(format!("Parse error: {e}")),
-                        },
-                        Err(e) => self.debugger.console_output.push(format!("Read error: {e}")),
-                    }
-                }
-                DebugCommand::WatchAdd(addr) => {
-                    use apple2_debugger::watch::{Watch, WatchSource};
-                    let idx = self.debugger.watches.add(Watch {
-                        source: WatchSource::Address(addr),
-                        label: None,
-                        enabled: true,
-                    });
-                    self.debugger.console_output.push(format!("Watch #{idx}: byte ${addr:04X}"));
-                }
-                DebugCommand::WatchAddWord(addr) => {
-                    use apple2_debugger::watch::{Watch, WatchSource};
-                    let idx = self.debugger.watches.add(Watch {
-                        source: WatchSource::Word(addr),
-                        label: None,
-                        enabled: true,
-                    });
-                    self.debugger.console_output.push(format!("Watch #{idx}: word ${addr:04X}"));
-                }
-                DebugCommand::WatchAddReg(reg) => {
-                    use apple2_debugger::watch::{Watch, WatchSource};
-                    let idx = self.debugger.watches.add(Watch {
-                        source: WatchSource::Register(reg.clone()),
-                        label: None,
-                        enabled: true,
-                    });
-                    self.debugger.console_output.push(format!("Watch #{idx}: reg {reg}"));
-                }
-                DebugCommand::WatchClear(None) => {
-                    self.debugger.watches.clear();
-                    self.debugger.console_output.push("All watches cleared.".into());
-                }
-                DebugCommand::WatchClear(Some(idx)) => {
-                    if idx < self.debugger.watches.watches.len() {
-                        self.debugger.watches.remove(idx);
-                        self.debugger.console_output.push(format!("Watch #{idx} removed."));
-                    } else {
-                        self.debugger.console_output.push(format!("No watch #{idx}"));
-                    }
-                }
-                DebugCommand::WatchList => {
-                    use apple2_debugger::watch::WatchManager;
-                    if self.debugger.watches.watches.is_empty() {
-                        self.debugger.console_output.push("No watches.".into());
-                    } else {
-                        for (i, w) in self.debugger.watches.watches.iter().enumerate() {
-                            let cpu = &self.emu.cpu;
-                            let val = WatchManager::evaluate(
-                                &w.source,
-                                |a| self.emu.bus.read_raw(a),
-                                |name| match name {
-                                    "A"  => Some(cpu.a as u16),
-                                    "X"  => Some(cpu.x as u16),
-                                    "Y"  => Some(cpu.y as u16),
-                                    "SP" | "S" => Some(cpu.sp as u16),
-                                    "PC" => Some(cpu.pc),
-                                    "P"  => Some(cpu.flags.bits() as u16),
-                                    _ => None,
-                                },
-                            );
-                            self.debugger.console_output.push(format!("  #{i}: {val}"));
-                        }
-                    }
-                }
-                DebugCommand::Cycles(reset) => {
-                    if reset {
-                        self.debugger.cycle_checkpoint = self.emu.cpu.cycles;
-                        self.debugger.console_output.push("Cycle counter reset.".into());
-                    } else {
-                        let elapsed = self.emu.cpu.cycles - self.debugger.cycle_checkpoint;
-                        self.debugger.console_output.push(
-                            format!("Cycles: {} (total: {})", elapsed, self.emu.cpu.cycles)
-                        );
-                    }
-                }
-                DebugCommand::Assemble(addr, instruction) => {
-                    use apple2_debugger::assembler;
-                    match assembler::assemble_at(&instruction, addr) {
-                        Ok(result) => {
-                            for (i, &b) in result.bytes.iter().enumerate() {
-                                self.emu.bus.write_raw(addr.wrapping_add(i as u16), b);
-                            }
-                            let hex: Vec<String> = result.bytes.iter().map(|b| format!("{:02X}", b)).collect();
-                            self.debugger.console_output.push(
-                                format!("{:04X}: {}", addr, hex.join(" "))
-                            );
-                        }
-                        Err(e) => self.debugger.console_output.push(format!("Asm error: {e}")),
-                    }
-                }
-                DebugCommand::MarkData(addr, len, kind) => {
-                    self.debugger.markup.mark(addr, len, kind);
-                    self.debugger.console_output.push(
-                        format!("Marked ${:04X}-${:04X} as {:?}", addr, addr.wrapping_add(len), kind)
-                    );
-                }
-                DebugCommand::MarkCode(addr) => {
-                    self.debugger.markup.remove(addr);
-                    self.debugger.console_output.push(format!("${addr:04X} marked as code"));
-                }
-                DebugCommand::Nop(addr, count) => {
-                    for i in 0..count {
-                        self.emu.bus.write_raw(addr.wrapping_add(i), 0xEA);
-                    }
-                    self.debugger.console_output.push(
-                        format!("NOP x{count} at ${addr:04X}")
-                    );
-                }
-                DebugCommand::Fill(addr, len, val) => {
-                    for i in 0..len {
-                        self.emu.bus.write_raw(addr.wrapping_add(i), val);
-                    }
-                    self.debugger.console_output.push(
-                        format!("Filled ${:04X}-${:04X} with ${:02X}", addr, addr.wrapping_add(len), val)
-                    );
-                }
-                DebugCommand::Help => {
-                    for line in commands::help_text() {
-                        self.debugger.console_output.push(line);
-                    }
-                }
-            }
-        }
-
         fn reload_disk(emu: &mut Emulator, slot: usize, drive: usize, path: &Option<PathBuf>) {
             if let Some(p) = path {
                 if let Ok(data) = std::fs::read(p) {
@@ -896,68 +496,6 @@ mod gui {
             } else {
                 emu.bus.eject_disk(slot, drive);
             }
-        }
-
-        /// Set a transient status message that will be shown in the status bar
-        /// for approximately 3 seconds (~180 frames at 60 Hz).
-        fn set_status_msg(&mut self, msg: impl Into<String>) {
-            self.status_msg = Some(msg.into());
-            self.status_msg_frame = self.frame_no;
-        }
-
-        /// Read the Apple II text screen ($0400-$07FF) and return it as a
-        /// plain ASCII string.  Screen codes are converted to printable ASCII.
-        fn copy_text_screen(&self) -> String {
-            // Apple II text screen layout: 24 lines, each 40 columns.
-            // The screen is stored in a non-linear layout across $0400-$07FF.
-            // Group of 8 lines starts at $0400, $0480, $0500 (each +$80).
-            // Within a group, lines are at offsets 0, $28, $50, $78, $A0, $C8, $F0, $118.
-            let line_bases: [u16; 24] = [
-                0x0400, 0x0480, 0x0500, 0x0580, 0x0600, 0x0680, 0x0700, 0x0780,
-                0x0428, 0x04A8, 0x0528, 0x05A8, 0x0628, 0x06A8, 0x0728, 0x07A8,
-                0x0450, 0x04D0, 0x0550, 0x05D0, 0x0650, 0x06D0, 0x0750, 0x07D0,
-            ];
-            let mut result = String::with_capacity(24 * 41); // 24 lines + newlines
-            for base in line_bases {
-                let mut line = String::with_capacity(40);
-                for col in 0..40u16 {
-                    let byte = self.emu.bus.main_ram[(base + col) as usize];
-                    // Convert Apple II screen code to ASCII:
-                    // $00-$1F = inverse uppercase (A-Z + symbols) → map to ASCII
-                    // $20-$3F = inverse symbols/digits → map to ASCII
-                    // $40-$5F = flashing uppercase → map to ASCII
-                    // $60-$7F = flashing symbols/digits → map to ASCII
-                    // $80-$9F = normal uppercase (with high bit) → A-Z + symbols
-                    // $A0-$BF = normal symbols/digits → map to ASCII
-                    // $C0-$DF = normal uppercase → A-Z + symbols
-                    // $E0-$FF = normal lowercase (//e) → a-z + symbols
-                    let ascii = match byte {
-                        0x00..=0x1F => byte + 0x40,       // inverse uppercase
-                        0x20..=0x3F => byte,              // inverse symbols/digits
-                        0x40..=0x5F => byte,              // flashing uppercase
-                        0x60..=0x7F => byte - 0x20,       // flashing symbols → same as 0x40 range
-                        0x80..=0x9F => byte - 0x40,       // normal: high-bit set uppercase
-                        0xA0..=0xBF => byte - 0x80,       // normal: high-bit set symbols
-                        0xC0..=0xDF => byte - 0x80,       // normal uppercase
-                        0xE0..=0xFF => byte - 0x80,       // normal lowercase (//e)
-                    };
-                    let ch = if (0x20..=0x7E).contains(&ascii) {
-                        ascii as char
-                    } else {
-                        ' '
-                    };
-                    line.push(ch);
-                }
-                // Trim trailing spaces from each line
-                let trimmed = line.trim_end();
-                result.push_str(trimmed);
-                result.push('\n');
-            }
-            // Remove trailing blank lines
-            while result.ends_with("\n\n") {
-                result.pop();
-            }
-            result
         }
 
         fn disk_display_name(path: &Option<PathBuf>) -> &str {
@@ -1019,60 +557,55 @@ mod gui {
             // system calls across the logo/normal/full-speed branches.
             let frame_now = std::time::Instant::now();
 
-            if !in_logo_mode && !self.debugger.active {
+            if !in_logo_mode {
                 let elapsed_secs = frame_now
                     .duration_since(self.last_frame_time)
                     .as_secs_f64()
                     .min(0.1); // 100 ms cap
                 self.last_frame_time = frame_now;
 
+                // Skip execution entirely when the debugger has paused the CPU
+                let debugger_paused = self.debugger.active;
+
                 // CPU clock rate: emulation_speed * 102_300 Hz (1× = 1.023 MHz)
                 let base_hz = self.config.emulation_speed.max(1) as f64 * 102_300.0;
 
-                if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
-                    // Full-speed mode — matches AppleWin's g_bFullSpeed behaviour
-                    // (IsConditionForFullSpeed: motor on + enhanced disk enabled).
-                    //
-                    // Run at maximum host CPU speed until the disk motor turns off,
-                    // with a 100 ms real-time budget per frame to keep the UI
-                    // responsive (same as AppleWin's per-iteration frame budget).
-                    // This makes disk-heavy boots/loads that take seconds at 1× speed
-                    // complete in well under 1 second on a modern machine.
-                    const BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
-                    const BATCH: u64 = 100_000; // batch size between motor & timer checks
-                    let full_start = std::time::Instant::now();
-                    let has_bps = self.debugger.breakpoints.has_any_breakpoints();
-                    let step_target = self.debugger.step_over_target;
-                    if has_bps || step_target.is_some() {
-                        self.emu.bus.mem_trace_enabled =
-                            self.debugger.breakpoints.has_mem_breakpoints();
-                        let bps = &self.debugger.breakpoints;
-                        while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
-                            let result = self.emu.execute_debugged(BATCH, |pc, mem| {
-                                bps.check_opcode(pc)
-                                    || step_target == Some(pc)
-                                    || bps.check_mem_trace(mem)
-                            });
-                            if matches!(result, ExecuteResult::Break(_)) {
-                                self.debugger.active = true;
-                                self.debugger.step_over_target = None;
-                                self.show_debugger = true;
-                                break;
-                            }
-                        }
-                        self.emu.bus.mem_trace_enabled = false;
-                    } else {
-                        while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
-                            self.emu.execute(BATCH);
+                if debugger_paused {
+                    // Debugger is paused — do not execute any cycles.
+                    // Handle trace mode: if trace_remaining > 0, step and record
+                    if self.debugger.trace_remaining > 0 {
+                        use apple2_debugger::disasm::{disassemble_one, format_instruction};
+                        use apple2_debugger::trace::TraceEntry;
+                        let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
+                        let text = format_instruction(&instr);
+                        self.debugger.trace.push(TraceEntry {
+                            pc: self.emu.cpu.pc,
+                            opcode: instr.opcode,
+                            a: self.emu.cpu.a,
+                            x: self.emu.cpu.x,
+                            y: self.emu.cpu.y,
+                            sp: self.emu.cpu.sp,
+                            flags: self.emu.cpu.flags.bits(),
+                            cycles: self.emu.cpu.cycles,
+                            text: text.clone(),
+                        });
+                        self.debugger.print(text);
+                        self.emu.step();
+                        self.debugger.trace_remaining -= 1;
+                        if self.debugger.trace_remaining == 0 {
+                            self.debugger.activate(apple2_debugger::state::StopReason::TraceComplete);
+                            self.debugger.print("Trace complete.");
                         }
                     }
-                    // Reset timer so the next frame doesn't try to "catch up" for
-                    // the real time spent in the full-speed loop.
+                } else if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
+                    // Full-speed mode — matches AppleWin's g_bFullSpeed behaviour
+                    const BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+                    const BATCH: u64 = 100_000;
+                    let full_start = std::time::Instant::now();
+                    while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
+                        self.emu.execute(BATCH);
+                    }
                     self.last_frame_time = std::time::Instant::now();
-                    // Discard all speaker toggles and stale audio samples accumulated
-                    // during the full-speed burst — they represent boot/loading sounds
-                    // that have already "happened" in emulated time and would otherwise
-                    // drain from the ring buffer as 2–3 s of audible delay.
                     self.emu.bus.speaker_toggles.clear();
                     self.last_audio_cycle = self.emu.cpu.cycles;
                     self.dc_filter_ctr    = 0;
@@ -1084,23 +617,52 @@ mod gui {
                 } else {
                     let cycles = (elapsed_secs * base_hz) as u64;
                     if cycles > 0 {
-                        let has_bps = self.debugger.breakpoints.has_any_breakpoints();
-                        let step_target = self.debugger.step_over_target;
-                        if has_bps || step_target.is_some() {
-                            // Enable memory tracing only when memory breakpoints exist.
-                            self.emu.bus.mem_trace_enabled =
-                                self.debugger.breakpoints.has_mem_breakpoints();
-                            let bps = &self.debugger.breakpoints;
-                            let result = self.emu.execute_debugged(cycles, |pc, mem| {
-                                bps.check_opcode(pc)
-                                    || step_target == Some(pc)
-                                    || bps.check_mem_trace(mem)
+                        // Use callback-based execution to check breakpoints
+                        let bps = &self.debugger.breakpoints;
+                        let step_over = self.debugger.step_over_target;
+                        let step_out_sp = self.debugger.step_out_sp;
+                        let has_breakpoints = !bps.is_empty()
+                            || step_over.is_some()
+                            || step_out_sp.is_some();
+
+                        if has_breakpoints {
+                            let breakpoints = &self.debugger.breakpoints;
+                            let mut hit_bp: Option<u16> = None;
+                            let mut hit_step_over = false;
+                            let _hit_step_out = false;
+
+                            self.emu.execute_with_callback(cycles, |pc| {
+                                // Check step-over target
+                                if let Some(target) = step_over {
+                                    if pc == target {
+                                        hit_step_over = true;
+                                        return false;
+                                    }
+                                }
+                                // Check step-out (RTS detection)
+                                // We can't easily check SP inside callback,
+                                // so step-out is handled differently below
+                                // Check PC breakpoints
+                                if breakpoints.check_opcode(pc) {
+                                    hit_bp = Some(pc);
+                                    return false;
+                                }
+                                true
                             });
-                            self.emu.bus.mem_trace_enabled = false;
-                            if matches!(result, ExecuteResult::Break(_)) {
-                                self.debugger.active = true;
-                                self.debugger.step_over_target = None;
+
+                            if let Some(addr) = hit_bp {
+                                self.debugger.activate(
+                                    apple2_debugger::state::StopReason::Breakpoint(addr),
+                                );
+                                self.debugger.print(format!("Breakpoint hit at ${addr:04X}"));
+                                self.debugger.cursor = addr;
                                 self.show_debugger = true;
+                            }
+                            if hit_step_over {
+                                self.debugger.step_over_target = None;
+                                self.debugger.activate(
+                                    apple2_debugger::state::StopReason::StepOver,
+                                );
                             }
                         } else {
                             self.emu.execute(cycles);
@@ -1108,8 +670,7 @@ mod gui {
                     }
                 }
             } else {
-                // Keep last_frame_time current so we don't burst when logo exits
-                // or when the debugger resumes after being paused.
+                // Keep last_frame_time current so we don't burst when logo exits.
                 self.last_frame_time = frame_now;
             }
 
@@ -1225,14 +786,6 @@ mod gui {
             let mut paste_text:     Option<String>   = None;
             let mut take_screenshot: bool            = false;
             let mut video_shortcut: Option<VideoType> = None;
-            let mut copy_screen:    bool             = false;
-
-            // ── Drag-and-drop detection ──────────────────────────────────────
-            let dropped_files: Vec<PathBuf> = ctx.input(|i| {
-                i.raw.dropped_files.iter()
-                    .filter_map(|f| f.path.clone())
-                    .collect()
-            });
 
             // Only process Event::Key with repeat:false — this fires exactly once
             // per physical key-down, never for OS auto-repeat.  Event::Text is
@@ -1275,8 +828,7 @@ mod gui {
                                 // Ctrl+V is intercepted for host paste (Event::Paste above).
                                 let c: Option<u8> = match key {
                                     Key::A => Some(0x01), Key::B => Some(0x02),
-                                    Key::C => { copy_screen = true; None },
-                                    Key::D => Some(0x04),
+                                    Key::C => Some(0x03), Key::D => Some(0x04),
                                     Key::E => Some(0x05), Key::F => Some(0x06),
                                     Key::G => Some(0x07), Key::H => Some(0x08),
                                     Key::I => Some(0x09), Key::J => Some(0x0A),
@@ -1330,57 +882,6 @@ mod gui {
                 }
             }
 
-            // Ctrl+C: copy the Apple II text screen to the system clipboard.
-            if copy_screen && !in_logo_mode {
-                let text = self.copy_text_screen();
-                ctx.output_mut(|o| o.copied_text = text.clone());
-                self.set_status_msg("Text screen copied to clipboard");
-            }
-
-            // ── Drag-and-drop disk image loading ─────────────────────────────
-            if !dropped_files.is_empty() {
-                let valid_exts = ["dsk", "do", "po", "nib", "woz", "hdv", "2mg", "img"];
-                for path in &dropped_files {
-                    let ext = path.extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if !valid_exts.contains(&ext.as_str()) {
-                        self.set_status_msg(format!(
-                            "Unrecognized file type: .{ext}"
-                        ));
-                        continue;
-                    }
-                    if let Ok(data) = std::fs::read(path) {
-                        // Load into Drive 1 if empty, otherwise Drive 2
-                        let drive = if self.disk1.is_none() { 0 } else { 1 };
-                        self.emu.bus.load_disk(self.disk_slot, drive, &data, &ext);
-                        self.emu.bus.set_disk_path(self.disk_slot, drive, path.clone());
-                        let path_str = path.to_string_lossy().into_owned();
-                        self.config.add_recent_disk(&path_str);
-                        let name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("disk");
-                        if drive == 0 {
-                            self.config.last_disk1 = Some(path_str);
-                            self.disk1 = Some(path.clone());
-                            self.set_status_msg(format!("Drive 1: {name}"));
-                        } else {
-                            self.config.last_disk2 = Some(path_str);
-                            self.disk2 = Some(path.clone());
-                            self.set_status_msg(format!("Drive 2: {name}"));
-                        }
-                        self.config.last_disk_dir = path.parent()
-                            .map(|p| p.to_string_lossy().into_owned());
-                        self.config.save();
-                        // If we were in logo mode, start the emulator
-                        if in_logo_mode {
-                            self.reset(true);
-                        }
-                    }
-                }
-            }
-
             if !in_logo_mode {
                 for k in key_queue { self.emu.bus.key_press(k); }
 
@@ -1416,12 +917,7 @@ mod gui {
             // Screenshot: save framebuffer as BMP (triggered by F12).
             if take_screenshot && !in_logo_mode {
                 self.render_apple2(); // ensure latest frame
-                if let Some(path) = save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H) {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("screenshot");
-                    self.set_status_msg(format!("Screenshot saved: {name}"));
-                }
+                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
             }
 
             if do_hard_reset { self.reset(true); }
@@ -1475,12 +971,6 @@ mod gui {
             let mut act_eject_hdd2    = false;
             let mut act_recent_disk: Option<String> = None;
             let mut act_recent_hdd: Option<String> = None;
-            // (is_blank, is_dos33, size_bytes)
-            let mut act_new_disk: Option<(bool, bool, usize)> = None;
-            // (is_dos33, path)
-            let mut act_format_disk: Option<(bool, std::path::PathBuf)> = None;
-            let mut act_load_cassette = false;
-            let mut act_eject_cassette = false;
 
             // ── Menu bar ──────────────────────────────────────────────────────
             egui::TopBottomPanel::top("menubar")
@@ -1505,74 +995,6 @@ mod gui {
                             if ui.add_enabled(d2_loaded, egui::Button::new("Eject Disk 2")).clicked() {
                                 act_eject_disk2 = true; ui.close_menu();
                             }
-                            ui.separator();
-                            // ── New Disk submenu ──────────────────────────────
-                            ui.menu_button("New Disk\u{2026}", |ui| {
-                                ui.label(egui::RichText::new("ProDOS").strong());
-                                if ui.button("ProDOS 5.25\" 140 KB (.po)").clicked() {
-                                    act_new_disk = Some((false, false, 143360)); ui.close_menu();
-                                }
-                                if ui.button("ProDOS 5.25\" 160 KB (.po)").clicked() {
-                                    act_new_disk = Some((false, false, 163840)); ui.close_menu();
-                                }
-                                if ui.button("ProDOS 3.5\" 800 KB (.po)").clicked() {
-                                    act_new_disk = Some((false, false, 819200)); ui.close_menu();
-                                }
-                                if ui.button("ProDOS Hard 32 MB (.hdv)").clicked() {
-                                    act_new_disk = Some((false, false, 33554432)); ui.close_menu();
-                                }
-                                ui.separator();
-                                ui.label(egui::RichText::new("DOS 3.3").strong());
-                                if ui.button("DOS 3.3 5.25\" 140 KB (.dsk)").clicked() {
-                                    act_new_disk = Some((false, true, 143360)); ui.close_menu();
-                                }
-                                if ui.button("DOS 3.3 5.25\" 160 KB (.dsk)").clicked() {
-                                    act_new_disk = Some((false, true, 163840)); ui.close_menu();
-                                }
-                                ui.separator();
-                                ui.label(egui::RichText::new("Blank").strong());
-                                if ui.button("Blank 5.25\" 140 KB (.po)").clicked() {
-                                    act_new_disk = Some((true, false, 143360)); ui.close_menu();
-                                }
-                                if ui.button("Blank 5.25\" 160 KB (.po)").clicked() {
-                                    act_new_disk = Some((true, false, 163840)); ui.close_menu();
-                                }
-                                if ui.button("Blank 3.5\" 800 KB (.po)").clicked() {
-                                    act_new_disk = Some((true, false, 819200)); ui.close_menu();
-                                }
-                                if ui.button("Blank Hard 32 MB (.hdv)").clicked() {
-                                    act_new_disk = Some((true, false, 33554432)); ui.close_menu();
-                                }
-                                ui.separator();
-                                ui.label(egui::RichText::new("Copy options (ProDOS only)").weak().italics());
-                                ui.checkbox(&mut self.config.new_disk_copy_prodos,     "ProDOS 2.4.3");
-                                ui.checkbox(&mut self.config.new_disk_copy_basic,      "BASIC.SYSTEM");
-                                ui.checkbox(&mut self.config.new_disk_copy_bitsy_boot, "BITSY.BOOT");
-                                ui.checkbox(&mut self.config.new_disk_copy_bitsy_bye,  "QUIT.SYSTEM");
-                            });
-                            // ── Format Disk submenu ───────────────────────────
-                            ui.menu_button("Format Disk\u{2026}", |ui| {
-                                ui.label(egui::RichText::new("Pick a disk image to reformat").weak());
-                                if ui.button("Format as ProDOS\u{2026}").clicked() {
-                                    if let Some(path) = open_disk_dialog(
-                                        "Select Disk to Format as ProDOS",
-                                        self.config.last_disk_dir.as_deref(),
-                                    ) {
-                                        act_format_disk = Some((false, path));
-                                    }
-                                    ui.close_menu();
-                                }
-                                if ui.button("Format as DOS 3.3\u{2026}").clicked() {
-                                    if let Some(path) = open_disk_dialog(
-                                        "Select Disk to Format as DOS 3.3",
-                                        self.config.last_disk_dir.as_deref(),
-                                    ) {
-                                        act_format_disk = Some((true, path));
-                                    }
-                                    ui.close_menu();
-                                }
-                            });
-                            ui.separator();
                             // ── Recent Disks submenu ──────────────────────────
                             ui.menu_button("Recent Disks", |ui| {
                                 if self.config.recent_disks.is_empty() {
@@ -1635,17 +1057,6 @@ mod gui {
                                     }
                                 }
                             });
-                            ui.separator();
-                            // ── Cassette tape ────────────────────────────────
-                            {
-                                let cassette_loaded = self.emu.bus.cassette_loaded();
-                                if ui.button("Load Cassette Tape…").clicked() {
-                                    act_load_cassette = true; ui.close_menu();
-                                }
-                                if ui.add_enabled(cassette_loaded, egui::Button::new("Eject Cassette")).clicked() {
-                                    act_eject_cassette = true; ui.close_menu();
-                                }
-                            }
                             ui.separator();
                             if ui.button("Screenshot       F12").clicked() {
                                 act_screenshot = true; ui.close_menu();
@@ -1760,19 +1171,7 @@ mod gui {
                             );
                         }
                         ui.separator();
-                        // Show transient status message or normal status
-                        let status_active = self.status_msg.is_some()
-                            && self.frame_no.wrapping_sub(self.status_msg_frame) < 180;
-                        if !status_active {
-                            self.status_msg = None;
-                        }
-                        if let Some(ref msg) = self.status_msg {
-                            ui.label(
-                                RichText::new(msg.as_str())
-                                    .small()
-                                    .color(Color32::from_rgb(0, 100, 0)),
-                            );
-                        } else if in_logo_mode {
+                        if in_logo_mode {
                             ui.label(RichText::new("AppleWin-rs — Press any key to start").small());
                         } else {
                             ui.label(RichText::new(format!("PC:${pc:04X}")).small().monospace());
@@ -1852,380 +1251,565 @@ mod gui {
             }
 
             // ── Debugger window ───────────────────────────────────────────────
+            // Matches the original AppleWin debugger layout: black background,
+            // monospace text, all panels visible simultaneously.
+            //   Left:  Disassembly listing
+            //   Right: Registers, Stack, Breakpoints, Watches, Soft-switches
+            //   Bottom: Memory dump (Data window)
+            //   Very bottom: Console output + command input
             if self.show_debugger {
                 use apple2_debugger::disasm::{disassemble_one, format_instruction};
                 use apple2_debugger::breakpoint::{Breakpoint, BreakpointKind};
-                use apple2_debugger::commands;
-                use apple2_debugger::markup;
+                use apple2_debugger::commands::{self, CmdResult, CpuRegs};
+                use apple2_debugger::softswitch::decode_soft_switches;
 
-                // Snapshot CPU registers before the closure borrows self
-                let pc     = self.emu.cpu.pc;
-                let a      = self.emu.cpu.a;
-                let x      = self.emu.cpu.x;
-                let y      = self.emu.cpu.y;
-                let sp     = self.emu.cpu.sp;
-                let p      = self.emu.cpu.flags.bits();
-                let cycles = self.emu.cpu.cycles;
+                // AppleWin debugger color palette
+                const DBG_BG:        Color32 = Color32::from_rgb(0, 0, 0);
+                const DBG_TEXT:      Color32 = Color32::from_rgb(204, 204, 204);
+                const DBG_ADDR:      Color32 = Color32::from_rgb(255, 255, 0);     // yellow addresses
+                #[allow(dead_code)]
+                const DBG_OPCODE:    Color32 = Color32::from_rgb(255, 255, 255);    // white mnemonics
+                #[allow(dead_code)]
+                const DBG_OPERAND:   Color32 = Color32::from_rgb(0, 255, 255);      // cyan operands
+                const DBG_LABEL:     Color32 = Color32::from_rgb(0, 128, 0);        // green section headers
+                const DBG_REGS:      Color32 = Color32::from_rgb(255, 128, 0);      // orange register values
+                const DBG_BP:        Color32 = Color32::from_rgb(255, 0, 0);        // red breakpoints
+                const DBG_CURSOR:    Color32 = Color32::from_rgb(64, 64, 192);      // blue cursor bg
+                const DBG_PC_BG:     Color32 = Color32::from_rgb(192, 192, 0);      // yellow PC bg
+                const DBG_CONSOLE:   Color32 = Color32::from_rgb(192, 192, 192);    // console text
+                const DBG_FLAG_SET:  Color32 = Color32::from_rgb(255, 255, 255);    // set flag
+                const DBG_FLAG_CLR:  Color32 = Color32::from_rgb(100, 100, 100);    // clear flag
+                const DBG_DATA:      Color32 = Color32::from_rgb(0, 192, 255);      // data bytes
+                const DBG_ASCII:     Color32 = Color32::from_rgb(0, 255, 255);      // ascii column
+                const DBG_WATCH_VAL: Color32 = Color32::from_rgb(128, 255, 128);    // watch values
+                const DBG_SWITCH_ON: Color32 = Color32::from_rgb(0, 255, 0);        // switch on
+                const DBG_SWITCH_OFF:Color32 = Color32::from_rgb(128, 0, 0);        // switch off
+
+                let pc   = self.emu.cpu.pc;
+                let a    = self.emu.cpu.a;
+                let x    = self.emu.cpu.x;
+                let y    = self.emu.cpu.y;
+                let sp   = self.emu.cpu.sp;
+                let p    = self.emu.cpu.flags.bits();
+                let cpu_cycles = self.emu.cpu.cycles;
                 let paused = self.debugger.active;
+                let mode_bits = self.emu.bus.mode.bits();
 
-                let mut do_step          = false;
-                let mut do_step_over     = false;
-                let mut do_step_out      = false;
-                let mut do_run_to_cursor = false;
-                let mut do_pause         = false;
-                let mut do_resume        = false;
-                let mut do_add_bp        = false;
+                let mono = FontId::monospace(11.0);
+
+                // Deferred actions
+                let mut do_step       = false;
+                let mut do_step_over  = false;
+                let mut do_step_out   = false;
+                let mut do_pause      = false;
+                let mut do_resume     = false;
+                let mut do_add_bp     = false;
+                let mut do_exec_cmd   = false;
                 let mut do_remove_bp: Option<usize> = None;
+                let do_toggle_bp: Option<usize> = None;
                 let mut cursor_update: Option<u16>  = None;
-                let mut do_submit_cmd    = false;
+                let do_goto_addr  = false;
+
+                let dbg_frame = egui::Frame::none()
+                    .fill(DBG_BG)
+                    .inner_margin(egui::style::Margin::same(4.0));
 
                 egui::Window::new("Debugger")
                     .resizable(true)
-                    .min_width(520.0)
+                    .min_width(800.0)
+                    .default_width(900.0)
+                    .min_height(580.0)
+                    .default_height(680.0)
+                    .frame(dbg_frame)
                     .show(ctx, |ui| {
-                        // ── CPU registers ──────────────────────────────────
-                        ui.horizontal(|ui| {
-                            ui.monospace(format!(
-                                "PC:{:04X}  A:{:02X}  X:{:02X}  Y:{:02X}  SP:{:02X}  P:{:08b}",
-                                pc, a, x, y, sp, p
-                            ));
-                        });
-                        ui.horizontal(|ui| {
-                            let elapsed = cycles - self.debugger.cycle_checkpoint;
-                            ui.monospace(format!(
-                                "Flags: NV-BDIZC   Cycles: {} (+{})",
-                                cycles, elapsed
-                            ));
-                        });
-                        ui.separator();
-
-                        // ── Execution controls ──────────────────────────────
+                        // ────────────────────────────────────────────────────
+                        // TOP: Execution controls
+                        // ────────────────────────────────────────────────────
                         ui.horizontal(|ui| {
                             if paused {
-                                if ui.button("Resume").clicked()         { do_resume        = true; }
-                                if ui.button("Step").clicked()           { do_step           = true; }
-                                if ui.button("Step Over").clicked()      { do_step_over      = true; }
-                                if ui.button("Step Out").clicked()       { do_step_out       = true; }
-                                if ui.button("Run to Cursor").clicked()  { do_run_to_cursor  = true; }
+                                if ui.button(RichText::new("G Go").monospace().color(Color32::WHITE)).clicked() { do_resume = true; }
+                                if ui.button(RichText::new("S Step").monospace().color(Color32::WHITE)).clicked() { do_step = true; }
+                                if ui.button(RichText::new("SO Over").monospace().color(Color32::WHITE)).clicked() { do_step_over = true; }
+                                if ui.button(RichText::new("OUT").monospace().color(Color32::WHITE)).clicked() { do_step_out = true; }
                             } else {
-                                if ui.button("Pause").clicked()  { do_pause  = true; }
+                                if ui.button(RichText::new("Break").monospace().color(Color32::WHITE)).clicked() { do_pause = true; }
                             }
+                            ui.add_space(12.0);
+                            let status = match &self.debugger.stop_reason {
+                                apple2_debugger::state::StopReason::Breakpoint(addr) => format!("*BREAK* ${addr:04X}"),
+                                apple2_debugger::state::StopReason::Step => "*STEP*".into(),
+                                apple2_debugger::state::StopReason::StepOver => "*STEP OVER*".into(),
+                                apple2_debugger::state::StopReason::StepOut => "*STEP OUT*".into(),
+                                apple2_debugger::state::StopReason::TraceComplete => "*TRACE DONE*".into(),
+                                apple2_debugger::state::StopReason::UserBreak => "*USER BREAK*".into(),
+                                apple2_debugger::state::StopReason::Running => "Running...".into(),
+                                _ => "*STOPPED*".into(),
+                            };
+                            let sc = if paused { DBG_BP } else { Color32::from_rgb(0, 200, 0) };
+                            ui.label(RichText::new(status).font(mono.clone()).color(sc));
                         });
-                        ui.separator();
+                        ui.add_space(2.0);
 
-                        // Use columns: left=disassembly, right=stack+info
-                        ui.columns(2, |cols| {
-                            // ── Left column: Disassembly ────────────────────
-                            cols[0].label("Disassembly:");
+                        // ────────────────────────────────────────────────────
+                        // MAIN AREA: Left=Disasm, Right=Info panels
+                        // ────────────────────────────────────────────────────
+                        let main_height = (ui.available_height() - 140.0).max(200.0);
+                        ui.horizontal(|ui| {
+
+                        // ═══════════════════════════════════════════════════
+                        // LEFT: Disassembly (Code Window)
+                        // ═══════════════════════════════════════════════════
+                        ui.vertical(|ui| {
+                            ui.set_width(420.0);
+                            ui.label(RichText::new(" Code").font(mono.clone()).color(DBG_LABEL));
+
                             egui::ScrollArea::vertical()
-                                .max_height(280.0)
-                                .id_source("dbg_disasm")
-                                .show(&mut cols[0], |ui| {
-                                    let start = if paused { pc } else { self.debugger.cursor };
+                                .max_height(main_height)
+                                .id_source("dbg_code")
+                                .show(ui, |ui| {
+                                    let start = if let Some(goto) = self.debugger.goto_addr {
+                                        goto
+                                    } else if paused {
+                                        pc
+                                    } else {
+                                        self.debugger.cursor
+                                    };
                                     let mut addr = start;
-                                    let mut lines_shown = 0;
-                                    while lines_shown < 24 {
-                                        // Check if address has a symbol
-                                        let sym_name = self.debugger.symbols.name_at(addr);
-                                        if let Some(name) = sym_name {
-                                            ui.monospace(
-                                                RichText::new(format!("{name}:"))
-                                                    .color(Color32::YELLOW)
-                                            );
-                                        }
-                                        // Check for data markup at this address
-                                        let markup_kind = self.debugger.markup.kind_at(addr);
+                                    for _ in 0..30 {
+                                        let instr = disassemble_one(addr, |a| self.emu.bus.read_raw(a));
                                         let has_bp = self.debugger.breakpoints.breakpoints.iter()
-                                            .any(|bp| bp.enabled && bp.kind == BreakpointKind::Opcode
-                                                && addr >= bp.address
-                                                && addr < bp.address.saturating_add(bp.length));
-                                        let marker = if addr == pc { ">" } else if has_bp { "*" } else { " " };
+                                            .any(|bp| bp.enabled && bp.kind == BreakpointKind::Opcode && bp.address == addr);
+                                        let sym_name = self.debugger.symbols.name_at(addr);
+                                        let is_pc = addr == pc;
 
-                                        if let Some(kind) = markup_kind
-                                            && kind != markup::MarkupKind::Code {
-                                            // Render as data
-                                            let region = self.debugger.markup.region_at(addr);
-                                            let remaining = region.map(|r| {
-                                                let end = r.start.wrapping_add(r.length);
-                                                end.wrapping_sub(addr)
-                                            }).unwrap_or(1);
-                                            let (data_lines, consumed) = markup::format_data_region(
-                                                addr, kind, remaining,
-                                                |a| self.emu.bus.read_raw(a),
-                                            );
-                                            for line in &data_lines {
-                                                let text = format!("{} {}", marker, line);
-                                                let color = Color32::from_rgb(0x80, 0xC0, 0xFF);
-                                                let resp = ui.selectable_label(
-                                                    addr == self.debugger.cursor,
-                                                    RichText::new(text).monospace().color(color),
-                                                );
-                                                if resp.clicked() { cursor_update = Some(addr); }
-                                                lines_shown += 1;
-                                            }
-                                            addr = addr.wrapping_add(consumed.max(1));
-                                            continue;
+                                        // Build line: marker + address + bytes + mnemonic + operand
+                                        let marker = if is_pc { ">" } else if has_bp { "*" } else { " " };
+
+                                        // Raw bytes
+                                        let mut raw = String::new();
+                                        for i in 0..instr.bytes {
+                                            raw.push_str(&format!("{:02X} ", self.emu.bus.read_raw(addr.wrapping_add(i as u16))));
                                         }
+                                        while raw.len() < 9 { raw.push(' '); }
 
-                                        // Normal code disassembly
-                                        let instr = disassemble_one(addr, |a| {
-                                            self.emu.bus.read_raw(a)
-                                        });
-                                        let text = format!(
-                                            "{} {}",
-                                            marker,
-                                            format_instruction(&instr),
+                                        let line = format!(
+                                            "{marker}{:04X}:{raw}{:3} {}{}",
+                                            addr,
+                                            instr.mnemonic,
+                                            // Format operand without the address prefix
+                                            &format_instruction(&instr)[6..], // skip "XXXX: "
+                                            sym_name.map(|s| format!(" ;{s}")).unwrap_or_default(),
                                         );
-                                        let color = if addr == pc {
-                                            Color32::from_rgb(0x80, 0xFF, 0x80)
+
+                                        let (fg, bg) = if is_pc {
+                                            (Color32::BLACK, DBG_PC_BG)
                                         } else if has_bp {
-                                            Color32::from_rgb(0xFF, 0x80, 0x80)
+                                            (Color32::WHITE, Color32::from_rgb(128, 0, 0))
+                                        } else if addr == self.debugger.cursor {
+                                            (Color32::WHITE, DBG_CURSOR)
                                         } else {
-                                            Color32::LIGHT_GRAY
+                                            (DBG_TEXT, DBG_BG)
                                         };
+
                                         let resp = ui.selectable_label(
-                                            addr == self.debugger.cursor,
-                                            RichText::new(text).monospace().color(color),
+                                            false,
+                                            RichText::new(&line).font(mono.clone()).color(fg).background_color(bg),
                                         );
                                         if resp.clicked() { cursor_update = Some(addr); }
+                                        if resp.secondary_clicked() {
+                                            let existing = self.debugger.breakpoints.breakpoints.iter()
+                                                .position(|bp| bp.kind == BreakpointKind::Opcode && bp.address == addr);
+                                            if let Some(idx) = existing {
+                                                do_remove_bp = Some(idx);
+                                            } else {
+                                                self.debugger_bp_input = format!("{:04X}", addr);
+                                                do_add_bp = true;
+                                            }
+                                        }
                                         addr = addr.wrapping_add(instr.bytes as u16);
-                                        lines_shown += 1;
                                     }
                                 });
+                        });
 
-                            // ── Right column: Stack + Breakpoints ───────────
-                            cols[1].label("Stack:");
+                        ui.add_space(4.0);
+
+                        // ═══════════════════════════════════════════════════
+                        // RIGHT: Registers, Stack, Breakpoints, Watches, Switches
+                        // ═══════════════════════════════════════════════════
+                        ui.vertical(|ui| {
+                            ui.set_min_width(300.0);
+
                             egui::ScrollArea::vertical()
-                                .max_height(120.0)
-                                .id_source("dbg_stack")
-                                .show(&mut cols[1], |ui| {
-                                    for i in 0..16u8 {
-                                        let offset = sp.wrapping_add(1).wrapping_add(i);
-                                        let addr = 0x0100u16 | offset as u16;
-                                        let val = self.emu.bus.read_raw(addr);
-                                        let text = format!("{:04X}: {:02X}", addr, val);
-                                        ui.monospace(text);
-                                    }
-                                });
-                            cols[1].separator();
+                                .max_height(main_height)
+                                .id_source("dbg_right")
+                                .show(ui, |ui| {
 
-                            cols[1].label("Breakpoints:");
-                            let mut remove_idx: Option<usize> = None;
-                            for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
-                                cols[1].horizontal(|ui| {
-                                    let kind_str = match bp.kind {
+                            // ── Registers ────────────────────────────────────
+                            ui.label(RichText::new(" Registers").font(mono.clone()).color(DBG_LABEL));
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("PC ").font(mono.clone()).color(DBG_TEXT));
+                                ui.label(RichText::new(format!("{:04X}", pc)).font(mono.clone()).color(DBG_REGS));
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("A ").font(mono.clone()).color(DBG_TEXT));
+                                ui.label(RichText::new(format!("{:02X}", a)).font(mono.clone()).color(DBG_REGS));
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("X ").font(mono.clone()).color(DBG_TEXT));
+                                ui.label(RichText::new(format!("{:02X}", x)).font(mono.clone()).color(DBG_REGS));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("SP ").font(mono.clone()).color(DBG_TEXT));
+                                ui.label(RichText::new(format!("  {:02X}", sp)).font(mono.clone()).color(DBG_REGS));
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("Y ").font(mono.clone()).color(DBG_TEXT));
+                                ui.label(RichText::new(format!("{:02X}", y)).font(mono.clone()).color(DBG_REGS));
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("P ").font(mono.clone()).color(DBG_TEXT));
+                                ui.label(RichText::new(format!("{:02X}", p)).font(mono.clone()).color(DBG_REGS));
+                            });
+                            // Flags with set/clear coloring
+                            ui.horizontal(|ui| {
+                                for (bit, name) in [(0x80, "N"), (0x40, "V"), (0x20, "-"), (0x10, "B"),
+                                                     (0x08, "D"), (0x04, "I"), (0x02, "Z"), (0x01, "C")] {
+                                    let set = p & bit != 0;
+                                    let (fg, bg) = if name == "-" {
+                                        (DBG_FLAG_CLR, DBG_BG)
+                                    } else if set {
+                                        (Color32::BLACK, DBG_FLAG_SET)
+                                    } else {
+                                        (DBG_FLAG_CLR, DBG_BG)
+                                    };
+                                    let label = if set { name.to_uppercase() } else { name.to_lowercase() };
+                                    ui.label(RichText::new(label).font(mono.clone()).color(fg).background_color(bg));
+                                }
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(format!("Cyc:{cpu_cycles}")).font(mono.clone()).color(DBG_TEXT));
+                            });
+                            ui.add_space(4.0);
+
+                            // ── Stack ────────────────────────────────────────
+                            ui.label(RichText::new(" Stack").font(mono.clone()).color(DBG_LABEL));
+                            {
+                                let top = sp.wrapping_add(1);
+                                let mut saddr = 0x0100u16 | top as u16;
+                                let mut count = 0;
+                                while saddr <= 0x01FF && count < 8 {
+                                    let b = self.emu.bus.read_raw(saddr);
+                                    let marker = if count == 0 { ">" } else { " " };
+                                    ui.label(RichText::new(format!(
+                                        "{marker}{:04X}: {:02X}", saddr, b
+                                    )).font(mono.clone()).color(DBG_DATA));
+                                    saddr += 1;
+                                    count += 1;
+                                }
+                                if count == 0 {
+                                    ui.label(RichText::new(" (empty)").font(mono.clone()).color(DBG_TEXT));
+                                }
+                            }
+                            ui.add_space(4.0);
+
+                            // ── Breakpoints ──────────────────────────────────
+                            ui.label(RichText::new(" Breakpoints").font(mono.clone()).color(DBG_LABEL));
+                            if self.debugger.breakpoints.is_empty() {
+                                ui.label(RichText::new(" (none)").font(mono.clone()).color(DBG_TEXT));
+                            } else {
+                                for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
+                                    let kind = match bp.kind {
                                         BreakpointKind::Opcode   => "PC",
                                         BreakpointKind::MemRead  => "MR",
                                         BreakpointKind::MemWrite => "MW",
                                         _ => "??",
                                     };
-                                    let status = if bp.enabled { "+" } else { "-" };
-                                    ui.monospace(format!("{} {} {:04X}", status, kind_str, bp.address));
-                                    if ui.small_button("x").clicked() {
-                                        remove_idx = Some(idx);
+                                    let en = if bp.enabled { " " } else { "D" };
+                                    let c = if bp.enabled { DBG_BP } else { DBG_FLAG_CLR };
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!(
+                                            " {idx}:{en} ${:04X} {kind}", bp.address
+                                        )).font(mono.clone()).color(c));
+                                        if ui.small_button("x").clicked() { do_remove_bp = Some(idx); }
+                                    });
+                                }
+                            }
+                            ui.add_space(4.0);
+
+                            // ── Watches ──────────────────────────────────────
+                            ui.label(RichText::new(" Watches").font(mono.clone()).color(DBG_LABEL));
+                            if self.debugger.watches.items.is_empty() {
+                                ui.label(RichText::new(" (none)").font(mono.clone()).color(DBG_TEXT));
+                            } else {
+                                for (idx, w) in self.debugger.watches.items.iter().enumerate() {
+                                    let b = self.emu.bus.read_raw(w.address);
+                                    ui.label(RichText::new(format!(
+                                        " {idx}: ${:04X}={:02X} ({b:3})", w.address, b
+                                    )).font(mono.clone()).color(DBG_WATCH_VAL));
+                                }
+                            }
+                            ui.add_space(4.0);
+
+                            // ── Soft Switches (compact) ──────────────────────
+                            ui.label(RichText::new(" Switches").font(mono.clone()).color(DBG_LABEL));
+                            let info = decode_soft_switches(mode_bits);
+                            for row in info.items.chunks(3) {
+                                ui.horizontal(|ui| {
+                                    for sw in row {
+                                        let c = if sw.active { DBG_SWITCH_ON } else { DBG_SWITCH_OFF };
+                                        let state = if sw.active { "+" } else { "-" };
+                                        ui.label(RichText::new(format!("{state}{:<9}", sw.name))
+                                            .font(mono.clone()).color(c));
                                     }
                                 });
                             }
-                            if let Some(idx) = remove_idx { do_remove_bp = Some(idx); }
-                            cols[1].horizontal(|ui| {
-                                ui.label("BP:");
-                                let te = egui::TextEdit::singleline(&mut self.debugger_bp_input)
-                                    .desired_width(60.0);
-                                ui.add(te);
-                                if ui.button("Add").clicked() { do_add_bp = true; }
-                            });
-                        });
-                        ui.separator();
+                            // Video mode summary
+                            {
+                                let graphics = mode_bits & 0x4000 != 0;
+                                let hires = mode_bits & 0x0040 != 0;
+                                let mixed = mode_bits & 0x8000 != 0;
+                                let vid80 = mode_bits & 0x0001_0000 != 0;
+                                let dhires = mode_bits & 0x0004_0000 != 0;
+                                let page2 = mode_bits & 0x0080 != 0;
+                                let mode_str = if !graphics {
+                                    if vid80 { "TEXT 80" } else { "TEXT 40" }
+                                } else if hires {
+                                    if dhires { "DHGR" } else { "HGR" }
+                                } else {
+                                    if dhires { "DGR" } else { "GR" }
+                                };
+                                let page = if page2 { "P2" } else { "P1" };
+                                let mix = if mixed { "+M" } else { "" };
+                                ui.label(RichText::new(format!(" Video: {mode_str} {page}{mix}"))
+                                    .font(mono.clone()).color(DBG_TEXT));
+                            }
 
-                        // ── Memory dump ─────────────────────────────────────
-                        ui.collapsing("Memory Dump", |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Addr:");
-                                let te = egui::TextEdit::singleline(&mut self.debugger_mem_input)
-                                    .desired_width(60.0)
-                                    .font(FontId::monospace(12.0));
-                                ui.add(te);
-                                if ui.button("Go").clicked()
-                                    && let Ok(addr) = u16::from_str_radix(
-                                        self.debugger_mem_input.trim().trim_start_matches('$'), 16
-                                    ) {
-                                    self.debugger.mem_dump_addr = addr;
+                            }); // end right scroll area
+                        });
+                        }); // end main horizontal
+
+                        // ────────────────────────────────────────────────────
+                        // BOTTOM: Data window (Memory dump)
+                        // ────────────────────────────────────────────────────
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(" Data").font(mono.clone()).color(DBG_LABEL));
+                            ui.add_space(8.0);
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.debugger_mem_input)
+                                    .desired_width(50.0)
+                                    .font(mono.clone())
+                                    .text_color(DBG_REGS)
+                            );
+                            if ui.small_button("Go").clicked()
+                                || (resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
+                            {
+                                if let Ok(addr) = u16::from_str_radix(
+                                    self.debugger_mem_input.trim().trim_start_matches('$'), 16
+                                ) {
+                                    self.debugger.mem_view_addr = addr;
                                 }
-                            });
-                            egui::ScrollArea::vertical()
-                                .max_height(160.0)
-                                .id_source("dbg_memdump")
-                                .show(ui, |ui| {
-                                    let lines = commands::format_memory_dump(
-                                        self.debugger.mem_dump_addr,
-                                        0x80,
-                                        |a| self.emu.bus.read_raw(a),
-                                    );
-                                    for line in &lines {
-                                        ui.monospace(line);
-                                    }
+                            }
+                            if ui.small_button("PgUp").clicked() {
+                                self.debugger.mem_view_addr = self.debugger.mem_view_addr.wrapping_sub(0x80);
+                            }
+                            if ui.small_button("PgDn").clicked() {
+                                self.debugger.mem_view_addr = self.debugger.mem_view_addr.wrapping_add(0x80);
+                            }
+                        });
+                        {
+                            let start = self.debugger.mem_view_addr;
+                            let mut addr = start;
+                            for _ in 0..8 {
+                                let mut hex = String::new();
+                                let mut asc = String::new();
+                                for i in 0..8u16 {
+                                    let b = self.emu.bus.read_raw(addr.wrapping_add(i));
+                                    hex.push_str(&format!("{b:02X} "));
+                                    asc.push(if (0x20..=0x7E).contains(&b) { b as char } else { '.' });
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{addr:04X}:")).font(mono.clone()).color(DBG_ADDR));
+                                    ui.label(RichText::new(&hex).font(mono.clone()).color(DBG_DATA));
+                                    ui.label(RichText::new(&asc).font(mono.clone()).color(DBG_ASCII));
                                 });
-                        });
-
-                        // ── Watches ──────────────────────────────────────────
-                        if !self.debugger.watches.watches.is_empty() {
-                            ui.collapsing("Watches", |ui| {
-                                use apple2_debugger::watch::WatchManager;
-                                for (i, w) in self.debugger.watches.watches.iter().enumerate() {
-                                    let val = WatchManager::evaluate(
-                                        &w.source,
-                                        |a_addr| self.emu.bus.read_raw(a_addr),
-                                        |name| match name {
-                                            "A"  => Some(a as u16),
-                                            "X"  => Some(x as u16),
-                                            "Y"  => Some(y as u16),
-                                            "SP" | "S" => Some(sp as u16),
-                                            "PC" => Some(pc),
-                                            "P"  => Some(p as u16),
-                                            _ => None,
-                                        },
-                                    );
-                                    ui.monospace(format!("#{i}: {val}"));
-                                }
-                            });
+                                addr = addr.wrapping_add(8);
+                            }
                         }
 
-                        // ── Soft-switch status ──────────────────────────────
-                        ui.collapsing("Soft Switches", |ui| {
-                            use apple2_core::bus::MemMode;
-                            let mode = self.emu.bus.mode;
-                            ui.columns(3, |cols| {
-                                // Column 1: Memory
-                                cols[0].label(RichText::new("Memory").strong());
-                                for (flag, name) in [
-                                    (MemMode::MF_80STORE,  "80STORE"),
-                                    (MemMode::MF_ALTZP,    "ALTZP"),
-                                    (MemMode::MF_AUXREAD,  "AUXREAD"),
-                                    (MemMode::MF_AUXWRITE, "AUXWRITE"),
-                                    (MemMode::MF_BANK2,    "BANK2"),
-                                    (MemMode::MF_HIGHRAM,  "HIGHRAM"),
-                                    (MemMode::MF_WRITERAM, "WRITERAM"),
-                                ] {
-                                    let on = mode.contains(flag);
-                                    let color = if on { Color32::GREEN } else { Color32::DARK_GRAY };
-                                    cols[0].monospace(RichText::new(
-                                        format!("{} {}", if on { "+" } else { "-" }, name)
-                                    ).color(color));
-                                }
-
-                                // Column 2: Video
-                                cols[1].label(RichText::new("Video").strong());
-                                for (flag, name) in [
-                                    (MemMode::MF_GRAPHICS, "GRAPHICS"),
-                                    (MemMode::MF_MIXED,    "MIXED"),
-                                    (MemMode::MF_PAGE2,    "PAGE2"),
-                                    (MemMode::MF_HIRES,    "HIRES"),
-                                    (MemMode::MF_VID80,    "VID80"),
-                                    (MemMode::MF_DHIRES,   "DHIRES"),
-                                    (MemMode::MF_ALTCHAR,  "ALTCHAR"),
-                                ] {
-                                    let on = mode.contains(flag);
-                                    let color = if on { Color32::GREEN } else { Color32::DARK_GRAY };
-                                    cols[1].monospace(RichText::new(
-                                        format!("{} {}", if on { "+" } else { "-" }, name)
-                                    ).color(color));
-                                }
-
-                                // Column 3: ROM
-                                cols[2].label(RichText::new("ROM/IO").strong());
-                                for (flag, name) in [
-                                    (MemMode::MF_INTCXROM,  "INTCXROM"),
-                                    (MemMode::MF_SLOTC3ROM, "SLOTC3ROM"),
-                                    (MemMode::MF_IOUDIS,    "IOUDIS"),
-                                    (MemMode::MF_ALTROM0,   "ALTROM0"),
-                                    (MemMode::MF_ALTROM1,   "ALTROM1"),
-                                ] {
-                                    let on = mode.contains(flag);
-                                    let color = if on { Color32::GREEN } else { Color32::DARK_GRAY };
-                                    cols[2].monospace(RichText::new(
-                                        format!("{} {}", if on { "+" } else { "-" }, name)
-                                    ).color(color));
+                        // ────────────────────────────────────────────────────
+                        // VERY BOTTOM: Console + Command line
+                        // ────────────────────────────────────────────────────
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(" Console").font(mono.clone()).color(DBG_LABEL));
+                        egui::ScrollArea::vertical()
+                            .max_height(48.0)
+                            .id_source("dbg_console")
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in self.debugger.console_output.iter().rev().take(5).collect::<Vec<_>>().into_iter().rev() {
+                                    ui.label(RichText::new(line).font(mono.clone()).color(DBG_CONSOLE));
                                 }
                             });
-                        });
-
-                        // ── Command console ─────────────────────────────────
-                        ui.collapsing("Console", |ui| {
-                            egui::ScrollArea::vertical()
-                                .max_height(100.0)
-                                .id_source("dbg_console")
-                                .stick_to_bottom(true)
-                                .show(ui, |ui| {
-                                    for line in &self.debugger.console_output {
-                                        ui.monospace(line);
-                                    }
-                                });
-                            ui.horizontal(|ui| {
-                                ui.label(">");
-                                let te = egui::TextEdit::singleline(&mut self.debugger_cmd_input)
-                                    .desired_width(ui.available_width() - 50.0)
-                                    .font(FontId::monospace(12.0));
-                                let resp = ui.add(te);
-                                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                                    do_submit_cmd = true;
-                                }
-                            });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(">").font(mono.clone()).color(DBG_REGS));
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.debugger_cmd_input)
+                                    .desired_width(ui.available_width() - 40.0)
+                                    .font(mono.clone())
+                                    .text_color(Color32::WHITE)
+                            );
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                do_exec_cmd = true;
+                                resp.request_focus();
+                            }
                         });
                     });
 
-                // Apply deferred actions after the closure releases borrows
-                if do_pause  { self.debugger.active = true; }
-                if do_resume { self.debugger.active = false; }
-                if do_step && paused { self.emu.step(); }
+                // ── Apply deferred actions ─────────────────────────────────
+                if do_pause {
+                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                }
+                if do_resume {
+                    self.debugger.deactivate();
+                }
+                if do_step && paused {
+                    // Record trace if enabled
+                    if self.debugger.trace.enabled {
+                        use apple2_debugger::trace::TraceEntry;
+                        let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
+                        self.debugger.trace.push(TraceEntry {
+                            pc: self.emu.cpu.pc,
+                            opcode: instr.opcode,
+                            a: self.emu.cpu.a,
+                            x: self.emu.cpu.x,
+                            y: self.emu.cpu.y,
+                            sp: self.emu.cpu.sp,
+                            flags: self.emu.cpu.flags.bits(),
+                            cycles: self.emu.cpu.cycles,
+                            text: format_instruction(&instr),
+                        });
+                    }
+                    self.emu.step();
+                    self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
+                }
                 if do_step_over && paused {
-                    let opcode = self.emu.bus.read_raw(pc);
+                    // If current instruction is JSR, set step-over target to PC+3
+                    let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
                     if opcode == 0x20 {
-                        // JSR — set temp target at instruction after JSR (3 bytes)
-                        self.debugger.step_over_target = Some(pc.wrapping_add(3));
-                        self.debugger.active = false;
+                        // JSR — step over it
+                        self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
+                        self.debugger.deactivate();
                     } else {
-                        // Not a call — just single step
+                        // Not a JSR — just single-step
                         self.emu.step();
+                        self.debugger.stop_reason = apple2_debugger::state::StopReason::StepOver;
                     }
                 }
                 if do_step_out && paused {
-                    // Read return address from stack (6502 RTS pops lo/hi then adds 1)
-                    let lo = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(1) as u16) as u16;
-                    let hi = self.emu.bus.read_raw(0x0100 | sp.wrapping_add(2) as u16) as u16;
-                    let ret_addr = ((hi << 8) | lo).wrapping_add(1);
-                    self.debugger.step_over_target = Some(ret_addr);
-                    self.debugger.active = false;
+                    // Run until RTS: set step-out target
+                    self.debugger.step_out_sp = Some(self.emu.cpu.sp);
+                    self.debugger.deactivate();
+                    // Step-out runs until we see RTS with SP >= saved SP
+                    // This is approximated by running with a breakpoint-like check
                 }
-                if do_run_to_cursor && paused {
-                    self.debugger.step_over_target = Some(self.debugger.cursor);
-                    self.debugger.active = false;
+                if do_goto_addr {
+                    if let Ok(addr) = u16::from_str_radix(
+                        self.debugger_mem_input.trim().trim_start_matches('$'), 16
+                    ) {
+                        self.debugger.goto_addr = Some(addr);
+                        self.debugger.cursor = addr;
+                    }
+                } else {
+                    self.debugger.goto_addr = None;
                 }
-                if do_add_bp
-                    && let Ok(addr) = u16::from_str_radix(self.debugger_bp_input.trim(), 16) {
-                    self.debugger.breakpoints.add(Breakpoint::at(addr));
-                    self.debugger_bp_input.clear();
+                if do_add_bp {
+                    if let Ok(addr) = u16::from_str_radix(
+                        self.debugger_bp_input.trim().trim_start_matches('$'), 16
+                    ) {
+                        self.debugger.breakpoints.add(Breakpoint::at(addr));
+                        self.debugger_bp_input.clear();
+                    }
                 }
                 if let Some(idx) = do_remove_bp { self.debugger.breakpoints.remove(idx); }
+                if let Some(idx) = do_toggle_bp { self.debugger.breakpoints.toggle(idx); }
                 if let Some(addr) = cursor_update { self.debugger.cursor = addr; }
 
-                // ── Process console command ──────────────────────────────────
-                if do_submit_cmd {
-                    let input = self.debugger_cmd_input.clone();
+                // Execute console command
+                if do_exec_cmd {
+                    let cmd_text = self.debugger_cmd_input.clone();
                     self.debugger_cmd_input.clear();
-                    if !input.trim().is_empty() {
-                        self.debugger.console_output.push(format!("> {input}"));
-                        self.debugger.command_history.push(input.clone());
-                        match commands::parse_command(&input, &self.debugger.symbols) {
-                            Ok(cmd) => self.execute_debug_command(cmd),
-                            Err(e) if !e.is_empty() => {
-                                self.debugger.console_output.push(format!("Error: {e}"));
-                            }
-                            _ => {}
+                    self.debugger.print(format!("> {cmd_text}"));
+
+                    let regs = CpuRegs {
+                        a: self.emu.cpu.a,
+                        x: self.emu.cpu.x,
+                        y: self.emu.cpu.y,
+                        sp: self.emu.cpu.sp,
+                        pc: self.emu.cpu.pc,
+                        flags: self.emu.cpu.flags.bits(),
+                        cycles: self.emu.cpu.cycles,
+                    };
+                    let result = commands::execute_command(
+                        &mut self.debugger,
+                        &cmd_text,
+                        self.emu.cpu.pc,
+                        regs,
+                        |a| self.emu.bus.read_raw(a),
+                    );
+                    match result {
+                        CmdResult::Output(lines) => {
+                            self.debugger.print_lines(&lines);
                         }
-                    }
-                    // Keep last command for repeat
-                    if !input.trim().is_empty() {
-                        self.debugger.last_command = input;
+                        CmdResult::Go => {
+                            self.debugger.deactivate();
+                        }
+                        CmdResult::Step => {
+                            self.emu.step();
+                            self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
+                        }
+                        CmdResult::StepOver => {
+                            let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
+                            if opcode == 0x20 {
+                                self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
+                                self.debugger.deactivate();
+                            } else {
+                                self.emu.step();
+                            }
+                        }
+                        CmdResult::StepOut => {
+                            self.debugger.step_out_sp = Some(self.emu.cpu.sp);
+                            self.debugger.deactivate();
+                        }
+                        CmdResult::Trace(n) => {
+                            self.debugger.trace.enabled = true;
+                            self.debugger.trace_remaining = n;
+                        }
+                        CmdResult::SetPC(addr) => {
+                            self.emu.cpu.pc = addr;
+                            self.debugger.deactivate();
+                        }
+                        CmdResult::MemWrite(addr, val) => {
+                            self.emu.bus.write_raw(addr, val);
+                            self.debugger.print(format!("  ${addr:04X} = {val:02X}"));
+                        }
+                        CmdResult::SetReg(reg, val) => {
+                            match reg {
+                                'A' => self.emu.cpu.a = val as u8,
+                                'X' => self.emu.cpu.x = val as u8,
+                                'Y' => self.emu.cpu.y = val as u8,
+                                'S' | 'P' if val > 0xFF => self.emu.cpu.pc = val,
+                                'S' => self.emu.cpu.sp = val as u8,
+                                'P' => self.emu.cpu.pc = val,
+                                _ => {}
+                            }
+                        }
+                        CmdResult::Nop => {}
+                        CmdResult::Error(msg) => {
+                            self.debugger.print(format!("Error: {msg}"));
+                        }
+                        CmdResult::ToggleBreak => {
+                            if self.debugger.active {
+                                self.debugger.deactivate();
+                            } else {
+                                self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                            }
+                        }
                     }
                 }
             }
@@ -2924,79 +2508,6 @@ mod gui {
                     self.config.save();
                 }
             }
-            // ── New disk creation ──────────────────────────────────────────────
-            if let Some((is_blank, is_dos33, size)) = act_new_disk {
-                use apple2_core::prodos::{
-                    create_prodos_disk, create_dos33_disk, create_blank_disk, ProDosCreateOptions,
-                };
-                let ext = if is_dos33 { "dsk" } else if size > 1_000_000 { "hdv" } else { "po" };
-                let kind = if is_blank { "blank" } else if is_dos33 { "dos33" } else { "prodos" };
-                let size_kb = size / 1024;
-                let suggested = format!("{kind}_{size_kb}k.{ext}");
-                let start_dir = self.config.last_disk_dir.as_deref();
-                if let Some(path) = save_disk_dialog("Save New Disk Image As", &suggested, start_dir) {
-                    let result = if is_blank {
-                        create_blank_disk(&path, size)
-                    } else if is_dos33 {
-                        create_dos33_disk(&path, size)
-                    } else {
-                        let opts = ProDosCreateOptions {
-                            volume_name:        "BLANK".to_string(),
-                            copy_prodos:        self.config.new_disk_copy_prodos,
-                            copy_basic:         self.config.new_disk_copy_basic,
-                            copy_bitsy_boot:    self.config.new_disk_copy_bitsy_boot,
-                            copy_bitsy_bye:     self.config.new_disk_copy_bitsy_bye,
-                        };
-                        create_prodos_disk(&path, size, &opts)
-                    };
-                    match result {
-                        Ok(()) => {
-                            if let Ok(data) = std::fs::read(&path) {
-                                let ext_str = path.extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("")
-                                    .to_lowercase();
-                                self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext_str);
-                                let path_str = path.to_string_lossy().into_owned();
-                                self.config.add_recent_disk(&path_str);
-                                self.config.last_disk1 = Some(path_str);
-                                self.config.last_disk_dir = path.parent()
-                                    .map(|p| p.to_string_lossy().into_owned());
-                                self.disk1 = Some(path);
-                                self.config.save();
-                            }
-                        }
-                        Err(e) => eprintln!("Failed to create disk image: {e}"),
-                    }
-                }
-            }
-            // ── Format existing disk ───────────────────────────────────────────
-            if let Some((is_dos33, path)) = act_format_disk {
-                use apple2_core::prodos::{format_prodos_disk, format_dos33_disk};
-                let result = if is_dos33 {
-                    format_dos33_disk(&path)
-                } else {
-                    format_prodos_disk(&path)
-                };
-                match result {
-                    Ok(()) => {
-                        // Reload if this file is currently in a drive
-                        if self.disk1.as_deref() == Some(path.as_path()) {
-                            if let Ok(data) = std::fs::read(&path) {
-                                let ext_str = path.extension()
-                                    .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                                self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext_str);
-                            }
-                        } else if self.disk2.as_deref() == Some(path.as_path())
-                            && let Ok(data) = std::fs::read(&path) {
-                                let ext_str = path.extension()
-                                    .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                                self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext_str);
-                            }
-                    }
-                    Err(e) => eprintln!("Failed to format disk: {e}"),
-                }
-            }
             // Load disk from recent list into drive 1
             if let Some(path_str) = act_recent_disk {
                 let path = PathBuf::from(&path_str);
@@ -3075,31 +2586,6 @@ mod gui {
                 self.config.last_hdd2 = None;
                 self.config.save();
             }
-            // ── Cassette actions ──────────────────────────────────────────────
-            if act_load_cassette
-                && let Some(path) = open_cassette_dialog()
-                && let Ok(raw) = std::fs::read(&path) {
-                let ext = path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                // For .wav files, extract raw PCM; otherwise treat as raw 8-bit unsigned PCM.
-                let pcm = if ext == "wav" {
-                    decode_wav_to_u8pcm(&raw).unwrap_or(raw)
-                } else {
-                    raw
-                };
-                let len = pcm.len();
-                self.emu.bus.load_cassette(pcm, self.emu.cpu.cycles);
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("cassette");
-                self.set_status_msg(format!("Cassette loaded: {name} ({len} bytes)"));
-            }
-            if act_eject_cassette {
-                self.emu.bus.eject_cassette();
-                self.set_status_msg("Cassette ejected");
-            }
             if let Some(path_str) = act_recent_hdd {
                 let path = PathBuf::from(&path_str);
                 if let Ok(data) = std::fs::read(&path) {
@@ -3126,12 +2612,7 @@ mod gui {
             // Screenshot from menu or F12 key
             if act_screenshot && !in_logo_mode {
                 self.render_apple2();
-                if let Some(path) = save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H) {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("screenshot");
-                    self.set_status_msg(format!("Screenshot saved: {name}"));
-                }
+                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
             }
 
             // F11 fullscreen shortcut (supplement to the action already handled above)
@@ -3388,10 +2869,9 @@ mod gui {
     // ── Screenshot ────────────────────────────────────────────────────────────
 
     /// Save `pixels` (RGBA8888, row-major) as a 24bpp BMP file.
-    /// Returns the path on success.
-    fn save_screenshot(pixels: &[u8], w: usize, h: usize) -> Option<PathBuf> {
+    fn save_screenshot(pixels: &[u8], w: usize, h: usize) {
         let path = screenshot_path();
-        let path = path?;
+        let Some(path) = path else { return };
         let row_stride = (w * 3).div_ceil(4) * 4;
         let pixel_bytes = row_stride * h;
         let file_size = (14 + 40 + pixel_bytes) as u32;
@@ -3434,12 +2914,8 @@ mod gui {
             while !written.is_multiple_of(4) { data.push(0); written += 1; }
         }
 
-        if std::fs::write(&path, &data).is_ok() {
-            eprintln!("Screenshot saved: {}", path.display());
-            Some(path)
-        } else {
-            None
-        }
+        let _ = std::fs::write(&path, &data);
+        eprintln!("Screenshot saved: {}", path.display());
     }
 
     /// Returns a timestamped path in %APPDATA%\applewin-rs\screenshots\ (Windows)
@@ -3489,94 +2965,6 @@ mod gui {
             d = d.set_directory(dir);
         }
         d.pick_file()
-    }
-
-    fn save_disk_dialog(title: &str, default_name: &str, start_dir: Option<&str>) -> Option<PathBuf> {
-        let mut d = rfd::FileDialog::new()
-            .set_title(title)
-            .set_file_name(default_name)
-            .add_filter("Apple II Disk Images", &["po", "dsk", "hdv", "do"])
-            .add_filter("All Files", &["*"]);
-        if let Some(dir) = start_dir {
-            d = d.set_directory(dir);
-        }
-        d.save_file()
-    }
-
-    fn open_cassette_dialog() -> Option<PathBuf> {
-        rfd::FileDialog::new()
-            .set_title("Load Cassette Tape")
-            .add_filter("Cassette Audio", &["wav", "raw", "bin"])
-            .add_filter("All Files", &["*"])
-            .pick_file()
-    }
-
-    /// Minimal WAV decoder: extracts audio data as unsigned 8-bit PCM.
-    ///
-    /// Supports only uncompressed PCM WAV files (format tag 1).
-    /// Converts 16-bit signed PCM to 8-bit unsigned on the fly.
-    /// Returns `None` if the file is not a valid WAV.
-    fn decode_wav_to_u8pcm(data: &[u8]) -> Option<Vec<u8>> {
-        // Minimum WAV header: RIFF(4) + size(4) + WAVE(4) + fmt chunk(24) + data chunk header(8)
-        if data.len() < 44 { return None; }
-        if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
-
-        // Find "fmt " chunk
-        let mut pos = 12usize;
-        let mut fmt_found = false;
-        let mut bits_per_sample: u16 = 8;
-        let mut num_channels: u16 = 1;
-        while pos + 8 <= data.len() {
-            let id = &data[pos..pos + 4];
-            let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
-            if id == b"fmt " {
-                if chunk_size < 16 || pos + 8 + chunk_size > data.len() { return None; }
-                let fmt_data = &data[pos + 8..];
-                let format_tag = u16::from_le_bytes(fmt_data[0..2].try_into().ok()?);
-                if format_tag != 1 { return None; } // only PCM
-                num_channels = u16::from_le_bytes(fmt_data[2..4].try_into().ok()?);
-                bits_per_sample = u16::from_le_bytes(fmt_data[14..16].try_into().ok()?);
-                fmt_found = true;
-            }
-            if id == b"data" && fmt_found {
-                let audio = &data[pos + 8..data.len().min(pos + 8 + chunk_size)];
-                return Some(wav_pcm_to_u8(audio, bits_per_sample, num_channels));
-            }
-            pos += 8 + chunk_size;
-            // Chunks are word-aligned
-            if !chunk_size.is_multiple_of(2) { pos += 1; }
-        }
-        None
-    }
-
-    /// Convert raw PCM audio data to unsigned 8-bit mono.
-    fn wav_pcm_to_u8(audio: &[u8], bits: u16, channels: u16) -> Vec<u8> {
-        match bits {
-            8 => {
-                // Already unsigned 8-bit; just take first channel if stereo
-                if channels <= 1 {
-                    audio.to_vec()
-                } else {
-                    audio.chunks(channels as usize)
-                        .map(|ch| ch[0])
-                        .collect()
-                }
-            }
-            16 => {
-                let step = 2 * channels as usize;
-                audio.chunks(step)
-                    .map(|frame| {
-                        // First channel, signed 16-bit LE → unsigned 8-bit
-                        let s = i16::from_le_bytes([frame[0], frame[1]]);
-                        ((s as i32 + 32768) >> 8) as u8
-                    })
-                    .collect()
-            }
-            _ => {
-                // Unsupported bit depth — return silence
-                vec![128; audio.len() / (bits as usize / 8) / channels as usize]
-            }
-        }
     }
 
     // ── 3D sunken bevel (Windows 9x "SunkenBox" look) ─────────────────────────
@@ -3677,9 +3065,6 @@ mod gui {
             (Some(egui::vec2(win_w, win_h)), pos)
         };
 
-        let icon_data = decode_ico_rgba(ICO_APP)
-            .map(|(w, h, rgba)| eframe::IconData { rgba, width: w, height: h });
-
         let options = eframe::NativeOptions {
             initial_window_size: initial_size,
             initial_window_pos:  initial_pos,
@@ -3695,7 +3080,6 @@ mod gui {
             // which fights our own initial_window_size and prevents the window
             // from starting in the correct maximized state.
             persist_window: false,
-            icon_data,
             ..Default::default()
         };
         eframe::run_native(
