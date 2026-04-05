@@ -830,6 +830,17 @@ mod gui {
                         match key {
                             // ── Global shortcuts (always active) ─────────
                             Key::F1                => do_hard_reset = true,
+                            // F7 — toggle debugger (original AppleWin key)
+                            Key::F7 if !ctrl && !shift => {
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
+                            }
+                            // F10 — also toggles debugger (compat)
                             Key::F10 if self.config.scrolllock_toggle => {
                                 if self.show_debugger && self.debugger.active {
                                     self.show_debugger = false;
@@ -1324,24 +1335,122 @@ mod gui {
                 let mut do_step_out  = false;
                 let mut do_resume    = false;
                 let mut do_exec_cmd  = false;
+                let cmd_empty = self.debugger_cmd_input.is_empty();
 
-                // Keyboard shortcuts (when no text field has focus)
+                // ── AppleWin-compatible keyboard shortcuts ────────────────
+                // These are checked before the text field so they always work.
+                // When the command input is empty, Space/arrows act as debugger
+                // commands; when typing a command, they go to the text field.
                 ctx.input(|i| {
                     for event in &i.events {
                         if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
+                            let ctrl  = modifiers.ctrl || modifiers.command;
+                            let shift = modifiers.shift;
                             match key {
-                                Key::F5  => do_resume = true,     // Go
-                                Key::F10 => do_step_over = true,  // Step Over
-                                Key::F11 => do_step = true,       // Step Into
-                                Key::F7 if modifiers.shift => do_step_out = true,
+                                // F7 — toggle debugger (handled in main key loop)
+                                // Space — step into (AppleWin: trace)
+                                Key::Space if cmd_empty && !ctrl && !shift => do_step = true,
+                                // Ctrl+Space — step over
+                                Key::Space if cmd_empty && ctrl && !shift  => do_step_over = true,
+                                // Shift+Space — step out
+                                Key::Space if cmd_empty && shift && !ctrl  => do_step_out = true,
+                                // F5 — Go/resume
+                                Key::F5 => do_resume = true,
+                                // Up/Down — scroll disassembly cursor
+                                Key::ArrowUp if cmd_empty && !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(1)
+                                    );
+                                }
+                                Key::ArrowDown if cmd_empty && !ctrl && !shift => {
+                                    let start = self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc);
+                                    let instr = apple2_debugger::disasm::disassemble_one(
+                                        start, |a| self.emu.bus.read_raw(a)
+                                    );
+                                    self.debugger.goto_addr = Some(
+                                        start.wrapping_add(instr.bytes as u16)
+                                    );
+                                }
+                                // Shift+Up/Down — scroll by 1 byte
+                                Key::ArrowUp if cmd_empty && shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(1)
+                                    );
+                                }
+                                Key::ArrowDown if cmd_empty && shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_add(1)
+                                    );
+                                }
+                                // Page Up/Down — scroll disassembly by a page
+                                Key::PageUp if !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(0x20)
+                                    );
+                                }
+                                Key::PageDown if !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_add(0x20)
+                                    );
+                                }
+                                // Shift+Page Up/Down — 256-byte boundary
+                                Key::PageUp if shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(0x100)
+                                    );
+                                }
+                                Key::PageDown if shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_add(0x100)
+                                    );
+                                }
+                                // Ctrl+Page Up/Down — 4K boundary
+                                Key::PageUp if ctrl => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(0x1000)
+                                    );
+                                }
+                                Key::PageDown if ctrl => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger.goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_add(0x1000)
+                                    );
+                                }
+                                // Home — jump to PC
+                                Key::Home => {
+                                    self.debugger.goto_addr = None; // resets to PC
+                                }
+                                // Ctrl+Right — set PC to cursor
+                                Key::ArrowRight if ctrl && cmd_empty => {
+                                    if let Some(addr) = self.debugger.goto_addr {
+                                        self.emu.cpu.pc = addr;
+                                        self.debugger.print(format!("PC set to ${addr:04X}"));
+                                    }
+                                }
                                 _ => {}
                             }
                         }
                     }
                 });
 
-                // Command input bar at the bottom of the screen area.
-                // Uses a stable egui Id so we can force focus onto it.
+                // ── Command input bar ────────────────────────────────────
                 let cmd_id = egui::Id::new("dbg_cmd_input");
                 egui::TopBottomPanel::bottom("dbg_cmd")
                     .frame(
@@ -1351,12 +1460,9 @@ mod gui {
                     )
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            if paused {
-                                if ui.button("G").clicked() { do_resume = true; }
-                                if ui.button("S").clicked() { do_step = true; }
-                                if ui.button("SO").clicked() { do_step_over = true; }
-                                if ui.button("OUT").clicked() { do_step_out = true; }
-                            }
+                            // Compact help reminder
+                            ui.label(RichText::new("Spc:Step C-Spc:Over S-Spc:Out F5:Go")
+                                .monospace().small().color(Color32::from_rgb(100, 100, 100)));
                             ui.label(RichText::new(">").monospace().color(Color32::from_rgb(255, 128, 0)));
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut self.debugger_cmd_input)
@@ -1365,7 +1471,7 @@ mod gui {
                                     .font(FontId::monospace(12.0))
                                     .text_color(Color32::WHITE)
                             );
-                            // Auto-focus the command input whenever the debugger is active
+                            // Auto-focus
                             if !resp.has_focus() {
                                 resp.request_focus();
                             }
@@ -1375,7 +1481,6 @@ mod gui {
                             }
                         });
                     });
-                // Re-grab focus after command execution so typing continues
                 if do_exec_cmd {
                     ctx.memory_mut(|m| m.request_focus(cmd_id));
                 }
