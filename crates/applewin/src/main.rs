@@ -829,7 +829,13 @@ mod gui {
                         match key {
                             Key::F1                => do_hard_reset = true,
                             Key::F10 if self.config.scrolllock_toggle => {
-                                self.debugger.active = !self.debugger.active;
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
                             }
                             Key::F12               => take_screenshot = true,
                             Key::Escape if ctrl    => do_quit = true,
@@ -1253,7 +1259,15 @@ mod gui {
                         if icon_btn(ui, icons.and_then(|ic| ic.full.as_ref()),  "⛶",  "Fullscreen (F11)",    sz, isz).clicked() { act_fullscreen = true; }
                         ui.add_space(2.0);
                         if icon_btn(ui, icons.and_then(|ic| ic.debug.as_ref()), "⚙", "Debugger", sz, isz).clicked() {
-                            self.show_debugger = !self.show_debugger;
+                            if self.show_debugger && self.debugger.active {
+                                // Debugger is open and paused — close it and resume
+                                self.show_debugger = false;
+                                self.debugger.deactivate();
+                            } else {
+                                // Open the debugger and pause execution
+                                self.show_debugger = true;
+                                self.debugger.activate(apple2_debugger::state::StopReason::UserBreak);
+                            }
                         }
                         ui.add_space(2.0);
                         if icon_btn(ui, icons.and_then(|ic| ic.setup.as_ref()), "⚙",  "Settings",            sz, isz).clicked() { act_show_settings = true; }
@@ -1349,6 +1363,7 @@ mod gui {
                 // ── Apply deferred actions ─────────────────────────────────
                 if do_resume {
                     self.debugger.deactivate();
+                    self.show_debugger = false;
                 }
                 if do_step && paused {
                     if self.debugger.trace.enabled {
@@ -1412,6 +1427,7 @@ mod gui {
                         }
                         CmdResult::Go => {
                             self.debugger.deactivate();
+                            self.show_debugger = false;
                         }
                         CmdResult::Step => {
                             self.emu.step();
