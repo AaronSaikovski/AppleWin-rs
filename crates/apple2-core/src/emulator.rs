@@ -59,6 +59,22 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
         while self.cpu.cycles < target {
+            // 65C02 WAI: CPU is halted until an interrupt arrives.
+            // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
+            if self.cpu.waiting {
+                if self.bus.irq_line || (self.cpu.irq_pending & 0x02) != 0 {
+                    // Interrupt arrived — wake up and resume normal execution.
+                    self.cpu.waiting = false;
+                } else {
+                    // Still waiting — consume one cycle and continue polling.
+                    self.cpu.cycles += 1;
+                    if self.cpu.cycles >= next_update {
+                        self.bus.cards.update_all(self.cpu.cycles);
+                        next_update += 17_030;
+                    }
+                    continue;
+                }
+            }
             // Snapshot the IRQ line *before* executing the instruction so we can
             // detect an edge (IRQ asserted during this opcode's last cycle).
             let irq_before = self.bus.irq_line;

@@ -1271,6 +1271,8 @@ mod gui {
                 } else {
                     self.render_apple2();
                 }
+
+
                 let tex_opts = TextureOptions {
                     magnification: egui::TextureFilter::Nearest,
                     minification:  egui::TextureFilter::Nearest,

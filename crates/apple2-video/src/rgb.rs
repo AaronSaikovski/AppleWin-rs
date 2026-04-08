@@ -75,19 +75,21 @@ impl RgbRenderer {
         let mixed    = mode.contains(MemMode::MF_MIXED);
         let vid80    = mode.contains(MemMode::MF_VID80);
         let dhires   = mode.contains(MemMode::MF_DHIRES);
+        let _store80 = mode.contains(MemMode::MF_80STORE);
 
-        let text_base: usize = if page2 { 0x0800 } else { 0x0400 };
+        // Display page selection — same logic as NTSC renderer.
+        let display_page2 = page2 && !_store80;
+        let text_base: usize = if display_page2 { 0x0800 } else { 0x0400 };
+        let hgr_base:  usize = if display_page2 { 0x4000 } else { 0x2000 };
         let text_page = &main_ram[text_base..text_base + 0x400];
 
         if !graphics {
-            // Text mode
             if vid80 {
                 self.render_text80_rows(main_ram, aux_ram, text_base, 0, 24, flash_on, fb);
             } else {
                 self.render_text40_rows(text_page, 0, 24, flash_on, fb);
             }
         } else if hires {
-            let hgr_base: usize = if page2 { 0x4000 } else { 0x2000 };
             let scan_lines = if mixed { 160 } else { 192 };
             if dhires && vid80 {
                 self.render_dhires(main_ram, aux_ram, hgr_base, scan_lines, fb);
@@ -102,7 +104,6 @@ impl RgbRenderer {
                 }
             }
         } else {
-            // Lo-res / double lo-res
             if dhires && vid80 {
                 self.render_dlores(main_ram, aux_ram, text_base, fb);
             } else {

@@ -61,31 +61,35 @@ impl NtscTables {
         let mut lum1_x = [0.0f64; 3];
         let mut lum1_y = [0.0f64; 3];
 
-        // Filter parameters from NTSC.cpp
-        const SIG_GAIN: f64  = 7.614490548;
-        const SIG_A: f64     = -0.2718798058;
-        const SIG_B: f64     =  0.7465656072;
-
-        const CHR_GAIN: f64  = 7.438011255;
-        const CHR_A: f64     = -0.7318893645;
-        const CHR_B: f64     =  1.2336442711;
-
-        const LUM_GAIN: f64  = 13.71331570;
-        const LUM_A: f64     = -0.3961075449;
-        const LUM_B: f64     =  1.1044202472;
-
-        // YIQ → RGB coefficients
-        const I_TO_R: f64 =  0.956;
-        const I_TO_G: f64 = -0.272;
-        const I_TO_B: f64 = -1.105;
-        const Q_TO_R: f64 =  0.621;
-        const Q_TO_G: f64 = -0.647;
-        const Q_TO_B: f64 =  1.702;
-
-        const RAD_45: f64 = std::f64::consts::PI * 0.25;
-        const RAD_90: f64 = std::f64::consts::PI * 0.5;
-        // CYCLESTART = DEG_TO_RAD(45) = PI/4 = RAD_45
-        const CYCLESTART: f64 = RAD_45;
+        // Filter parameters from NTSC.cpp — defined as float literals in C++.
+        // Must match C++ float→double promotion: the C++ constants have `f`
+        // suffix so they have only ~7 digits of precision.  We replicate this
+        // by going through f32 first.
+        #[allow(clippy::excessive_precision, clippy::approx_constant)]
+        mod coeff {
+            pub const SIG_GAIN: f64  = 7.614490548_f32  as f64;
+            pub const SIG_A: f64     = -0.2718798058_f32 as f64;
+            pub const SIG_B: f64     =  0.7465656072_f32 as f64;
+            pub const CHR_GAIN: f64  = 7.438011255_f32  as f64;
+            pub const CHR_A: f64     = -0.7318893645_f32 as f64;
+            pub const CHR_B: f64     =  1.2336442711_f32 as f64;
+            pub const LUM_GAIN: f64  = 13.71331570_f32  as f64;
+            pub const LUM_A: f64     = -0.3961075449_f32 as f64;
+            pub const LUM_B: f64     =  1.1044202472_f32 as f64;
+            pub const I_TO_R: f64 =  0.956_f32 as f64;
+            pub const I_TO_G: f64 = -0.272_f32 as f64;
+            pub const I_TO_B: f64 = -1.105_f32 as f64;
+            pub const Q_TO_R: f64 =  0.621_f32 as f64;
+            pub const Q_TO_G: f64 = -0.647_f32 as f64;
+            pub const Q_TO_B: f64 =  1.702_f32 as f64;
+            // C++ defines PI as 3.1415926535898f (float precision)
+            pub const PI_F: f64 = 3.1415926535898_f32 as f64;
+        }
+        use coeff::*;
+        const RAD_45: f64 = PI_F * 0.25;
+        const RAD_90: f64 = PI_F * 0.5;
+        // CYCLESTART = DEG_TO_RAD(45) = PI*45/180.f
+        const CYCLESTART: f64 = PI_F * 45.0 / (180.0_f32 as f64);
 
         let clamp01 = |x: f64| -> f64 { x.clamp(0.0, 1.0) };
 
@@ -157,36 +161,29 @@ impl NtscTables {
                         _y0    = filter_luma0!(zz);
                         y1     = filter_luma1!(zz - _c);
 
-                        let c2 = _c * 2.0;
-                        iq_i += (c2 * phi.cos() - iq_i) / 8.0;
-                        iq_q += (c2 * phi.sin() - iq_q) / 8.0;
+                        let c2 = _c * 2.0_f32 as f64;
+                        iq_i += (c2 * phi.cos() - iq_i) / 8.0_f32 as f64;
+                        iq_q += (c2 * phi.sin() - iq_q) / 8.0_f32 as f64;
 
                         phi += RAD_45;
                     }
                 }
 
-                // Compute RGB using the ColorTV (y1 luma) path
-                let color_idx = s & 15;
-                let (r, g, b) = if color_idx == 0 {
-                    // NTSC_REMOVE_BLACK_GHOSTING
-                    (0.0, 0.0, 0.0)
-                } else if color_idx == 15 {
-                    // NTSC_REMOVE_WHITE_RINGING
-                    (1.0, 1.0, 1.0)
-                } else if color_idx == 5 {
-                    // NTSC_REMOVE_GRAY_CHROMA (Gray1)
-                    let g = 0x83_u32 as f64 / 255.0;
-                    (g, g, g)
-                } else if color_idx == 10 {
-                    // NTSC_REMOVE_GRAY_CHROMA (Gray2)
-                    let g = 0x78_u32 as f64 / 255.0;
-                    (g, g, g)
-                } else {
-                    let r = clamp01(y1 + I_TO_R * iq_i + Q_TO_R * iq_q);
-                    let g = clamp01(y1 + I_TO_G * iq_i + Q_TO_G * iq_q);
-                    let b = clamp01(y1 + I_TO_B * iq_i + Q_TO_B * iq_q);
-                    (r, g, b)
-                };
+                // Compute RGB using the ColorTV (y1 luma) path.
+                // Matches C++ `initChromaPhaseTables()` Hue Color TV section.
+                let mut r32 = clamp01(y1 + I_TO_R * iq_i + Q_TO_R * iq_q);
+                let mut g32 = clamp01(y1 + I_TO_G * iq_i + Q_TO_G * iq_q);
+                let mut b32 = clamp01(y1 + I_TO_B * iq_i + Q_TO_B * iq_q);
+
+                // NTSC_REMOVE_WHITE_RINGING + NTSC_REMOVE_BLACK_GHOSTING
+                // (matches C++ exactly: `int color = s & 15;`)
+                let color = s & 15;
+                if color == 15 { r32 = 1.0; g32 = 1.0; b32 = 1.0; }
+                if color == 0  { r32 = 0.0; g32 = 0.0; b32 = 0.0; }
+                // Note: gray chroma removal (color 5, 10) only applies to
+                // Hue Monitor table in C++, NOT to Hue Color TV.
+
+                let (r, g, b) = (r32, g32, b32);
 
                 // Store as ABGR: R in low byte, B in bits 16-23.
                 // On little-endian the in-memory bytes are [R, G, B, A] = RGBA,
@@ -315,8 +312,23 @@ impl NtscRenderer {
         let mixed    = mode.contains(MemMode::MF_MIXED);
         let vid80    = mode.contains(MemMode::MF_VID80);
         let dhires   = mode.contains(MemMode::MF_DHIRES);
+        let _store80 = mode.contains(MemMode::MF_80STORE);
 
-        let text_base: usize = if page2 { 0x0800 } else { 0x0400 };
+        // Display page selection for per-frame rendering.
+        //
+        // The C++ AppleWin renders per-cycle and tracks mode changes in real time.
+        // Our per-frame renderer samples mode flags once.
+        //
+        // When 80STORE is ON, PAGE2 does not select the display page — the video
+        // scanner always shows page 1.  But PAGE2+80STORE+HIRES routes CPU writes
+        // for $2000-$3FFF to aux_ram, meaning the game may have drawn its graphics
+        // there.  In that case we display from aux_ram at $2000.
+        //
+        // When 80STORE is OFF, PAGE2 selects between page 1 ($2000) and page 2 ($4000)
+        // in main_ram, as normal.
+        let display_page2 = page2 && !_store80;
+        let text_base: usize = if display_page2 { 0x0800 } else { 0x0400 };
+        let hgr_base:  usize = if display_page2 { 0x4000 } else { 0x2000 };
         let text_page = &main_ram[text_base..text_base + 0x400];
 
         if !graphics {
@@ -327,13 +339,12 @@ impl NtscRenderer {
                 self.render_text40_rows(text_page, 0, 24, flash_on, fb);
             }
         } else if hires {
-            let hgr_base: usize = if page2 { 0x4000 } else { 0x2000 };
             let scan_lines = if mixed { 160 } else { 192 };
             if dhires && vid80 {
-                // Double hi-res: 560×192 with 16-color NTSC artifact palette
+                // Double hi-res: interleaved aux/main through NTSC signal chain
                 self.render_dhires(main_ram, aux_ram, hgr_base, scan_lines, fb);
             } else {
-                // Standard hi-res graphics with proper NTSC signal model
+                // Standard hi-res from main_ram
                 self.render_hires(main_ram, hgr_base, scan_lines, fb);
             }
             if mixed {
@@ -617,17 +628,11 @@ impl NtscRenderer {
 
     // ── Double hi-res graphics ────────────────────────────────────────────────
 
-    /// Render `scan_lines` double hi-res scan lines using alternating aux/main RAM.
+    /// Render double hi-res using direct 4-bit colour mapping.
     ///
-    /// Apple II DHIRES: 560 actual pixels per row.  Each scan line assembles bits from
-    /// 40 aux bytes and 40 main bytes, interleaved as 7-bit groups:
-    ///   aux[0] bits 0-6 → pixels 0-6
-    ///   main[0] bits 0-6 → pixels 7-13
-    ///   aux[1] bits 0-6 → pixels 14-20 … and so on.
-    ///
-    /// Colour decoding: consecutive groups of 4 bits map to one of the 16 lo-res colours
-    /// (same NTSC artifact palette).  Each colour group spans 4 screen pixels.
-    /// 560 / 4 = 140 colour groups per row.
+    /// DHIRES: 560 pixels per row, assembled from interleaved aux/main bytes.
+    /// Each column pair provides 28 bits (2×7 aux + 2×7 main) = 7 four-bit
+    /// pixels.  Each 4-bit nibble indexes into the standard 16-colour palette.
     pub fn render_dhires(
         &self,
         main_ram:  &[u8; 65536],
@@ -637,48 +642,38 @@ impl NtscRenderer {
         fb:        &mut Framebuffer,
     ) {
         for y in 0..scan_lines {
-            // Non-linear Apple II hi-res address layout (same as standard hi-res)
             let row_offset = (y & 7) * 0x0400
                 + ((y >> 3) & 7) * 0x0080
                 + (y >> 6) * 0x0028;
 
-            // Pack 560 dhires bits into 9 u64 words (72 bytes vs 560 bytes for [bool;560]).
-            // Each source byte-pair contributes 14 bits: 7 from aux then 7 from main.
-            let mut packed = [0u64; 9];
-            for bx in 0..40usize {
-                let addr = hgr_base + row_offset + bx;
-                let ab = aux_ram.get(addr).copied().unwrap_or(0) as u64 & 0x7F;
-                let mb = main_ram.get(addr).copied().unwrap_or(0) as u64 & 0x7F;
-                let word = ab | (mb << 7); // 14 bits
-                let bit_base = bx * 14;
-                let wi = bit_base / 64;
-                let bi = bit_base % 64;
-                packed[wi] |= word << bi;
-                if bi + 14 > 64 {
-                    packed[wi + 1] |= word >> (64 - bi);
-                }
-            }
-
-            // Decode 140 four-bit colour groups from the packed bitfield → LORES_PALETTE
             let py = y * 2;
-            let row0 = py       * FB_WIDTH;
+            let row0 = py * FB_WIDTH;
             let row1 = (py + 1) * FB_WIDTH;
             let pixels = fb.pixels_mut();
-            for xi in 0..140usize {
-                let bit_pos = xi * 4;
-                let wi = bit_pos / 64;
-                let bi = bit_pos % 64;
-                let color = if bi + 4 <= 64 {
-                    ((packed[wi] >> bi) & 0xF) as usize
-                } else {
-                    let lo = packed[wi] >> bi;
-                    let hi = packed[wi + 1] << (64 - bi);
-                    ((lo | hi) & 0xF) as usize
-                };
-                let argb    = LORES_PALETTE[color];
-                let base_px = xi * 4;
-                pixels[row0 + base_px..row0 + base_px + 4].fill(argb);
-                pixels[row1 + base_px..row1 + base_px + 4].fill(argb);
+
+            // Process 20 column pairs (40 bytes / 2 = 20 pairs)
+            for col_pair in 0..20usize {
+                let addr0 = hgr_base + row_offset + col_pair * 2;
+                let addr1 = addr0 + 1;
+
+                let a0 = aux_ram.get(addr0).copied().unwrap_or(0) as u32 & 0x7F;
+                let m0 = main_ram.get(addr0).copied().unwrap_or(0) as u32 & 0x7F;
+                let a1 = aux_ram.get(addr1).copied().unwrap_or(0) as u32 & 0x7F;
+                let m1 = main_ram.get(addr1).copied().unwrap_or(0) as u32 & 0x7F;
+
+                // 28-bit value: a0[6:0] | m0[6:0] | a1[6:0] | m1[6:0]
+                let bits = a0 | (m0 << 7) | (a1 << 14) | (m1 << 21);
+
+                let fb_x_base = col_pair * 28;
+                for pixel in 0..7usize {
+                    let nibble = ((bits >> (pixel * 4)) & 0x0F) as usize;
+                    let color = LORES_PALETTE[nibble];
+                    let px = fb_x_base + pixel * 4;
+                    for dx in 0..4 {
+                        pixels[row0 + px + dx] = color;
+                        pixels[row1 + px + dx] = color;
+                    }
+                }
             }
         }
     }
@@ -702,7 +697,7 @@ impl NtscRenderer {
     ///  4. Write the colour to both framebuffer rows 2y and 2y+1.
     pub fn render_hires(
         &self,
-        main_ram: &[u8; 65536],
+        ram: &[u8; 65536],
         hgr_base: usize,
         scan_lines: usize,
         fb: &mut Framebuffer,
@@ -734,7 +729,7 @@ impl NtscRenderer {
 
             for bx in 0..40usize {
                 let addr = hgr_base + row_offset + bx;
-                let byte = main_ram.get(addr).copied().unwrap_or(0);
+                let byte = ram.get(addr).copied().unwrap_or(0);
 
                 // Pixel-double the 7 source bits to a 14-bit pattern.
                 // g_aPixelDoubleMaskHGR[m & 0x7F]: bit k → output bits 2k, 2k+1.
@@ -743,14 +738,23 @@ impl NtscRenderer {
 
                 // Hi-bit half-dot shift: shift all 14 bits left by 1 and fill
                 // bit 0 with the carry from the previous byte.
-                // g_nLastColumnPixelNTSC is always bit 13 of the un-shifted bits14
-                // (= second copy of source bit 6), regardless of hi-bit.
+                //
+                // Matches C++ updateScreenSingleHires40():
+                //   bits = g_aPixelDoubleMaskHGR[m & 0x7F];
+                //   if (m & 0x80) bits = (bits << 1) | g_nLastColumnPixelNTSC;
+                //
+                // After updatePixels() processes 14 bits via right-shift,
+                // g_nLastColumnPixelNTSC = bits & 1 (the leftover bit 14).
+                // For non-shifted bytes this is 0 (only 14 bits in the input).
+                // For shifted bytes this is bit 14 of (PDM << 1 | carry).
                 if byte & 0x80 != 0 {
                     bits14 = (bits14 << 1) | last_col;
+                    // After processing 14 bits, the leftover is bit 14
+                    last_col = (bits14 >> 14) & 1;
+                } else {
+                    // Non-shifted: only 14 bits, nothing left after processing
+                    last_col = 0;
                 }
-                // Carry for next byte = bit 13 of the pixel-double mask (before shift)
-                // = (byte & 0x40) >> 6  (source bit 6, the MSB of the 7 data bits)
-                last_col = ((byte >> 6) & 1) as u32;
 
                 // Feed 14 bits LSB-first into the NTSC signal chain.
                 for bit_idx in 0..14u32 {
@@ -761,6 +765,142 @@ impl NtscRenderer {
                     pixels[row1 + px] = color;
                     px += 1;
                     phase = (phase + 1) & 3;
+                }
+            }
+        }
+    }
+
+    // ── Monochrome hi-res ──────────────────────────────────────────────────
+
+    /// Render hi-res in clean monochrome (white on black).
+    /// Each set bit = white pixel, unset = black.  No NTSC artifact colours.
+    /// Produces perfectly readable output for all games.
+    pub fn render_hires_mono(
+        &self,
+        ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
+    ) {
+        // Use monochrome tint if set, otherwise default to white.
+        let fg = if let Some([tr, tg, tb]) = self.mono_tint {
+            0xFF000000 | ((tb as u32) << 16) | ((tg as u32) << 8) | (tr as u32)
+        } else {
+            0xFFFFFFFF
+        };
+        let bg = 0xFF000000u32;
+
+        for y in 0..scan_lines {
+            let row_offset = (y & 7) * 0x0400
+                + ((y >> 3) & 7) * 0x0080
+                + (y >> 6) * 0x0028;
+
+            let py = y * 2;
+            let pixels = fb.pixels_mut();
+            let row0 = py * FB_WIDTH;
+            let row1 = (py + 1) * FB_WIDTH;
+
+            for bx in 0..40usize {
+                let addr = hgr_base + row_offset + bx;
+                let byte = ram.get(addr).copied().unwrap_or(0);
+                let base_px = bx * 14;
+
+                for bit in 0..7usize {
+                    let color = if byte & (1 << bit) != 0 { fg } else { bg };
+                    let px = base_px + bit * 2;
+                    pixels[row0 + px] = color;
+                    pixels[row0 + px + 1] = color;
+                    pixels[row1 + px] = color;
+                    pixels[row1 + px + 1] = color;
+                }
+            }
+        }
+    }
+
+    // ── Idealized hi-res colour ──────────────────────────────────────────────
+
+    /// Apple II standard artifact colours (ABGR format).
+    /// Bit 7 = 0: violet (odd pixel) / green (even pixel)
+    /// Bit 7 = 1: blue (odd pixel) / orange (even pixel)
+    const HGR_BLACK:  u32 = 0xFF000000;
+    const HGR_WHITE:  u32 = 0xFFFFFFFF;
+    const HGR_VIOLET: u32 = 0xFFDD22DD; // violet/purple
+    const HGR_GREEN:  u32 = 0xFF11DD11; // green
+    const HGR_BLUE:   u32 = 0xFFFF4411; // blue (ABGR)
+    const HGR_ORANGE: u32 = 0xFF0088FF; // orange (ABGR)
+
+    /// Render hi-res using simplified/idealized colour mapping.
+    ///
+    /// Maps each pixel to its artifact colour based on bit position and hi-bit,
+    /// then merges adjacent set bits to white.  Produces clean, readable output
+    /// without NTSC signal-chain artifacts.
+    ///
+    /// Matches AppleWin's `VT_COLOR_IDEALIZED` / `updateScreenHires40Simplified`.
+    pub fn render_hires_idealized(
+        &self,
+        ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
+    ) {
+        for y in 0..scan_lines {
+            let row_offset = (y & 7) * 0x0400
+                + ((y >> 3) & 7) * 0x0080
+                + (y >> 6) * 0x0028;
+
+            let py = y * 2;
+            let pixels = fb.pixels_mut();
+            let row0 = py * FB_WIDTH;
+            let row1 = (py + 1) * FB_WIDTH;
+            let mut px = 0usize;
+            let mut prev_bit: bool = false;
+
+            for bx in 0..40usize {
+                let addr = hgr_base + row_offset + bx;
+                let byte = ram.get(addr).copied().unwrap_or(0);
+                let hi_bit = byte & 0x80 != 0;
+                // Artifact colour pair depends on hi-bit (palette group)
+                let (color_even, color_odd) = if hi_bit {
+                    (Self::HGR_ORANGE, Self::HGR_BLUE)
+                } else {
+                    (Self::HGR_GREEN, Self::HGR_VIOLET)
+                };
+
+                for bit in 0..7usize {
+                    let cur_bit = byte & (1 << bit) != 0;
+                    // Global pixel column (0-based across all 40 bytes × 7 bits)
+                    let col = bx * 7 + bit;
+                    let is_even = col & 1 == 0;
+
+                    // Two adjacent set bits merge to white
+                    let color = if cur_bit {
+                        if prev_bit {
+                            // Current AND previous both set → white pair
+                            // Also fix previous pixel to white
+                            let prev_px = px * 2 - 2;
+                            if prev_px < 560 {
+                                pixels[row0 + prev_px] = Self::HGR_WHITE;
+                                pixels[row0 + prev_px + 1] = Self::HGR_WHITE;
+                                pixels[row1 + prev_px] = Self::HGR_WHITE;
+                                pixels[row1 + prev_px + 1] = Self::HGR_WHITE;
+                            }
+                            Self::HGR_WHITE
+                        } else if is_even {
+                            color_even
+                        } else {
+                            color_odd
+                        }
+                    } else {
+                        Self::HGR_BLACK
+                    };
+
+                    // Each HGR pixel = 2 framebuffer pixels wide (280 → 560)
+                    pixels[row0 + px * 2] = color;
+                    pixels[row0 + px * 2 + 1] = color;
+                    pixels[row1 + px * 2] = color;
+                    pixels[row1 + px * 2 + 1] = color;
+                    px += 1;
+                    prev_bit = cur_bit;
                 }
             }
         }

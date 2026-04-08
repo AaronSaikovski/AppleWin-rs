@@ -364,23 +364,38 @@ impl Bus {
             };
         }
 
-        // 80STORE overrides: when active, PAGE2 routes display pages to aux
+        // 80STORE overrides: when active, PAGE2 selects between main/aux for
+        // display pages, OVERRIDING AUXREAD/AUXWRITE for those address ranges.
+        //
+        //   PAGE2=0 → display pages forced to MAIN (even if AUXREAD/AUXWRITE set)
+        //   PAGE2=1 → display pages forced to AUX  (even if AUXREAD/AUXWRITE clear)
+        //
+        // Affected pages: text page 1 ($0400–$07FF) always,
+        //                 HGR page 1 ($2000–$3FFF) only when HIRES is also set.
         if self.mode.contains(MemMode::MF_80STORE) {
             let page2 = self.mode.contains(MemMode::MF_PAGE2);
-            if page2 {
-                // Text page 1 ($0400–$07FF) → aux
-                for page in 0x04u16..=0x07 {
-                    let base = page << 8;
+            // Text page 1 ($0400–$07FF)
+            for page in 0x04u16..=0x07 {
+                let base = page << 8;
+                if page2 {
                     self.pages_r[page as usize] = PageSrc::Aux(base);
                     self.pages_w[page as usize] = PageDst::Aux(base);
+                } else {
+                    self.pages_r[page as usize] = PageSrc::Main(base);
+                    self.pages_w[page as usize] = PageDst::Main(base);
                 }
             }
-            if page2 && self.mode.contains(MemMode::MF_HIRES) {
-                // HiRes page 1 ($2000–$3FFF) → aux
+            if self.mode.contains(MemMode::MF_HIRES) {
+                // HiRes page 1 ($2000–$3FFF)
                 for page in 0x20u16..=0x3F {
                     let base = page << 8;
-                    self.pages_r[page as usize] = PageSrc::Aux(base);
-                    self.pages_w[page as usize] = PageDst::Aux(base);
+                    if page2 {
+                        self.pages_r[page as usize] = PageSrc::Aux(base);
+                        self.pages_w[page as usize] = PageDst::Aux(base);
+                    } else {
+                        self.pages_r[page as usize] = PageSrc::Main(base);
+                        self.pages_w[page as usize] = PageDst::Main(base);
+                    }
                 }
             }
         }

@@ -342,7 +342,12 @@ impl Drive {
     /// Read bits until a complete nibble is formed (1-bit followed by 7 more bits).
     /// This simulates the Apple II disk controller's shift register behavior.
     /// `cycles` is the current CPU cycle count for timing.
-    fn woz_read_nibble(&mut self, cycles: u64) -> u8 {
+    ///
+    /// Returns `Some(nibble)` when a full byte with bit 7 set is assembled,
+    /// or `None` if the shift register hasn't accumulated a complete nibble yet.
+    /// This matches real hardware: the data latch retains the previous value
+    /// until a new valid nibble is ready.
+    fn woz_read_nibble(&mut self, cycles: u64) -> Option<u8> {
         // Advance position based on elapsed cycles
         let bits_elapsed = self.advance_bits(cycles);
 
@@ -355,13 +360,12 @@ impl Drive {
                 // Full nibble accumulated
                 let result = self.shift_reg;
                 self.shift_reg = 0;
-                return result;
+                return Some(result);
             }
         }
 
-        // If no complete nibble was read, return the partial shift register
-        // with high bit clear (indicates "not ready")
-        0
+        // No complete nibble yet — caller should preserve the current latch value.
+        None
     }
 
     /// Write a single bit to the current WOZ track at the current position.
@@ -404,11 +408,14 @@ impl Drive {
 
     // ── Unified read/write dispatchers ───────────────────────────────────
 
-    fn read_nibble(&mut self, cycles: u64) -> u8 {
+    /// Read next nibble from disk.  Returns `Some(nibble)` when data is
+    /// available, or `None` when the WOZ shift register hasn't formed a
+    /// complete byte yet (caller should preserve the current data latch).
+    fn read_nibble(&mut self, cycles: u64) -> Option<u8> {
         if self.is_woz() {
             self.woz_read_nibble(cycles)
         } else {
-            self.read_nibble_legacy()
+            Some(self.read_nibble_legacy())
         }
     }
 
@@ -487,7 +494,7 @@ impl Disk2Card {
             active_drive: 0,
             motor_on:     false,
             write_mode:   false,
-            latch:        0,
+            latch:        0xFF,
             phases:       0,
         }
     }
@@ -641,7 +648,12 @@ impl Card for Disk2Card {
                 if self.write_mode && self.motor_on {
                     self.drives[self.active_drive].write_nibble(self.latch, cycles);
                 } else if !self.write_mode && self.motor_on {
-                    self.latch = self.drives[self.active_drive].read_nibble(cycles);
+                    // Only update the data latch when a complete nibble is ready.
+                    // Real hardware holds the previous latch value until the shift
+                    // register produces a new byte with bit 7 set.
+                    if let Some(nibble) = self.drives[self.active_drive].read_nibble(cycles) {
+                        self.latch = nibble;
+                    }
                 }
                 self.latch
             }
@@ -683,7 +695,7 @@ impl Card for Disk2Card {
     fn reset(&mut self, _power_cycle: bool) {
         self.motor_on     = false;
         self.write_mode   = false;
-        self.latch        = 0;
+        self.latch        = 0xFF;
         self.phases       = 0;
         self.active_drive = 0;
         for d in &mut self.drives { d.byte_pos = 0; }
@@ -1549,7 +1561,7 @@ mod tests {
 
         // Reading a nibble with enough cycles elapsed (8 bits * 4 cycles = 32 cycles)
         let nibble = drive.woz_read_nibble(32);
-        assert_eq!(nibble, 0xD5);
+        assert_eq!(nibble, Some(0xD5));
     }
 
     // ── Bit-level write tests ────────────────────────────────────────────
