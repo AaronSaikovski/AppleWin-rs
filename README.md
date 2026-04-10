@@ -297,7 +297,7 @@ These ports allow building the original C++ AppleWin on non-Windows platforms:
 **Release builds** are triggered by version tags (`v*.*.*`) and produce archives for:
 - Windows x86_64 (`.zip`)
 - macOS x86_64 and aarch64 (`.tar.gz`)
-- Linux x86_64 and aarch64 (`.tar.gz`)
+- Linux x86_64 (`.tar.gz`)
 
 Each release includes SHA256 checksums and auto-generated release notes.
 
