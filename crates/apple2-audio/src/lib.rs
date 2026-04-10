@@ -9,6 +9,7 @@
 //!   source/SSI263.cpp
 //!   source/Mockingboard.cpp
 
-pub mod speaker;
 pub mod ay8910;
+pub mod speaker;
 pub mod ssi263;
+pub mod wav_writer;

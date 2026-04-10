@@ -9,76 +9,76 @@
 // 64 entries covering the full SSI263 phoneme set.
 const PHONEME_PARAMS: [(u16, u16, bool, u32); 64] = [
     // Vowels
-    (270, 2290, true,  2000), // 0x00 PA (pause)
-    (390, 1990, true,  1800), // 0x01 E
-    (530, 1840, true,  1800), // 0x02 EH
-    (660, 1720, true,  1800), // 0x03 AE
-    (730, 1090, true,  2000), // 0x04 AH
-    (570,  840, true,  2000), // 0x05 AW
-    (440, 1020, true,  2000), // 0x06 AO
-    (300,  870, true,  2000), // 0x07 UH
-    (640, 1190, true,  2000), // 0x08 AX
-    (490, 1350, true,  2000), // 0x09 IX
-    (360, 2220, true,  2000), // 0x0A IH
-    (270, 2290, true,  2000), // 0x0B IY
-    (300,  870, true,  2000), // 0x0C UX
-    (460, 1105, true,  2000), // 0x0D OH
-    (400,  800, true,  2000), // 0x0E OW
-    (640, 1190, true,  2000), // 0x0F UW
+    (270, 2290, true, 2000), // 0x00 PA (pause)
+    (390, 1990, true, 1800), // 0x01 E
+    (530, 1840, true, 1800), // 0x02 EH
+    (660, 1720, true, 1800), // 0x03 AE
+    (730, 1090, true, 2000), // 0x04 AH
+    (570, 840, true, 2000),  // 0x05 AW
+    (440, 1020, true, 2000), // 0x06 AO
+    (300, 870, true, 2000),  // 0x07 UH
+    (640, 1190, true, 2000), // 0x08 AX
+    (490, 1350, true, 2000), // 0x09 IX
+    (360, 2220, true, 2000), // 0x0A IH
+    (270, 2290, true, 2000), // 0x0B IY
+    (300, 870, true, 2000),  // 0x0C UX
+    (460, 1105, true, 2000), // 0x0D OH
+    (400, 800, true, 2000),  // 0x0E OW
+    (640, 1190, true, 2000), // 0x0F UW
     // Diphthongs and more vowels
-    (530, 1840, true,  2200), // 0x10 AY
-    (300,  870, true,  2200), // 0x11 OY
-    (400,  800, true,  2200), // 0x12 AW2
-    (400, 1700, true,  2200), // 0x13 EY
-    (300,  870, true,  2200), // 0x14 OW2
-    (270, 2290, true,  2200), // 0x15 UW2
-    (390, 1990, true,  2200), // 0x16 YU
-    (490, 1350, true,  2200), // 0x17 ER
+    (530, 1840, true, 2200), // 0x10 AY
+    (300, 870, true, 2200),  // 0x11 OY
+    (400, 800, true, 2200),  // 0x12 AW2
+    (400, 1700, true, 2200), // 0x13 EY
+    (300, 870, true, 2200),  // 0x14 OW2
+    (270, 2290, true, 2200), // 0x15 UW2
+    (390, 1990, true, 2200), // 0x16 YU
+    (490, 1350, true, 2200), // 0x17 ER
     // Semivowels
-    (270, 2290, true,  1500), // 0x18 R
-    (270, 2290, true,  1500), // 0x19 L
-    (270, 2290, true,  1500), // 0x1A W
-    (270, 2290, true,  1200), // 0x1B WH
-    (270, 2290, true,  1500), // 0x1C Y
-    (270, 2290, true,  1200), // 0x1D HH
-    (270, 2290, true,  1200), // 0x1E HX
+    (270, 2290, true, 1500),  // 0x18 R
+    (270, 2290, true, 1500),  // 0x19 L
+    (270, 2290, true, 1500),  // 0x1A W
+    (270, 2290, true, 1200),  // 0x1B WH
+    (270, 2290, true, 1500),  // 0x1C Y
+    (270, 2290, true, 1200),  // 0x1D HH
+    (270, 2290, true, 1200),  // 0x1E HX
     (270, 2290, false, 1000), // 0x1F H2
     // Nasals
-    (270, 2290, true,  1500), // 0x20 M
-    (270, 2290, true,  1500), // 0x21 N
-    (270, 2290, true,  1500), // 0x22 NG
-    (270, 2290, true,  1500), // 0x23 NX
-    (270, 2290, true,  1200), // 0x24 NW
-    (270, 2290, true,  1200), // 0x25 RX
-    (270, 2290, true,  1000), // 0x26 NG2
-    (270, 2290, true,  1000), // 0x27 silence
+    (270, 2290, true, 1500), // 0x20 M
+    (270, 2290, true, 1500), // 0x21 N
+    (270, 2290, true, 1500), // 0x22 NG
+    (270, 2290, true, 1500), // 0x23 NX
+    (270, 2290, true, 1200), // 0x24 NW
+    (270, 2290, true, 1200), // 0x25 RX
+    (270, 2290, true, 1000), // 0x26 NG2
+    (270, 2290, true, 1000), // 0x27 silence
     // Fricatives
     (270, 2290, false, 1500), // 0x28 S
     (270, 2290, false, 1500), // 0x29 SH
     (270, 2290, false, 1500), // 0x2A F
     (270, 2290, false, 1500), // 0x2B TH
-    (270, 2290, true,  1500), // 0x2C Z
-    (270, 2290, true,  1500), // 0x2D ZH
-    (270, 2290, true,  1500), // 0x2E V
-    (270, 2290, true,  1500), // 0x2F DH
+    (270, 2290, true, 1500),  // 0x2C Z
+    (270, 2290, true, 1500),  // 0x2D ZH
+    (270, 2290, true, 1500),  // 0x2E V
+    (270, 2290, true, 1500),  // 0x2F DH
     // Stops
-    (270, 2290, false,  800), // 0x30 P
-    (270, 2290, false,  800), // 0x31 T
-    (270, 2290, false,  800), // 0x32 K
-    (270, 2290, false,  800), // 0x33 KX
-    (270, 2290, true,   800), // 0x34 B
-    (270, 2290, true,   800), // 0x35 D
-    (270, 2290, true,   800), // 0x36 G
-    (270, 2290, true,   800), // 0x37 GX
+    (270, 2290, false, 800), // 0x30 P
+    (270, 2290, false, 800), // 0x31 T
+    (270, 2290, false, 800), // 0x32 K
+    (270, 2290, false, 800), // 0x33 KX
+    (270, 2290, true, 800),  // 0x34 B
+    (270, 2290, true, 800),  // 0x35 D
+    (270, 2290, true, 800),  // 0x36 G
+    (270, 2290, true, 800),  // 0x37 GX
     // Affricates / misc
     (270, 2290, false, 1000), // 0x38 CH
-    (270, 2290, true,  1000), // 0x39 J
+    (270, 2290, true, 1000),  // 0x39 J
     (270, 2290, false, 1000), // 0x3A WH2
-    (270, 2290, false,  800), // 0x3B silence2
-    (270, 2290, false,  800), // 0x3C silence3
-    (270, 2290, false,  800), // 0x3D silence4
-    (270, 2290, false,  800), // 0x3E silence5
-    (270, 2290, false,  800), // 0x3F silence6
+    (270, 2290, false, 800),  // 0x3B silence2
+    (270, 2290, false, 800),  // 0x3C silence3
+    (270, 2290, false, 800),  // 0x3D silence4
+    (270, 2290, false, 800),  // 0x3E silence5
+    (270, 2290, false, 800),  // 0x3F silence6
 ];
 
 // ── Simple biquad bandpass filter ────────────────────────────────────────────
@@ -100,8 +100,12 @@ struct Biquad {
 impl Biquad {
     fn new() -> Self {
         Self {
-            b0: 0.0, b2: 0.0, a1: 0.0, a2: 0.0,
-            z1: 0.0, z2: 0.0,
+            b0: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+            z1: 0.0,
+            z2: 0.0,
             last_freq: 0.0,
             last_sr: 0,
         }
@@ -113,24 +117,24 @@ impl Biquad {
             return;
         }
         self.last_freq = freq;
-        self.last_sr   = sample_rate;
+        self.last_sr = sample_rate;
 
         // Constant-peak-gain bandpass (Q = 5 gives a moderately narrow formant)
-        let q: f32  = 5.0;
+        let q: f32 = 5.0;
         let w0 = 2.0 * std::f32::consts::PI * freq / sample_rate as f32;
         let alpha = w0.sin() / (2.0 * q);
 
-        let b0 =  alpha;
-        let b1 =  0.0_f32;
+        let b0 = alpha;
+        let b1 = 0.0_f32;
         let b2 = -alpha;
-        let a0 =  1.0 + alpha;
+        let a0 = 1.0 + alpha;
         let a1 = -2.0 * w0.cos();
-        let a2 =  1.0 - alpha;
+        let a2 = 1.0 - alpha;
 
-        self.b0 =  b0 / a0;
-        self.b2 =  b2 / a0;
-        self.a1 =  b1; // store b1/a0 == 0 in a1 slot; actual a1/a0 below
-        self.a2 =  a2 / a0;
+        self.b0 = b0 / a0;
+        self.b2 = b2 / a0;
+        self.a1 = b1; // store b1/a0 == 0 in a1 slot; actual a1/a0 below
+        self.a2 = a2 / a0;
         // Overwrite a1 with the correct value
         self.a1 = a1 / a0;
     }
@@ -163,6 +167,9 @@ pub struct Ssi263 {
     pub ready_countdown: u64,
     /// True when chip is powered up (CTL bit = 0).
     pub powered: bool,
+    /// IRQ flag — asserted when a phoneme finishes speaking.
+    /// The parent card (e.g. Mockingboard) should check and clear this.
+    pub irq: bool,
 
     // ── synthesis state ──────────────────────────────────────────────────────
     /// Current phoneme index (0-63).
@@ -194,6 +201,7 @@ impl Ssi263 {
             regs: [0u8; 5],
             ready_countdown: 0,
             powered: true,
+            irq: false,
             phoneme: 0,
             samples_remaining: 0,
             phase: 0,
@@ -209,6 +217,25 @@ impl Ssi263 {
     }
 
     // ── register access ───────────────────────────────────────────────────────
+
+    /// Read an SSI263 register.
+    /// Returns status information — only register 0 is meaningfully readable:
+    /// bit 7 = 1 when chip is ready (not speaking), 0 when busy.
+    pub fn read_reg(&mut self, reg: u8) -> u8 {
+        match reg & 0x07 {
+            0 => {
+                // Reading register 0 returns status and clears IRQ
+                let status = if self.is_ready() { 0x80 } else { 0x00 };
+                self.irq = false;
+                status
+            }
+            1 => self.regs[1],
+            2 => self.regs[2],
+            3 => self.regs[3],
+            4 => self.regs[4],
+            _ => 0xFF,
+        }
+    }
 
     /// Write a value to the SSI263.
     /// `reg` = register index (0-4); the caller (mockingboard) already decoded
@@ -281,12 +308,14 @@ impl Ssi263 {
     // ── timing ────────────────────────────────────────────────────────────────
 
     /// Advance time by `delta` CPU cycles. Returns true if READY just fired (IFR CA1).
+    /// Also asserts IRQ when the phoneme finishes speaking.
     pub fn tick(&mut self, delta: u64) -> bool {
         if self.ready_countdown == 0 || !self.powered {
             return false;
         }
         if delta >= self.ready_countdown {
             self.ready_countdown = 0;
+            self.irq = true; // Assert IRQ — phoneme finished
             true // READY fired
         } else {
             self.ready_countdown -= delta;
@@ -343,19 +372,18 @@ impl Ssi263 {
                 } else {
                     -0.1_f32
                 };
-                let s = self.f1_filt.process(excitation)
-                      + self.f2_filt.process(excitation * 0.5);
+                let s = self.f1_filt.process(excitation) + self.f2_filt.process(excitation * 0.5);
                 *sample += s * amplitude;
             }
         } else {
             for sample in out.iter_mut().take(n) {
                 // Linear congruential noise for unvoiced fricatives
-                self.noise_state = self.noise_state
+                self.noise_state = self
+                    .noise_state
                     .wrapping_mul(1_664_525)
                     .wrapping_add(1_013_904_223);
                 let noise = (self.noise_state as i32 as f32) / (i32::MAX as f32) * 0.3;
-                let s = self.f1_filt.process(noise)
-                      + self.f2_filt.process(noise * 0.5);
+                let s = self.f1_filt.process(noise) + self.f2_filt.process(noise * 0.5);
                 *sample += s * amplitude;
             }
         }
@@ -366,5 +394,117 @@ impl Ssi263 {
         } else {
             self.samples_remaining -= n as u32;
         }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phoneme_write_starts_speaking() {
+        let mut ssi = Ssi263::new();
+        assert!(ssi.is_ready());
+        // Write phoneme 0x01 (E) with shortest duration (bits 7:6 = 0b11)
+        ssi.write_reg(0, 0xC1);
+        assert!(!ssi.is_ready(), "Should be speaking after phoneme write");
+        assert!(ssi.ready_countdown > 0);
+    }
+
+    #[test]
+    fn test_duration_scaling() {
+        let mut ssi = Ssi263::new();
+        // Phoneme 0x01, longest duration (bits 7:6 = 0b00 → factor 4)
+        ssi.write_reg(0, 0x01);
+        let long_dur = ssi.ready_countdown;
+        // Phoneme 0x01, shortest duration (bits 7:6 = 0b11 → factor 1)
+        ssi.write_reg(0, 0xC1);
+        let short_dur = ssi.ready_countdown;
+        assert!(
+            long_dur > short_dur,
+            "Longer duration factor should produce longer countdown"
+        );
+        assert_eq!(long_dur, short_dur * 4, "4x factor vs 1x factor");
+    }
+
+    #[test]
+    fn test_tick_fires_irq() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(0, 0xC1); // short phoneme
+        assert!(!ssi.irq);
+        let countdown = ssi.ready_countdown;
+        // Tick past the entire countdown
+        let fired = ssi.tick(countdown + 1);
+        assert!(fired, "tick should return true when phoneme completes");
+        assert!(ssi.irq, "IRQ should be asserted when phoneme finishes");
+        assert!(ssi.is_ready());
+    }
+
+    #[test]
+    fn test_read_reg_clears_irq() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(0, 0xC1);
+        ssi.tick(ssi.ready_countdown); // finish phoneme
+        assert!(ssi.irq);
+        // Reading register 0 should clear IRQ
+        let status = ssi.read_reg(0);
+        assert_eq!(status & 0x80, 0x80, "Ready bit should be set");
+        assert!(!ssi.irq, "IRQ should be cleared after reading reg 0");
+    }
+
+    #[test]
+    fn test_power_down_via_ctl() {
+        let mut ssi = Ssi263::new();
+        assert!(ssi.powered);
+        // Set CTL bit (reg 3, bit 7) → power down
+        ssi.write_reg(3, 0x80);
+        assert!(!ssi.powered, "CTL=1 should power down");
+        // Clear CTL → power up and re-trigger
+        ssi.write_reg(3, 0x0F); // amplitude = 15, CTL = 0
+        assert!(ssi.powered, "CTL=0 should power up");
+    }
+
+    #[test]
+    fn test_fill_audio_produces_output() {
+        let mut ssi = Ssi263::new();
+        // Set amplitude to max (reg 3 bits 3:0 = 0x0F)
+        ssi.write_reg(3, 0x0F);
+        // Write a voiced phoneme
+        ssi.write_reg(0, 0x01); // phoneme E, longest duration
+        let mut buf = vec![0.0_f32; 1000];
+        ssi.fill_audio(&mut buf, 22050);
+        let has_audio = buf.iter().any(|s| s.abs() > 0.001);
+        assert!(
+            has_audio,
+            "fill_audio should produce non-zero samples for voiced phoneme"
+        );
+    }
+
+    #[test]
+    fn test_fill_audio_unvoiced() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(3, 0x0F); // max amplitude
+        // Write an unvoiced phoneme (0x28 = S, fricative)
+        ssi.write_reg(0, 0x28);
+        let mut buf = vec![0.0_f32; 1000];
+        ssi.fill_audio(&mut buf, 22050);
+        let has_audio = buf.iter().any(|s| s.abs() > 0.001);
+        assert!(
+            has_audio,
+            "fill_audio should produce non-zero samples for unvoiced phoneme"
+        );
+    }
+
+    #[test]
+    fn test_reset_clears_state() {
+        let mut ssi = Ssi263::new();
+        ssi.write_reg(0, 0x01);
+        ssi.irq = true;
+        ssi.reset();
+        assert!(ssi.is_ready());
+        assert!(!ssi.irq);
+        assert_eq!(ssi.regs, [0u8; 5]);
     }
 }

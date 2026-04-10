@@ -9,8 +9,8 @@
 //!
 //! Hi-res colour uses a proper NTSC signal model ported from `source/NTSC.cpp`.
 
+use crate::framebuffer::{FB_WIDTH, Framebuffer};
 use apple2_core::bus::MemMode;
-use crate::framebuffer::{Framebuffer, FB_WIDTH};
 
 // ── Lo-res 16-colour ABGR palette ─────────────────────────────────────────────
 
@@ -61,69 +61,84 @@ impl NtscTables {
         let mut lum1_x = [0.0f64; 3];
         let mut lum1_y = [0.0f64; 3];
 
-        // Filter parameters from NTSC.cpp
-        const SIG_GAIN: f64  = 7.614490548;
-        const SIG_A: f64     = -0.2718798058;
-        const SIG_B: f64     =  0.7465656072;
-
-        const CHR_GAIN: f64  = 7.438011255;
-        const CHR_A: f64     = -0.7318893645;
-        const CHR_B: f64     =  1.2336442711;
-
-        const LUM_GAIN: f64  = 13.71331570;
-        const LUM_A: f64     = -0.3961075449;
-        const LUM_B: f64     =  1.1044202472;
-
-        // YIQ → RGB coefficients
-        const I_TO_R: f64 =  0.956;
-        const I_TO_G: f64 = -0.272;
-        const I_TO_B: f64 = -1.105;
-        const Q_TO_R: f64 =  0.621;
-        const Q_TO_G: f64 = -0.647;
-        const Q_TO_B: f64 =  1.702;
-
-        const RAD_45: f64 = std::f64::consts::PI * 0.25;
-        const RAD_90: f64 = std::f64::consts::PI * 0.5;
-        // CYCLESTART = DEG_TO_RAD(45) = PI/4 = RAD_45
-        const CYCLESTART: f64 = RAD_45;
+        // Filter parameters from NTSC.cpp — defined as float literals in C++.
+        // Must match C++ float→double promotion: the C++ constants have `f`
+        // suffix so they have only ~7 digits of precision.  We replicate this
+        // by going through f32 first.
+        #[allow(clippy::excessive_precision, clippy::approx_constant)]
+        mod coeff {
+            pub const SIG_GAIN: f64 = 7.614490548_f32 as f64;
+            pub const SIG_A: f64 = -0.2718798058_f32 as f64;
+            pub const SIG_B: f64 = 0.7465656072_f32 as f64;
+            pub const CHR_GAIN: f64 = 7.438011255_f32 as f64;
+            pub const CHR_A: f64 = -0.7318893645_f32 as f64;
+            pub const CHR_B: f64 = 1.2336442711_f32 as f64;
+            pub const LUM_GAIN: f64 = 13.71331570_f32 as f64;
+            pub const LUM_A: f64 = -0.3961075449_f32 as f64;
+            pub const LUM_B: f64 = 1.1044202472_f32 as f64;
+            pub const I_TO_R: f64 = 0.956_f32 as f64;
+            pub const I_TO_G: f64 = -0.272_f32 as f64;
+            pub const I_TO_B: f64 = -1.105_f32 as f64;
+            pub const Q_TO_R: f64 = 0.621_f32 as f64;
+            pub const Q_TO_G: f64 = -0.647_f32 as f64;
+            pub const Q_TO_B: f64 = 1.702_f32 as f64;
+            // C++ defines PI as 3.1415926535898f (float precision)
+            pub const PI_F: f64 = 3.1415926535898_f32 as f64;
+        }
+        use coeff::*;
+        const RAD_45: f64 = PI_F * 0.25;
+        const RAD_90: f64 = PI_F * 0.5;
+        // CYCLESTART = DEG_TO_RAD(45) = PI*45/180.f
+        const CYCLESTART: f64 = PI_F * 45.0 / (180.0_f32 as f64);
 
         let clamp01 = |x: f64| -> f64 { x.clamp(0.0, 1.0) };
 
         // Inline filter helpers (modify filter state, return y[2])
         macro_rules! filter_signal {
             ($z:expr) => {{
-                sig_x[0] = sig_x[1]; sig_x[1] = sig_x[2]; sig_x[2] = $z / SIG_GAIN;
-                sig_y[0] = sig_y[1]; sig_y[1] = sig_y[2];
-                sig_y[2] = sig_x[0] + sig_x[2] + 2.0 * sig_x[1]
-                         + SIG_A * sig_y[0] + SIG_B * sig_y[1];
+                sig_x[0] = sig_x[1];
+                sig_x[1] = sig_x[2];
+                sig_x[2] = $z / SIG_GAIN;
+                sig_y[0] = sig_y[1];
+                sig_y[1] = sig_y[2];
+                sig_y[2] =
+                    sig_x[0] + sig_x[2] + 2.0 * sig_x[1] + SIG_A * sig_y[0] + SIG_B * sig_y[1];
                 sig_y[2]
             }};
         }
         macro_rules! filter_chroma {
             ($z:expr) => {{
-                chr_x[0] = chr_x[1]; chr_x[1] = chr_x[2]; chr_x[2] = $z / CHR_GAIN;
-                chr_y[0] = chr_y[1]; chr_y[1] = chr_y[2];
+                chr_x[0] = chr_x[1];
+                chr_x[1] = chr_x[2];
+                chr_x[2] = $z / CHR_GAIN;
+                chr_y[0] = chr_y[1];
+                chr_y[1] = chr_y[2];
                 // Note: −x[0] (inverted), no 2·x[1] term — matches initFilterChroma
-                chr_y[2] = -chr_x[0] + chr_x[2]
-                         + CHR_A * chr_y[0] + CHR_B * chr_y[1];
+                chr_y[2] = -chr_x[0] + chr_x[2] + CHR_A * chr_y[0] + CHR_B * chr_y[1];
                 chr_y[2]
             }};
         }
         macro_rules! filter_luma0 {
             ($z:expr) => {{
-                lum0_x[0] = lum0_x[1]; lum0_x[1] = lum0_x[2]; lum0_x[2] = $z / LUM_GAIN;
-                lum0_y[0] = lum0_y[1]; lum0_y[1] = lum0_y[2];
-                lum0_y[2] = lum0_x[0] + lum0_x[2] + 2.0 * lum0_x[1]
-                          + LUM_A * lum0_y[0] + LUM_B * lum0_y[1];
+                lum0_x[0] = lum0_x[1];
+                lum0_x[1] = lum0_x[2];
+                lum0_x[2] = $z / LUM_GAIN;
+                lum0_y[0] = lum0_y[1];
+                lum0_y[1] = lum0_y[2];
+                lum0_y[2] =
+                    lum0_x[0] + lum0_x[2] + 2.0 * lum0_x[1] + LUM_A * lum0_y[0] + LUM_B * lum0_y[1];
                 lum0_y[2]
             }};
         }
         macro_rules! filter_luma1 {
             ($z:expr) => {{
-                lum1_x[0] = lum1_x[1]; lum1_x[1] = lum1_x[2]; lum1_x[2] = $z / LUM_GAIN;
-                lum1_y[0] = lum1_y[1]; lum1_y[1] = lum1_y[2];
-                lum1_y[2] = lum1_x[0] + lum1_x[2] + 2.0 * lum1_x[1]
-                          + LUM_A * lum1_y[0] + LUM_B * lum1_y[1];
+                lum1_x[0] = lum1_x[1];
+                lum1_x[1] = lum1_x[2];
+                lum1_x[2] = $z / LUM_GAIN;
+                lum1_y[0] = lum1_y[1];
+                lum1_y[1] = lum1_y[2];
+                lum1_y[2] =
+                    lum1_x[0] + lum1_x[2] + 2.0 * lum1_x[1] + LUM_A * lum1_y[0] + LUM_B * lum1_y[1];
                 lum1_y[2]
             }};
         }
@@ -139,12 +154,12 @@ impl NtscTables {
             for s in 0..4096usize {
                 let mut t = s as u32;
                 // Per-sequence local vars (reset each sequence)
-                let mut _y0  = 0.0f64;
-                let mut y1   = 0.0f64;
-                let mut _c   = 0.0f64;
+                let mut _y0 = 0.0f64;
+                let mut y1 = 0.0f64;
+                let mut _c = 0.0f64;
                 let mut iq_i = 0.0f64;
                 let mut iq_q = 0.0f64;
-                let mut _z   = 0.0f64;
+                let mut _z = 0.0f64;
 
                 // Process 12 bits of `s`, each doubled to 2 samples (14MHz oversampling)
                 for _n in 0..12 {
@@ -153,40 +168,41 @@ impl NtscTables {
 
                     for _k in 0..2 {
                         let zz = filter_signal!(_z);
-                        _c     = filter_chroma!(zz);
-                        _y0    = filter_luma0!(zz);
-                        y1     = filter_luma1!(zz - _c);
+                        _c = filter_chroma!(zz);
+                        _y0 = filter_luma0!(zz);
+                        y1 = filter_luma1!(zz - _c);
 
-                        let c2 = _c * 2.0;
-                        iq_i += (c2 * phi.cos() - iq_i) / 8.0;
-                        iq_q += (c2 * phi.sin() - iq_q) / 8.0;
+                        let c2 = _c * 2.0_f32 as f64;
+                        iq_i += (c2 * phi.cos() - iq_i) / 8.0_f32 as f64;
+                        iq_q += (c2 * phi.sin() - iq_q) / 8.0_f32 as f64;
 
                         phi += RAD_45;
                     }
                 }
 
-                // Compute RGB using the ColorTV (y1 luma) path
-                let color_idx = s & 15;
-                let (r, g, b) = if color_idx == 0 {
-                    // NTSC_REMOVE_BLACK_GHOSTING
-                    (0.0, 0.0, 0.0)
-                } else if color_idx == 15 {
-                    // NTSC_REMOVE_WHITE_RINGING
-                    (1.0, 1.0, 1.0)
-                } else if color_idx == 5 {
-                    // NTSC_REMOVE_GRAY_CHROMA (Gray1)
-                    let g = 0x83_u32 as f64 / 255.0;
-                    (g, g, g)
-                } else if color_idx == 10 {
-                    // NTSC_REMOVE_GRAY_CHROMA (Gray2)
-                    let g = 0x78_u32 as f64 / 255.0;
-                    (g, g, g)
-                } else {
-                    let r = clamp01(y1 + I_TO_R * iq_i + Q_TO_R * iq_q);
-                    let g = clamp01(y1 + I_TO_G * iq_i + Q_TO_G * iq_q);
-                    let b = clamp01(y1 + I_TO_B * iq_i + Q_TO_B * iq_q);
-                    (r, g, b)
-                };
+                // Compute RGB using the ColorTV (y1 luma) path.
+                // Matches C++ `initChromaPhaseTables()` Hue Color TV section.
+                let mut r32 = clamp01(y1 + I_TO_R * iq_i + Q_TO_R * iq_q);
+                let mut g32 = clamp01(y1 + I_TO_G * iq_i + Q_TO_G * iq_q);
+                let mut b32 = clamp01(y1 + I_TO_B * iq_i + Q_TO_B * iq_q);
+
+                // NTSC_REMOVE_WHITE_RINGING + NTSC_REMOVE_BLACK_GHOSTING
+                // (matches C++ exactly: `int color = s & 15;`)
+                let color = s & 15;
+                if color == 15 {
+                    r32 = 1.0;
+                    g32 = 1.0;
+                    b32 = 1.0;
+                }
+                if color == 0 {
+                    r32 = 0.0;
+                    g32 = 0.0;
+                    b32 = 0.0;
+                }
+                // Note: gray chroma removal (color 5, 10) only applies to
+                // Hue Monitor table in C++, NOT to Hue Color TV.
+
+                let (r, g, b) = (r32, g32, b32);
 
                 // Store as ABGR: R in low byte, B in bits 16-23.
                 // On little-endian the in-memory bytes are [R, G, B, A] = RGBA,
@@ -194,7 +210,7 @@ impl NtscTables {
                 hue_color_tv[phase][s] = 0xFF000000
                     | (((b * 255.0) as u32) << 16)
                     | (((g * 255.0) as u32) << 8)
-                    |   ((r * 255.0) as u32);
+                    | ((r * 255.0) as u32);
             }
         }
 
@@ -210,7 +226,10 @@ impl NtscTables {
             pixel_double_mask[byte as usize] = mask;
         }
 
-        NtscTables { hue_color_tv, pixel_double_mask }
+        NtscTables {
+            hue_color_tv,
+            pixel_double_mask,
+        }
     }
 }
 
@@ -219,6 +238,7 @@ impl NtscTables {
 /// Apple II character ROM (7×8 bit font, 128 characters × 8 rows × 7 pixels).
 /// Actual ROM bytes should be loaded from firmware at startup.
 /// This stub uses a blank ROM.
+#[derive(Clone)]
 pub struct CharRom {
     data: Vec<u8>,
 }
@@ -236,6 +256,24 @@ impl CharRom {
             self.data[idx..idx + 8].try_into().unwrap_or([0u8; 8])
         } else {
             [0u8; 8]
+        }
+    }
+
+    /// Decode an Apple II text byte into a glyph and inversion flag.
+    ///
+    /// Returns `(glyph_rows, invert)` where `invert` means the glyph should be
+    /// rendered with swapped foreground/background colours.
+    pub fn decode_char(&self, ch: u8, flash_on: bool) -> ([u8; 8], bool) {
+        if ch < 0x40 {
+            // INVERSE
+            (self.glyph(ch & 0x3F), true)
+        } else if ch < 0x80 {
+            // FLASH
+            let invert = !flash_on;
+            (self.glyph(ch & 0x3F), invert)
+        } else {
+            // NORMAL
+            (self.glyph(ch & 0x7F), false)
         }
     }
 }
@@ -281,23 +319,37 @@ impl NtscRenderer {
     pub fn render(
         &self,
         main_ram: &[u8; 65536],
-        aux_ram:  &[u8; 65536],
+        aux_ram: &[u8; 65536],
         mode: MemMode,
         frame_no: u32,
         fb: &mut Framebuffer,
     ) {
-
         // Flash state: toggles every 16 frames (~3.75 Hz at 60 fps).
         let flash_on = (frame_no / 16).is_multiple_of(2);
 
-        let page2    = mode.contains(MemMode::MF_PAGE2);
+        let page2 = mode.contains(MemMode::MF_PAGE2);
         let graphics = mode.contains(MemMode::MF_GRAPHICS);
-        let hires    = mode.contains(MemMode::MF_HIRES);
-        let mixed    = mode.contains(MemMode::MF_MIXED);
-        let vid80    = mode.contains(MemMode::MF_VID80);
-        let dhires   = mode.contains(MemMode::MF_DHIRES);
+        let hires = mode.contains(MemMode::MF_HIRES);
+        let mixed = mode.contains(MemMode::MF_MIXED);
+        let vid80 = mode.contains(MemMode::MF_VID80);
+        let dhires = mode.contains(MemMode::MF_DHIRES);
+        let _store80 = mode.contains(MemMode::MF_80STORE);
 
-        let text_base: usize = if page2 { 0x0800 } else { 0x0400 };
+        // Display page selection for per-frame rendering.
+        //
+        // The C++ AppleWin renders per-cycle and tracks mode changes in real time.
+        // Our per-frame renderer samples mode flags once.
+        //
+        // When 80STORE is ON, PAGE2 does not select the display page — the video
+        // scanner always shows page 1.  But PAGE2+80STORE+HIRES routes CPU writes
+        // for $2000-$3FFF to aux_ram, meaning the game may have drawn its graphics
+        // there.  In that case we display from aux_ram at $2000.
+        //
+        // When 80STORE is OFF, PAGE2 selects between page 1 ($2000) and page 2 ($4000)
+        // in main_ram, as normal.
+        let display_page2 = page2 && !_store80;
+        let text_base: usize = if display_page2 { 0x0800 } else { 0x0400 };
+        let hgr_base: usize = if display_page2 { 0x4000 } else { 0x2000 };
         let text_page = &main_ram[text_base..text_base + 0x400];
 
         if !graphics {
@@ -308,13 +360,12 @@ impl NtscRenderer {
                 self.render_text40_rows(text_page, 0, 24, flash_on, fb);
             }
         } else if hires {
-            let hgr_base: usize = if page2 { 0x4000 } else { 0x2000 };
             let scan_lines = if mixed { 160 } else { 192 };
             if dhires && vid80 {
-                // Double hi-res: 560×192 with 16-color NTSC artifact palette
+                // Double hi-res: interleaved aux/main through NTSC signal chain
                 self.render_dhires(main_ram, aux_ram, hgr_base, scan_lines, fb);
             } else {
-                // Standard hi-res graphics with proper NTSC signal model
+                // Standard hi-res from main_ram
                 self.render_hires(main_ram, hgr_base, scan_lines, fb);
             }
             if mixed {
@@ -326,9 +377,14 @@ impl NtscRenderer {
             }
         } else {
             // Lo-res graphics
-            self.render_lores(text_page, fb);
+            let gr_rows = if mixed { 20 } else { 24 };
+            if dhires && vid80 {
+                // Double lo-res (DGR): 80-column lo-res, aux+main interleaved
+                self.render_dlores(main_ram, aux_ram, text_base, 0, gr_rows, fb);
+            } else {
+                self.render_lores_rows(text_page, 0, gr_rows, fb);
+            }
             if mixed {
-                // Overwrite the last 4 text rows with actual text glyphs
                 if vid80 {
                     self.render_text80_rows(main_ram, aux_ram, text_base, 20, 24, flash_on, fb);
                 } else {
@@ -381,7 +437,7 @@ impl NtscRenderer {
         for row in row_start..row_end {
             for col in 0..40usize {
                 let addr = text_addr(row, col);
-                let ch   = text_page.get(addr).copied().unwrap_or(0xA0); // $A0 = normal space
+                let ch = text_page.get(addr).copied().unwrap_or(0xA0); // $A0 = normal space
 
                 // Determine display mode and glyph index from byte value.
                 // The glyph index is always bits 5-0 of the byte (ch & 0x3F gives
@@ -401,22 +457,22 @@ impl NtscRenderer {
                     (0xFFFFFFFFu32, 0xFF000000u32, ch & 0x7F)
                 };
 
-                let glyph  = self.char_rom.glyph(glyph_idx);
+                let glyph = self.char_rom.glyph(glyph_idx);
                 let base_x = col * 14;
                 let base_y = row * 16;
                 for (gy, &bits) in glyph.iter().enumerate() {
                     // Pre-compute the two framebuffer row offsets for this glyph row.
                     // Each glyph row doubles vertically (gy*2 and gy*2+1).
-                    let row0 = (base_y + gy * 2)     * FB_WIDTH;
+                    let row0 = (base_y + gy * 2) * FB_WIDTH;
                     let row1 = (base_y + gy * 2 + 1) * FB_WIDTH;
                     for gx in 0..7usize {
-                        let on   = bits & (0x80u8 >> gx) != 0;
+                        let on = bits & (0x80u8 >> gx) != 0;
                         let argb = if on { fg } else { bg };
                         // Each glyph pixel → 2×2 block; write all 4 directly.
                         let px = base_x + gx * 2;
-                        pixels[row0 + px]     = argb;
+                        pixels[row0 + px] = argb;
                         pixels[row0 + px + 1] = argb;
-                        pixels[row1 + px]     = argb;
+                        pixels[row1 + px] = argb;
                         pixels[row1 + px + 1] = argb;
                     }
                 }
@@ -437,16 +493,16 @@ impl NtscRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render_text80_rows(
         &self,
-        main_ram:  &[u8; 65536],
-        aux_ram:   &[u8; 65536],
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
         text_base: usize,
         row_start: usize,
-        row_end:   usize,
-        flash_on:  bool,
-        fb:        &mut Framebuffer,
+        row_end: usize,
+        flash_on: bool,
+        fb: &mut Framebuffer,
     ) {
         let main_page = &main_ram[text_base..text_base + 0x400];
-        let aux_page  = &aux_ram [text_base..text_base + 0x400];
+        let aux_page = &aux_ram[text_base..text_base + 0x400];
 
         for row in row_start..row_end {
             // Acquire once per text row — not 80× per column.
@@ -456,9 +512,15 @@ impl NtscRenderer {
                 let phys_col = screen_col / 2;
                 // Even screen columns → aux RAM; odd → main RAM
                 let ch = if screen_col & 1 == 0 {
-                    aux_page.get(text_addr(row, phys_col)).copied().unwrap_or(0xA0)
+                    aux_page
+                        .get(text_addr(row, phys_col))
+                        .copied()
+                        .unwrap_or(0xA0)
                 } else {
-                    main_page.get(text_addr(row, phys_col)).copied().unwrap_or(0xA0)
+                    main_page
+                        .get(text_addr(row, phys_col))
+                        .copied()
+                        .unwrap_or(0xA0)
                 };
 
                 let (fg, bg, glyph_idx) = if ch < 0x40 {
@@ -473,14 +535,14 @@ impl NtscRenderer {
                     (0xFFFFFFFFu32, 0xFF000000u32, ch & 0x7F)
                 };
 
-                let glyph  = self.char_rom.glyph(glyph_idx);
+                let glyph = self.char_rom.glyph(glyph_idx);
                 // 80-col: 7 px per column (no horizontal pixel doubling)
                 let base_x = screen_col * 7;
                 for (gy, &bits) in glyph.iter().enumerate() {
-                    let row0 = (base_y + gy * 2)     * FB_WIDTH;
+                    let row0 = (base_y + gy * 2) * FB_WIDTH;
                     let row1 = (base_y + gy * 2 + 1) * FB_WIDTH;
                     for gx in 0..7usize {
-                        let on   = bits & (0x80u8 >> gx) != 0;
+                        let on = bits & (0x80u8 >> gx) != 0;
                         let argb = if on { fg } else { bg };
                         // 1 × 2 block per glyph pixel (vertical doubling only)
                         pixels[row0 + base_x + gx] = argb;
@@ -498,15 +560,26 @@ impl NtscRenderer {
     /// Each byte encodes two colour blocks: low nibble = top 8 px, high nibble = bottom 8 px.
     /// Each cell is 14×16 px (same as text characters).
     pub fn render_lores(&self, text_page: &[u8], fb: &mut Framebuffer) {
+        self.render_lores_rows(text_page, 0, 24, fb);
+    }
+
+    /// Render lo-res graphics rows `row_start..row_end` (exclusive).
+    pub fn render_lores_rows(
+        &self,
+        text_page: &[u8],
+        row_start: usize,
+        row_end: usize,
+        fb: &mut Framebuffer,
+    ) {
         let pixels = fb.pixels_mut();
-        for row in 0..24usize {
+        for row in row_start..row_end {
             for col in 0..40usize {
-                let addr     = text_addr(row, col);
-                let byte     = text_page.get(addr).copied().unwrap_or(0);
+                let addr = text_addr(row, col);
+                let byte = text_page.get(addr).copied().unwrap_or(0);
                 let lo_color = (byte & 0x0F) as usize; // top half
                 let hi_color = ((byte >> 4) & 0x0F) as usize; // bottom half
-                let base_x   = col * 14;
-                let base_y   = row * 16;
+                let base_x = col * 14;
+                let base_y = row * 16;
 
                 // Fill each of the 8 top rows as a 14-pixel horizontal slice.
                 let top_argb = LORES_PALETTE[lo_color];
@@ -524,70 +597,108 @@ impl NtscRenderer {
         }
     }
 
-    // ── Double hi-res graphics ────────────────────────────────────────────────
-
-    /// Render `scan_lines` double hi-res scan lines using alternating aux/main RAM.
+    /// Render double lo-res (DGR) graphics rows `row_start..row_end` (exclusive).
     ///
-    /// Apple II DHIRES: 560 actual pixels per row.  Each scan line assembles bits from
-    /// 40 aux bytes and 40 main bytes, interleaved as 7-bit groups:
-    ///   aux[0] bits 0-6 → pixels 0-6
-    ///   main[0] bits 0-6 → pixels 7-13
-    ///   aux[1] bits 0-6 → pixels 14-20 … and so on.
+    /// Apple IIe double lo-res: 80 columns × 48 colour blocks, using interleaved
+    /// aux and main text page memory.  Each byte's low nibble = top colour block,
+    /// high nibble = bottom colour block.  Each colour block is 7 px wide × 8 px
+    /// tall on the 560×384 framebuffer (half the width of standard lo-res cells).
     ///
-    /// Colour decoding: consecutive groups of 4 bits map to one of the 16 lo-res colours
-    /// (same NTSC artifact palette).  Each colour group spans 4 screen pixels.
-    /// 560 / 4 = 140 colour groups per row.
-    pub fn render_dhires(
+    /// Column ordering (same as 80-col text):
+    ///   screen col 0 → aux[addr],  screen col 1 → main[addr],
+    ///   screen col 2 → aux[addr+1], screen col 3 → main[addr+1], …
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_dlores(
         &self,
-        main_ram:  &[u8; 65536],
-        aux_ram:   &[u8; 65536],
-        hgr_base:  usize,
-        scan_lines: usize,
-        fb:        &mut Framebuffer,
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
+        text_base: usize,
+        row_start: usize,
+        row_end: usize,
+        fb: &mut Framebuffer,
     ) {
-        for y in 0..scan_lines {
-            // Non-linear Apple II hi-res address layout (same as standard hi-res)
-            let row_offset = (y & 7) * 0x0400
-                + ((y >> 3) & 7) * 0x0080
-                + (y >> 6) * 0x0028;
+        let main_page = &main_ram[text_base..text_base + 0x400];
+        let aux_page = &aux_ram[text_base..text_base + 0x400];
+        let pixels = fb.pixels_mut();
 
-            // Pack 560 dhires bits into 9 u64 words (72 bytes vs 560 bytes for [bool;560]).
-            // Each source byte-pair contributes 14 bits: 7 from aux then 7 from main.
-            let mut packed = [0u64; 9];
-            for bx in 0..40usize {
-                let addr = hgr_base + row_offset + bx;
-                let ab = aux_ram.get(addr).copied().unwrap_or(0) as u64 & 0x7F;
-                let mb = main_ram.get(addr).copied().unwrap_or(0) as u64 & 0x7F;
-                let word = ab | (mb << 7); // 14 bits
-                let bit_base = bx * 14;
-                let wi = bit_base / 64;
-                let bi = bit_base % 64;
-                packed[wi] |= word << bi;
-                if bi + 14 > 64 {
-                    packed[wi + 1] |= word >> (64 - bi);
+        for row in row_start..row_end {
+            for screen_col in 0..80usize {
+                let phys_col = screen_col / 2;
+                let addr = text_addr(row, phys_col);
+                // Even screen columns → aux; odd → main (same as 80-col text)
+                let byte = if screen_col & 1 == 0 {
+                    aux_page.get(addr).copied().unwrap_or(0)
+                } else {
+                    main_page.get(addr).copied().unwrap_or(0)
+                };
+
+                let lo_color = (byte & 0x0F) as usize;
+                let hi_color = ((byte >> 4) & 0x0F) as usize;
+                let base_x = screen_col * 7;
+                let base_y = row * 16;
+
+                // Top half: 7 px wide × 8 px tall
+                let top_argb = LORES_PALETTE[lo_color];
+                for dy in 0..8usize {
+                    let start = (base_y + dy) * FB_WIDTH + base_x;
+                    pixels[start..start + 7].fill(top_argb);
+                }
+                // Bottom half: 7 px wide × 8 px tall
+                let bot_argb = LORES_PALETTE[hi_color];
+                for dy in 8..16usize {
+                    let start = (base_y + dy) * FB_WIDTH + base_x;
+                    pixels[start..start + 7].fill(bot_argb);
                 }
             }
+        }
+    }
 
-            // Decode 140 four-bit colour groups from the packed bitfield → LORES_PALETTE
+    // ── Double hi-res graphics ────────────────────────────────────────────────
+
+    /// Render double hi-res using direct 4-bit colour mapping.
+    ///
+    /// DHIRES: 560 pixels per row, assembled from interleaved aux/main bytes.
+    /// Each column pair provides 28 bits (2×7 aux + 2×7 main) = 7 four-bit
+    /// pixels.  Each 4-bit nibble indexes into the standard 16-colour palette.
+    pub fn render_dhires(
+        &self,
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
+    ) {
+        for y in 0..scan_lines {
+            let row_offset = (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x0080 + (y >> 6) * 0x0028;
+
             let py = y * 2;
-            let row0 = py       * FB_WIDTH;
+            let row0 = py * FB_WIDTH;
             let row1 = (py + 1) * FB_WIDTH;
             let pixels = fb.pixels_mut();
-            for xi in 0..140usize {
-                let bit_pos = xi * 4;
-                let wi = bit_pos / 64;
-                let bi = bit_pos % 64;
-                let color = if bi + 4 <= 64 {
-                    ((packed[wi] >> bi) & 0xF) as usize
-                } else {
-                    let lo = packed[wi] >> bi;
-                    let hi = packed[wi + 1] << (64 - bi);
-                    ((lo | hi) & 0xF) as usize
-                };
-                let argb    = LORES_PALETTE[color];
-                let base_px = xi * 4;
-                pixels[row0 + base_px..row0 + base_px + 4].fill(argb);
-                pixels[row1 + base_px..row1 + base_px + 4].fill(argb);
+
+            // Process 20 column pairs (40 bytes / 2 = 20 pairs)
+            for col_pair in 0..20usize {
+                let addr0 = hgr_base + row_offset + col_pair * 2;
+                let addr1 = addr0 + 1;
+
+                let a0 = aux_ram.get(addr0).copied().unwrap_or(0) as u32 & 0x7F;
+                let m0 = main_ram.get(addr0).copied().unwrap_or(0) as u32 & 0x7F;
+                let a1 = aux_ram.get(addr1).copied().unwrap_or(0) as u32 & 0x7F;
+                let m1 = main_ram.get(addr1).copied().unwrap_or(0) as u32 & 0x7F;
+
+                // 28-bit value: a0[6:0] | m0[6:0] | a1[6:0] | m1[6:0]
+                let bits = a0 | (m0 << 7) | (a1 << 14) | (m1 << 21);
+
+                let fb_x_base = col_pair * 28;
+                for pixel in 0..7usize {
+                    let nibble = ((bits >> (pixel * 4)) & 0x0F) as usize;
+                    let color = LORES_PALETTE[nibble];
+                    let px = fb_x_base + pixel * 4;
+                    for dx in 0..4 {
+                        pixels[row0 + px + dx] = color;
+                        pixels[row1 + px + dx] = color;
+                    }
+                }
             }
         }
     }
@@ -611,26 +722,24 @@ impl NtscRenderer {
     ///  4. Write the colour to both framebuffer rows 2y and 2y+1.
     pub fn render_hires(
         &self,
-        main_ram: &[u8; 65536],
+        ram: &[u8; 65536],
         hgr_base: usize,
         scan_lines: usize,
         fb: &mut Framebuffer,
     ) {
         let tables = &self.ntsc_tables.hue_color_tv;
-        let pdm    = &self.ntsc_tables.pixel_double_mask;
+        let pdm = &self.ntsc_tables.pixel_double_mask;
 
         for y in 0..scan_lines {
             // Non-linear Apple II hi-res address layout
-            let row_offset = (y & 7) * 0x0400
-                + ((y >> 3) & 7) * 0x0080
-                + (y >> 6) * 0x0028;
+            let row_offset = (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x0080 + (y >> 6) * 0x0028;
 
             // Reset NTSC state at the start of each scanline
             // (matches updateVideoScannerAddress: g_nColorPhaseNTSC = 0,
             //  g_nLastColumnPixelNTSC = 0, g_nSignalBitsNTSC = 0)
-            let mut phase:       usize = 0;
+            let mut phase: usize = 0;
             let mut signal_bits: usize = 0;
-            let mut last_col:    u32   = 0; // g_nLastColumnPixelNTSC
+            let mut last_col: u32 = 0; // g_nLastColumnPixelNTSC
 
             let py = y * 2;
             let mut px = 0usize;
@@ -638,28 +747,37 @@ impl NtscRenderer {
             // Hoist mutable pixel slice and constant row offsets outside the byte loop.
             // Previously these were reacquired on every byte (40× per scanline).
             let pixels = fb.pixels_mut();
-            let row0 = py       * FB_WIDTH;
+            let row0 = py * FB_WIDTH;
             let row1 = (py + 1) * FB_WIDTH;
 
             for bx in 0..40usize {
                 let addr = hgr_base + row_offset + bx;
-                let byte = main_ram.get(addr).copied().unwrap_or(0);
+                let byte = ram.get(addr).copied().unwrap_or(0);
 
                 // Pixel-double the 7 source bits to a 14-bit pattern.
                 // g_aPixelDoubleMaskHGR[m & 0x7F]: bit k → output bits 2k, 2k+1.
-                let bits7  = (byte & 0x7F) as usize;
+                let bits7 = (byte & 0x7F) as usize;
                 let mut bits14 = pdm[bits7] as u32;
 
                 // Hi-bit half-dot shift: shift all 14 bits left by 1 and fill
                 // bit 0 with the carry from the previous byte.
-                // g_nLastColumnPixelNTSC is always bit 13 of the un-shifted bits14
-                // (= second copy of source bit 6), regardless of hi-bit.
+                //
+                // Matches C++ updateScreenSingleHires40():
+                //   bits = g_aPixelDoubleMaskHGR[m & 0x7F];
+                //   if (m & 0x80) bits = (bits << 1) | g_nLastColumnPixelNTSC;
+                //
+                // After updatePixels() processes 14 bits via right-shift,
+                // g_nLastColumnPixelNTSC = bits & 1 (the leftover bit 14).
+                // For non-shifted bytes this is 0 (only 14 bits in the input).
+                // For shifted bytes this is bit 14 of (PDM << 1 | carry).
                 if byte & 0x80 != 0 {
                     bits14 = (bits14 << 1) | last_col;
+                    // After processing 14 bits, the leftover is bit 14
+                    last_col = (bits14 >> 14) & 1;
+                } else {
+                    // Non-shifted: only 14 bits, nothing left after processing
+                    last_col = 0;
                 }
-                // Carry for next byte = bit 13 of the pixel-double mask (before shift)
-                // = (byte & 0x40) >> 6  (source bit 6, the MSB of the 7 data bits)
-                last_col = ((byte >> 6) & 1) as u32;
 
                 // Feed 14 bits LSB-first into the NTSC signal chain.
                 for bit_idx in 0..14u32 {
@@ -674,6 +792,138 @@ impl NtscRenderer {
             }
         }
     }
+
+    // ── Monochrome hi-res ──────────────────────────────────────────────────
+
+    /// Render hi-res in clean monochrome (white on black).
+    /// Each set bit = white pixel, unset = black.  No NTSC artifact colours.
+    /// Produces perfectly readable output for all games.
+    pub fn render_hires_mono(
+        &self,
+        ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
+    ) {
+        // Use monochrome tint if set, otherwise default to white.
+        let fg = if let Some([tr, tg, tb]) = self.mono_tint {
+            0xFF000000 | ((tb as u32) << 16) | ((tg as u32) << 8) | (tr as u32)
+        } else {
+            0xFFFFFFFF
+        };
+        let bg = 0xFF000000u32;
+
+        for y in 0..scan_lines {
+            let row_offset = (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x0080 + (y >> 6) * 0x0028;
+
+            let py = y * 2;
+            let pixels = fb.pixels_mut();
+            let row0 = py * FB_WIDTH;
+            let row1 = (py + 1) * FB_WIDTH;
+
+            for bx in 0..40usize {
+                let addr = hgr_base + row_offset + bx;
+                let byte = ram.get(addr).copied().unwrap_or(0);
+                let base_px = bx * 14;
+
+                for bit in 0..7usize {
+                    let color = if byte & (1 << bit) != 0 { fg } else { bg };
+                    let px = base_px + bit * 2;
+                    pixels[row0 + px] = color;
+                    pixels[row0 + px + 1] = color;
+                    pixels[row1 + px] = color;
+                    pixels[row1 + px + 1] = color;
+                }
+            }
+        }
+    }
+
+    // ── Idealized hi-res colour ──────────────────────────────────────────────
+
+    /// Apple II standard artifact colours (ABGR format).
+    /// Bit 7 = 0: violet (odd pixel) / green (even pixel)
+    /// Bit 7 = 1: blue (odd pixel) / orange (even pixel)
+    const HGR_BLACK: u32 = 0xFF000000;
+    const HGR_WHITE: u32 = 0xFFFFFFFF;
+    const HGR_VIOLET: u32 = 0xFFDD22DD; // violet/purple
+    const HGR_GREEN: u32 = 0xFF11DD11; // green
+    const HGR_BLUE: u32 = 0xFFFF4411; // blue (ABGR)
+    const HGR_ORANGE: u32 = 0xFF0088FF; // orange (ABGR)
+
+    /// Render hi-res using simplified/idealized colour mapping.
+    ///
+    /// Maps each pixel to its artifact colour based on bit position and hi-bit,
+    /// then merges adjacent set bits to white.  Produces clean, readable output
+    /// without NTSC signal-chain artifacts.
+    ///
+    /// Matches AppleWin's `VT_COLOR_IDEALIZED` / `updateScreenHires40Simplified`.
+    pub fn render_hires_idealized(
+        &self,
+        ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
+    ) {
+        for y in 0..scan_lines {
+            let row_offset = (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x0080 + (y >> 6) * 0x0028;
+
+            let py = y * 2;
+            let pixels = fb.pixels_mut();
+            let row0 = py * FB_WIDTH;
+            let row1 = (py + 1) * FB_WIDTH;
+            let mut px = 0usize;
+            let mut prev_bit: bool = false;
+
+            for bx in 0..40usize {
+                let addr = hgr_base + row_offset + bx;
+                let byte = ram.get(addr).copied().unwrap_or(0);
+                let hi_bit = byte & 0x80 != 0;
+                // Artifact colour pair depends on hi-bit (palette group)
+                let (color_even, color_odd) = if hi_bit {
+                    (Self::HGR_ORANGE, Self::HGR_BLUE)
+                } else {
+                    (Self::HGR_GREEN, Self::HGR_VIOLET)
+                };
+
+                for bit in 0..7usize {
+                    let cur_bit = byte & (1 << bit) != 0;
+                    // Global pixel column (0-based across all 40 bytes × 7 bits)
+                    let col = bx * 7 + bit;
+                    let is_even = col & 1 == 0;
+
+                    // Two adjacent set bits merge to white
+                    let color = if cur_bit {
+                        if prev_bit {
+                            // Current AND previous both set → white pair
+                            // Also fix previous pixel to white
+                            let prev_px = px * 2 - 2;
+                            if prev_px < 560 {
+                                pixels[row0 + prev_px] = Self::HGR_WHITE;
+                                pixels[row0 + prev_px + 1] = Self::HGR_WHITE;
+                                pixels[row1 + prev_px] = Self::HGR_WHITE;
+                                pixels[row1 + prev_px + 1] = Self::HGR_WHITE;
+                            }
+                            Self::HGR_WHITE
+                        } else if is_even {
+                            color_even
+                        } else {
+                            color_odd
+                        }
+                    } else {
+                        Self::HGR_BLACK
+                    };
+
+                    // Each HGR pixel = 2 framebuffer pixels wide (280 → 560)
+                    pixels[row0 + px * 2] = color;
+                    pixels[row0 + px * 2 + 1] = color;
+                    pixels[row1 + px * 2] = color;
+                    pixels[row1 + px * 2 + 1] = color;
+                    px += 1;
+                    prev_bit = cur_bit;
+                }
+            }
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -684,13 +934,25 @@ fn text_addr(row: usize, col: usize) -> usize {
     (row % 8) * 0x80 + (row / 8) * 0x28 + col
 }
 
+/// Public helper: compute the offset within a 0x400-byte text page for a given row (0–23).
+/// Used by the RGB renderer.
+pub fn text_row_offset(row: usize) -> usize {
+    (row % 8) * 0x80 + (row / 8) * 0x28
+}
+
+/// Public helper: compute the HGR scanline offset within a 0x2000-byte HGR page.
+/// `y` is the scanline (0–191).
+pub fn hgr_row_offset(y: usize) -> usize {
+    (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x80 + (y >> 6) * 0x28
+}
+
 /// Blend each pair of adjacent rendered rows (colour vertical blend).
 ///
 /// Each Apple II scanline k renders to 2 identical FB rows (2k and 2k+1).
 /// Approximates AppleWin's updateFramebufferTVSingleScanline inbetween-row
 /// calculation: odd row = 50% of (row above + row below).
-fn apply_color_vertical_blend(fb: &mut Framebuffer) {
-    use crate::framebuffer::{FB_WIDTH, FB_HEIGHT};
+pub fn apply_color_vertical_blend(fb: &mut Framebuffer) {
+    use crate::framebuffer::{FB_HEIGHT, FB_WIDTH};
     let pixels = fb.pixels_mut();
     let mut y = 1usize;
     while y + 1 < FB_HEIGHT {
@@ -714,8 +976,8 @@ fn apply_color_vertical_blend(fb: &mut Framebuffer) {
 /// A in bits 31-24.
 fn apply_mono_tint(fb: &mut Framebuffer, tr: u8, tg: u8, tb: u8) {
     for pixel in fb.pixels_mut().iter_mut() {
-        let r =  *pixel        & 0xFF; // R in low byte (ABGR format)
-        let g = (*pixel >>  8) & 0xFF;
+        let r = *pixel & 0xFF; // R in low byte (ABGR format)
+        let g = (*pixel >> 8) & 0xFF;
         let b = (*pixel >> 16) & 0xFF;
         // BT.601 luma (integer, 0–255)
         let y = (r * 299 + g * 587 + b * 114) / 1000;
@@ -730,8 +992,8 @@ fn apply_mono_tint(fb: &mut Framebuffer, tr: u8, tg: u8, tb: u8) {
 ///
 /// Dims every odd framebuffer row to 50% brightness, matching a CRT's dark
 /// gaps between phosphor lines.
-fn apply_scanlines(fb: &mut Framebuffer) {
-    use crate::framebuffer::{FB_WIDTH, FB_HEIGHT};
+pub fn apply_scanlines(fb: &mut Framebuffer) {
+    use crate::framebuffer::{FB_HEIGHT, FB_WIDTH};
     let pixels = fb.pixels_mut();
     for y in (1..FB_HEIGHT).step_by(2) {
         let row = &mut pixels[y * FB_WIDTH..(y + 1) * FB_WIDTH];
@@ -743,5 +1005,247 @@ fn apply_scanlines(fb: &mut Framebuffer) {
             // This is format-agnostic across ARGB and ABGR.
             *px = 0xFF000000 | ((*px & 0x00FEFEFE) >> 1);
         }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::framebuffer::{FB_HEIGHT, FB_WIDTH};
+    use apple2_core::bus::MemMode;
+
+    /// Helper: create a renderer with a blank char ROM.
+    fn make_renderer() -> NtscRenderer {
+        // 128 chars × 8 rows = 1024 bytes; fill with a simple pattern:
+        // every glyph row is 0xFF (all pixels lit) for easy verification.
+        let char_rom_data = vec![0xFEu8; 1024]; // 0xFE = bits 7-1 set (7 pixels on)
+        NtscRenderer::new(CharRom::new(char_rom_data), false)
+    }
+
+    #[test]
+    fn text_addr_layout() {
+        // Row 0, col 0 → offset 0
+        assert_eq!(text_addr(0, 0), 0);
+        // Row 0, col 1 → offset 1
+        assert_eq!(text_addr(0, 1), 1);
+        // Row 1, col 0 → offset 0x80
+        assert_eq!(text_addr(1, 0), 0x80);
+        // Row 8, col 0 → offset 0x28  (second group of 8 rows)
+        assert_eq!(text_addr(8, 0), 0x28);
+        // Row 16, col 0 → offset 0x50  (third group)
+        assert_eq!(text_addr(16, 0), 0x50);
+    }
+
+    #[test]
+    fn ntsc_tables_generate_does_not_panic() {
+        let _tables = NtscTables::generate();
+    }
+
+    #[test]
+    fn ntsc_tables_black_and_white() {
+        let tables = NtscTables::generate();
+        // Signal 0x000 (all zeros) should produce black (or near-black) for any phase
+        for phase in 0..4 {
+            let color = tables.hue_color_tv[phase][0];
+            let r = color & 0xFF;
+            let g = (color >> 8) & 0xFF;
+            let b = (color >> 16) & 0xFF;
+            assert!(
+                r < 10 && g < 10 && b < 10,
+                "phase {phase}: expected near-black, got r={r} g={g} b={b}"
+            );
+        }
+        // Signal 0xFFF (all ones) should produce white (or near-white) for any phase
+        for phase in 0..4 {
+            let color = tables.hue_color_tv[phase][0xFFF];
+            let r = color & 0xFF;
+            let g = (color >> 8) & 0xFF;
+            let b = (color >> 16) & 0xFF;
+            assert!(
+                r > 240 && g > 240 && b > 240,
+                "phase {phase}: expected near-white, got r={r} g={g} b={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_double_mask_basic() {
+        let tables = NtscTables::generate();
+        // Byte 0 → mask 0
+        assert_eq!(tables.pixel_double_mask[0], 0);
+        // Byte 1 (bit 0 set) → bits 0,1 set = 0x0003
+        assert_eq!(tables.pixel_double_mask[1], 0x0003);
+        // Byte 0x7F (all 7 bits) → all 14 bits = 0x3FFF
+        assert_eq!(tables.pixel_double_mask[0x7F], 0x3FFF);
+    }
+
+    #[test]
+    fn render_text40_fills_framebuffer() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        // Fill text page with normal 'A' (0xC1)
+        let mut text_page = [0xA0u8; 0x400]; // normal spaces
+        text_page[text_addr(0, 0)] = 0xC1; // 'A' at row 0, col 0
+
+        renderer.render_text40_rows(&text_page, 0, 1, false, &mut fb);
+
+        // The char ROM is all-pixels-on (0xFE), so the 'A' glyph should produce
+        // white pixels (fg=0xFFFFFFFF) in the cell area.
+        // Row 0, col 0 → pixel (0,0) should be white (fg).
+        let px = fb.pixels()[0]; // (x=0, y=0)
+        assert_eq!(px, 0xFFFFFFFF, "expected white fg pixel at (0,0)");
+    }
+
+    #[test]
+    fn render_lores_rows_fills_correct_colors() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut text_page = [0u8; 0x400];
+        // Row 0, col 0: lo nibble=1 (Deep Red), hi nibble=2 (Dark Blue) → byte 0x21
+        text_page[text_addr(0, 0)] = 0x21;
+
+        renderer.render_lores_rows(&text_page, 0, 1, &mut fb);
+
+        // Top half: should be LORES_PALETTE[1] at pixel (0,0)
+        let top_px = fb.pixels()[0];
+        assert_eq!(top_px, LORES_PALETTE[1]);
+        // Bottom half: should be LORES_PALETTE[2] at pixel (0, 8)
+        let bot_px = fb.pixels()[8 * FB_WIDTH];
+        assert_eq!(bot_px, LORES_PALETTE[2]);
+    }
+
+    #[test]
+    fn render_full_frame_text_mode() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let main_ram = [0xA0u8; 65536]; // all normal spaces
+        let aux_ram = [0xA0u8; 65536];
+        let mode = MemMode::empty(); // text mode (no MF_GRAPHICS)
+
+        renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+
+        // Text mode with blank char ROM and normal spaces should produce
+        // all-black pixels (bg=0xFF000000) since space glyph has all pixels on
+        // but the char is normal mode (fg=white, bg=black) and the ROM has 0xFE
+        // which has the high bit set for each row.
+        // Actually with 0xFE (bit 7 set, bit pattern 11111110), 6 of 7 pixels
+        // per glyph will be white.  Just check the framebuffer was written.
+        let non_default = fb.pixels().iter().filter(|&&p| p != 0xFF000000).count();
+        // With all-0xFE glyphs, most pixels will be white
+        assert!(non_default > 0, "framebuffer should have non-black pixels");
+    }
+
+    #[test]
+    fn render_hires_mode() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut main_ram = [0u8; 65536];
+        let aux_ram = [0u8; 65536];
+        // Set hires page 1 to all white (0x7F = 7 pixels on, hi-bit clear)
+        for byte in &mut main_ram[0x2000..0x4000] {
+            *byte = 0x7F;
+        }
+        let mode = MemMode::MF_GRAPHICS | MemMode::MF_HIRES;
+
+        renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+
+        // With all-white hires data, the NTSC tables should produce near-white pixels
+        // Check a pixel in the middle of the screen
+        let px = fb.pixels()[96 * FB_WIDTH + 280];
+        let r = px & 0xFF;
+        let g = (px >> 8) & 0xFF;
+        let b = (px >> 16) & 0xFF;
+        assert!(
+            r > 200 && g > 200 && b > 200,
+            "expected near-white in all-white hires, got r={r} g={g} b={b}"
+        );
+    }
+
+    #[test]
+    fn render_mixed_mode_has_text_bottom() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut main_ram = [0u8; 65536];
+        let aux_ram = [0u8; 65536];
+        // Hires page: all black (0x00)
+        // Text page row 20, col 0: put a visible character
+        let text_base = 0x0400usize;
+        main_ram[text_base + text_addr(20, 0)] = 0xC1; // 'A'
+        let mode = MemMode::MF_GRAPHICS | MemMode::MF_HIRES | MemMode::MF_MIXED;
+
+        renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+
+        // Row 20 in text is at framebuffer y = 20*16 = 320.
+        // With our all-on char ROM, the 'A' glyph should produce white pixels.
+        let px = fb.pixels()[320 * FB_WIDTH];
+        assert_eq!(px, 0xFFFFFFFF, "mixed mode text area should have white fg");
+    }
+
+    #[test]
+    fn render_dlores_fills_correct_colors() {
+        let renderer = make_renderer();
+        let mut fb = Framebuffer::new();
+        let mut main_ram = [0u8; 65536];
+        let mut aux_ram = [0u8; 65536];
+        let text_base = 0x0400usize;
+        // Row 0, phys_col 0: aux byte = 0x34 (lo=4, hi=3), main byte = 0x56 (lo=6, hi=5)
+        aux_ram[text_base + text_addr(0, 0)] = 0x34;
+        main_ram[text_base + text_addr(0, 0)] = 0x56;
+
+        renderer.render_dlores(&main_ram, &aux_ram, text_base, 0, 1, &mut fb);
+
+        // Screen col 0 (aux): lo nibble=4 → LORES_PALETTE[4] at top, hi nibble=3 at bottom
+        let top0 = fb.pixels()[0]; // (0,0)
+        assert_eq!(top0, LORES_PALETTE[4]);
+        let bot0 = fb.pixels()[8 * FB_WIDTH]; // (0,8)
+        assert_eq!(bot0, LORES_PALETTE[3]);
+
+        // Screen col 1 (main): lo nibble=6, hi nibble=5
+        let top1 = fb.pixels()[7]; // (7,0) — screen col 1 starts at x=7
+        assert_eq!(top1, LORES_PALETTE[6]);
+        let bot1 = fb.pixels()[8 * FB_WIDTH + 7]; // (7,8)
+        assert_eq!(bot1, LORES_PALETTE[5]);
+    }
+
+    #[test]
+    fn apply_scanlines_dims_odd_rows() {
+        let mut fb = Framebuffer::new();
+        // Set all pixels to known value
+        fb.clear(0xFF808080);
+        apply_scanlines(&mut fb);
+
+        // Even rows should be unchanged
+        assert_eq!(fb.pixels()[0], 0xFF808080);
+        // Odd rows should be dimmed to ~half: (0x80 & 0xFE) >> 1 = 0x40
+        assert_eq!(fb.pixels()[FB_WIDTH], 0xFF404040);
+    }
+
+    #[test]
+    fn char_rom_glyph_returns_correct_data() {
+        let data = vec![0xAAu8; 1024];
+        let rom = CharRom::new(data);
+        let glyph = rom.glyph(0);
+        assert_eq!(glyph, [0xAA; 8]);
+        let glyph_last = rom.glyph(127);
+        assert_eq!(glyph_last, [0xAA; 8]);
+    }
+
+    #[test]
+    fn char_rom_glyph_out_of_range() {
+        // Empty ROM should return zeroes
+        let rom = CharRom::new(vec![]);
+        let glyph = rom.glyph(0);
+        assert_eq!(glyph, [0u8; 8]);
+    }
+
+    #[test]
+    fn framebuffer_set_pixel_bounds_check() {
+        let mut fb = Framebuffer::new();
+        // Out-of-bounds writes should be silently ignored
+        fb.set_pixel(FB_WIDTH, 0, 0xFFFFFFFF);
+        fb.set_pixel(0, FB_HEIGHT, 0xFFFFFFFF);
+        // No panic = pass
     }
 }

@@ -32,21 +32,21 @@ pub enum BreakpointKind {
 /// A single breakpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Breakpoint {
-    pub kind:    BreakpointKind,
+    pub kind: BreakpointKind,
     pub address: u16,
-    pub length:  u16,  // address range length (1 = single address)
+    pub length: u16, // address range length (1 = single address)
     pub enabled: bool,
-    pub label:   Option<String>,
+    pub label: Option<String>,
 }
 
 impl Breakpoint {
     pub fn at(addr: u16) -> Self {
         Self {
-            kind:    BreakpointKind::Opcode,
+            kind: BreakpointKind::Opcode,
             address: addr,
-            length:  1,
+            length: 1,
             enabled: true,
-            label:   None,
+            label: None,
         }
     }
 }
@@ -101,5 +101,34 @@ impl BreakpointManager {
                 && addr >= bp.address
                 && addr < bp.address.saturating_add(bp.length)
         })
+    }
+
+    /// Clear all breakpoints.
+    pub fn clear_all(&mut self) {
+        self.breakpoints.clear();
+    }
+
+    /// Enable or disable a breakpoint by index.
+    pub fn set_enabled(&mut self, index: usize, enabled: bool) {
+        if let Some(bp) = self.breakpoints.get_mut(index) {
+            bp.enabled = enabled;
+        }
+    }
+
+    /// Toggle a breakpoint's enabled state.
+    pub fn toggle(&mut self, index: usize) {
+        if let Some(bp) = self.breakpoints.get_mut(index) {
+            bp.enabled = !bp.enabled;
+        }
+    }
+
+    /// Number of breakpoints.
+    pub fn len(&self) -> usize {
+        self.breakpoints.len()
+    }
+
+    /// Whether there are no breakpoints.
+    pub fn is_empty(&self) -> bool {
+        self.breakpoints.is_empty()
     }
 }

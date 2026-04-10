@@ -8,7 +8,7 @@
 //!
 //! Matches the dimensions used by `GetFrameBuffer()` in `source/Video.cpp`.
 
-pub const FB_WIDTH:  usize = 560;
+pub const FB_WIDTH: usize = 560;
 pub const FB_HEIGHT: usize = 384;
 pub const FB_PIXELS: usize = FB_WIDTH * FB_HEIGHT;
 
@@ -44,12 +44,7 @@ impl Framebuffer {
     #[inline]
     pub fn pixels_as_bytes(&self) -> &[u8] {
         // SAFETY: [u32; N] has the same size as [u8; N*4] with no padding.
-        unsafe {
-            std::slice::from_raw_parts(
-                self.pixels.as_ptr() as *const u8,
-                FB_PIXELS * 4,
-            )
-        }
+        unsafe { std::slice::from_raw_parts(self.pixels.as_ptr() as *const u8, FB_PIXELS * 4) }
     }
 
     pub fn clear(&mut self, argb: u32) {

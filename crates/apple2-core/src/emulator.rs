@@ -3,11 +3,11 @@
 //! Collapses all ~52 globals from the C++ codebase into one owned struct.
 //! Mirrors the architecture section "Global State → Owned State" in the plan.
 
-use serde::{Deserialize, Serialize};
 use crate::bus::{Bus, BusSnapshot};
 use crate::cpu::cpu6502::{Cpu, CpuSnapshot};
 use crate::cpu::dispatch;
 use crate::model::{Apple2Model, CpuType};
+use serde::{Deserialize, Serialize};
 
 /// Run mode, matching `g_nAppMode` / `AppMode_e` in the C++ source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -25,10 +25,10 @@ pub enum AppMode {
 
 /// The complete emulator state.
 pub struct Emulator {
-    pub cpu:   Cpu,
-    pub bus:   Bus,
+    pub cpu: Cpu,
+    pub bus: Bus,
     pub model: Apple2Model,
-    pub mode:  AppMode,
+    pub mode: AppMode,
 }
 
 impl Emulator {
@@ -59,6 +59,22 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
         while self.cpu.cycles < target {
+            // 65C02 WAI: CPU is halted until an interrupt arrives.
+            // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
+            if self.cpu.waiting {
+                if self.bus.irq_line || (self.cpu.irq_pending & 0x02) != 0 {
+                    // Interrupt arrived — wake up and resume normal execution.
+                    self.cpu.waiting = false;
+                } else {
+                    // Still waiting — consume one cycle and continue polling.
+                    self.cpu.cycles += 1;
+                    if self.cpu.cycles >= next_update {
+                        self.bus.cards.update_all(self.cpu.cycles);
+                        next_update += 17_030;
+                    }
+                    continue;
+                }
+            }
             // Snapshot the IRQ line *before* executing the instruction so we can
             // detect an edge (IRQ asserted during this opcode's last cycle).
             let irq_before = self.bus.irq_line;
@@ -85,9 +101,7 @@ impl Emulator {
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
             // the last cycle of this opcode → defer by one opcode (if I flag is clear).
-            if !irq_before && self.bus.irq_line
-                && !self.cpu.flags.contains(super::cpu::Flags::I)
-            {
+            if !irq_before && self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
                 // Clear pending so we don't take it immediately next opcode.
                 self.cpu.irq_pending &= !0x01;
                 self.cpu.irq_defer = true;
@@ -106,11 +120,28 @@ impl Emulator {
     }
 
     /// Hard reset (power cycle).
+    ///
+    /// `mem_init_pattern` selects the RAM fill pattern (0–7).
+    /// The C++ AppleWin calls these "Memory Initialization Patterns" (MIP).
+    pub fn reset_with_pattern(&mut self, power_cycle: bool, mem_init_pattern: u8) {
+        if power_cycle {
+            init_memory_pattern(&mut self.bus.main_ram, mem_init_pattern);
+            init_memory_pattern(&mut self.bus.aux_ram, mem_init_pattern);
+        }
+        self.finish_reset(power_cycle);
+    }
+
+    /// Hard reset (power cycle) — pattern 0 (all zeros).
     pub fn reset(&mut self, power_cycle: bool) {
         if power_cycle {
             self.bus.main_ram.fill(0);
             self.bus.aux_ram.fill(0);
         }
+        self.finish_reset(power_cycle);
+    }
+
+    /// Common reset tail shared by `reset()` and `reset_with_pattern()`.
+    fn finish_reset(&mut self, power_cycle: bool) {
         // Reset memory soft-switches so the ROM is mapped at $D000-$FFFF before
         // reading the reset vector.  On real hardware the ROM is always accessible
         // during the vector fetch regardless of language-card state.
@@ -123,22 +154,78 @@ impl Emulator {
     }
 }
 
+// ── Memory Initialization Patterns ───────────────────────────────────────────
+
+/// Fill 64K RAM with one of the 8 Memory Initialization Patterns (MIP)
+/// from the C++ AppleWin `Memory.cpp`.  Pattern 0 is the default (all zeros).
+///
+/// These patterns emulate the semi-random power-on state of real DRAM chips.
+/// Some copy-protected software depends on specific patterns to detect
+/// "cold boot" vs "warm boot" or to seed random numbers.
+pub fn init_memory_pattern(ram: &mut [u8; 65536], pattern: u8) {
+    match pattern {
+        0 => ram.fill(0x00),
+        1 => ram.fill(0xFF),
+        2 => {
+            // Alternating 00/FF per page (even pages = 0x00, odd pages = 0xFF).
+            for page in 0..256 {
+                let fill = if page & 1 == 0 { 0x00 } else { 0xFF };
+                let start = page * 256;
+                ram[start..start + 256].fill(fill);
+            }
+        }
+        3 => {
+            // Alternating FF/00 per page (even pages = 0xFF, odd pages = 0x00).
+            for page in 0..256 {
+                let fill = if page & 1 == 0 { 0xFF } else { 0x00 };
+                let start = page * 256;
+                ram[start..start + 256].fill(fill);
+            }
+        }
+        4 => {
+            // Alternating 00/FF per 128-byte half-page.
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = if (i >> 7) & 1 == 0 { 0x00 } else { 0xFF };
+            }
+        }
+        5 => {
+            // Alternating FF/00 per 128-byte half-page.
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = if (i >> 7) & 1 == 0 { 0xFF } else { 0x00 };
+            }
+        }
+        6 => {
+            // Pseudo-random pattern seeded from address (matches MIP6 in AppleWin).
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = ((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            }
+        }
+        7 => {
+            // Inverse pseudo-random.
+            for (i, byte) in ram.iter_mut().enumerate() {
+                *byte = !((i as u16).wrapping_mul(0x0101) >> 8) as u8;
+            }
+        }
+        _ => ram.fill(0x00),
+    }
+}
+
 /// Full emulator snapshot for save states.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmulatorSnapshot {
     pub version: u32,
-    pub model:   Apple2Model,
-    pub cpu:     CpuSnapshot,
-    pub memory:  BusSnapshot,
+    pub model: Apple2Model,
+    pub cpu: CpuSnapshot,
+    pub memory: BusSnapshot,
 }
 
 impl Emulator {
     pub fn take_snapshot(&self) -> EmulatorSnapshot {
         EmulatorSnapshot {
             version: 1,
-            model:   self.model,
-            cpu:     CpuSnapshot::from(&self.cpu),
-            memory:  self.bus.take_snapshot(),
+            model: self.model,
+            cpu: CpuSnapshot::from(&self.cpu),
+            memory: self.bus.take_snapshot(),
         }
     }
 

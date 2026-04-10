@@ -9,8 +9,63 @@ static APPLE2E_ROM: &[u8] = include_bytes!("../roms/apple2e_enhanced.rom");
 #[cfg(feature = "gui")]
 mod config;
 
-fn make_emulator(machine: Apple2Model, cpu: CpuType) -> Emulator {
-    let rom = APPLE2E_ROM.to_vec();
+fn make_emulator(
+    machine: Apple2Model,
+    cpu: CpuType,
+    custom_rom: &Option<String>,
+    custom_f8_rom: &Option<String>,
+) -> Emulator {
+    let mut rom = if let Some(path) = custom_rom {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 16384 || data.len() == 12288 => {
+                // Pad 12K ROMs to 16K (add 4K of 0xFF at the start).
+                if data.len() == 12288 {
+                    let mut padded = vec![0xFF; 4096];
+                    padded.extend_from_slice(&data);
+                    padded
+                } else {
+                    data
+                }
+            }
+            Ok(data) => {
+                eprintln!(
+                    "Custom ROM wrong size ({} bytes, expected 12K or 16K), using default",
+                    data.len()
+                );
+                APPLE2E_ROM.to_vec()
+            }
+            Err(e) => {
+                eprintln!("Failed to load custom ROM '{}': {}, using default", path, e);
+                APPLE2E_ROM.to_vec()
+            }
+        }
+    } else {
+        APPLE2E_ROM.to_vec()
+    };
+
+    // Patch $F800–$FFFF with a custom F8 ROM (2K) if configured.
+    if let Some(path) = custom_f8_rom {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 2048 => {
+                // F8 ROM goes at offset 0x3800 in the 16K ROM image
+                // ($F800 - $C000 = $3800 = 14336).
+                let offset = 0x3800;
+                if rom.len() >= offset + 2048 {
+                    rom[offset..offset + 2048].copy_from_slice(&data);
+                }
+            }
+            Ok(data) => {
+                eprintln!(
+                    "Custom F8 ROM wrong size ({} bytes, expected 2K)",
+                    data.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to load custom F8 ROM '{}': {}", path, e);
+            }
+        }
+    }
+
     Emulator::new(rom, machine, cpu)
     // Card insertion is handled by apply_slot_cards() in the gui module.
 }
@@ -21,7 +76,12 @@ fn main() {
     #[cfg(feature = "gui")]
     {
         let cfg = config::Config::load();
-        let emu = make_emulator(cfg.machine_type, cfg.cpu_type);
+        let emu = make_emulator(
+            cfg.machine_type,
+            cfg.cpu_type,
+            &cfg.custom_rom_path,
+            &cfg.custom_f8_rom_path,
+        );
         // Mode stays as AppMode::Logo — the GUI will show the logo screen
         // and switch to Running on the first key press.
         println!(
@@ -33,7 +93,7 @@ fn main() {
 
     #[cfg(not(feature = "gui"))]
     {
-        let mut emu = make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02);
+        let mut emu = make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02, &None, &None);
         emu.mode = apple2_core::emulator::AppMode::Running;
         headless::run(&mut emu);
     }
@@ -47,7 +107,10 @@ mod headless {
     pub fn run(emu: &mut Emulator) {
         const ONE_SECOND: u64 = 1_023_000;
         let executed = emu.execute(ONE_SECOND);
-        println!("Headless — executed {} cycles, PC=${:04X}", executed, emu.cpu.pc);
+        println!(
+            "Headless — executed {} cycles, PC=${:04X}",
+            executed, emu.cpu.pc
+        );
     }
 }
 
@@ -61,18 +124,21 @@ mod gui {
         ntsc::{CharRom, NtscRenderer},
     };
     use eframe::egui::{
-        self, Align, Color32, ColorImage, FontId, Key, Layout, Pos2, Rect, RichText,
-        Sense, Stroke, TextureOptions, Vec2,
+        self, Align, Color32, ColorImage, FontId, Key, Layout, Pos2, Rect, RichText, Sense, Stroke,
+        TextureOptions, Vec2,
     };
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use crate::config::{
-        card_name, Config, cpu_name, joystick_type_name, model_name, video_type_name,
-        VideoType, ALL_JOYSTICK_TYPES, ALL_VIDEO_TYPES, IMPLEMENTED_CARDS,
+        ALL_JOYSTICK_TYPES, ALL_VIDEO_TYPES, Config, IMPLEMENTED_CARDS, VideoType, card_name,
+        cpu_name, joystick_type_name, model_name, video_type_name,
     };
-    use apple2_core::{card::CardType, model::{Apple2Model, CpuType}};
+    use apple2_core::{
+        card::CardType,
+        model::{Apple2Model, CpuType},
+    };
 
     // ── Dimensions ───────────────────────────────────────────────────────────
 
@@ -85,29 +151,31 @@ mod gui {
 
     // ── Windows 9x-style palette for chrome ──────────────────────────────────
 
-    const WIN_FACE:    Color32 = Color32::from_rgb(212, 208, 200);
-    const WIN_LIGHT:   Color32 = Color32::from_rgb(255, 255, 255);
+    const WIN_FACE: Color32 = Color32::from_rgb(212, 208, 200);
+    const WIN_LIGHT: Color32 = Color32::from_rgb(255, 255, 255);
     const WIN_HILIGHT: Color32 = Color32::from_rgb(212, 208, 200);
-    const WIN_SHADOW:  Color32 = Color32::from_rgb(128, 128, 128);
-    const WIN_DSHADOW: Color32 = Color32::from_rgb(64,  64,  64);
+    const WIN_SHADOW: Color32 = Color32::from_rgb(128, 128, 128);
+    const WIN_DSHADOW: Color32 = Color32::from_rgb(64, 64, 64);
 
     // ── Embedded toolbar BMP icons ────────────────────────────────────────────
 
-    static BMP_HELP:  &[u8] = include_bytes!("../icons/HELP.BMP");
-    static BMP_RUN:   &[u8] = include_bytes!("../icons/RUN.BMP");
-    static BMP_D1:    &[u8] = include_bytes!("../icons/DRIVE1.BMP");
-    static BMP_D2:    &[u8] = include_bytes!("../icons/DRIVE2.BMP");
-    static BMP_SWAP:  &[u8] = include_bytes!("../icons/DriveSwap.bmp");
-    static BMP_FULL:  &[u8] = include_bytes!("../icons/FULLSCR.BMP");
+    static BMP_HELP: &[u8] = include_bytes!("../icons/HELP.BMP");
+    static BMP_RUN: &[u8] = include_bytes!("../icons/RUN.BMP");
+    static BMP_D1: &[u8] = include_bytes!("../icons/DRIVE1.BMP");
+    static BMP_D2: &[u8] = include_bytes!("../icons/DRIVE2.BMP");
+    static BMP_SWAP: &[u8] = include_bytes!("../icons/DriveSwap.bmp");
+    static BMP_FULL: &[u8] = include_bytes!("../icons/FULLSCR.BMP");
     static BMP_DEBUG: &[u8] = include_bytes!("../icons/DEBUG.BMP");
     static BMP_SETUP: &[u8] = include_bytes!("../icons/SETUP.BMP");
-    static BMP_LOGO:  &[u8] = include_bytes!("../icons/ApplewinLogo.bmp");
+    static BMP_LOGO: &[u8] = include_bytes!("../icons/ApplewinLogo.bmp");
 
     /// Decode a Windows indexed-colour BMP (4bpp or 8bpp) to RGBA8888 pixels.
     ///
     /// Cyan (0, 255, 255) is treated as fully transparent (chroma-key).
     fn decode_bmp_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-        if data.len() < 54 || &data[0..2] != b"BM" { return None; }
+        if data.len() < 54 || &data[0..2] != b"BM" {
+            return None;
+        }
         let pixel_offset = u32::from_le_bytes(data[10..14].try_into().ok()?) as usize;
         let w = i32::from_le_bytes(data[18..22].try_into().ok()?) as usize;
         let h_raw = i32::from_le_bytes(data[22..26].try_into().ok()?);
@@ -116,14 +184,28 @@ mod gui {
         let colors_used = u32::from_le_bytes(data[46..50].try_into().ok()?) as usize;
 
         let num_colors: usize = match bpp {
-            4 => if colors_used > 0 { colors_used } else { 16 },
-            8 => if colors_used > 0 { colors_used } else { 256 },
+            4 => {
+                if colors_used > 0 {
+                    colors_used
+                } else {
+                    16
+                }
+            }
+            8 => {
+                if colors_used > 0 {
+                    colors_used
+                } else {
+                    256
+                }
+            }
             _ => return None,
         };
 
         // Build palette: BMP stores RGBQUAD as (blue, green, red, reserved)
         let pal_start = 54usize;
-        if data.len() < pal_start + num_colors * 4 { return None; }
+        if data.len() < pal_start + num_colors * 4 {
+            return None;
+        }
         let mut palette = Vec::with_capacity(num_colors);
         for i in 0..num_colors {
             let b = data[pal_start + i * 4];
@@ -147,16 +229,24 @@ mod gui {
                 let idx: usize = match bpp {
                     4 => {
                         let byte = *data.get(src_off + x / 2)?;
-                        if x % 2 == 0 { (byte >> 4) as usize } else { (byte & 0xF) as usize }
+                        if x % 2 == 0 {
+                            (byte >> 4) as usize
+                        } else {
+                            (byte & 0xF) as usize
+                        }
                     }
                     8 => *data.get(src_off + x)? as usize,
                     _ => return None,
                 };
                 let (r, g, b) = *palette.get(idx)?;
                 // Cyan (0, 255, 255) is the chroma-key colour used by Win32 toolbar
-                let a = if r == 0 && g == 255 && b == 255 { 0u8 } else { 255u8 };
+                let a = if r == 0 && g == 255 && b == 255 {
+                    0u8
+                } else {
+                    255u8
+                };
                 let dst = (row * w + x) * 4;
-                rgba[dst]     = r;
+                rgba[dst] = r;
                 rgba[dst + 1] = g;
                 rgba[dst + 2] = b;
                 rgba[dst + 3] = a;
@@ -167,13 +257,17 @@ mod gui {
 
     /// Decode a 24bpp Windows BMP to RGBA8888 pixels.
     fn decode_bmp24_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-        if data.len() < 54 || &data[0..2] != b"BM" { return None; }
+        if data.len() < 54 || &data[0..2] != b"BM" {
+            return None;
+        }
         let pixel_offset = u32::from_le_bytes(data[10..14].try_into().ok()?) as usize;
         let w = i32::from_le_bytes(data[18..22].try_into().ok()?) as usize;
         let h_raw = i32::from_le_bytes(data[22..26].try_into().ok()?);
         let h = h_raw.unsigned_abs() as usize;
         let bpp = u16::from_le_bytes(data[28..30].try_into().ok()?);
-        if bpp != 24 { return None; }
+        if bpp != 24 {
+            return None;
+        }
         let flip = h_raw > 0;
         let row_stride = (w * 3).div_ceil(4) * 4;
         let mut rgba = vec![0u8; w * h * 4];
@@ -185,7 +279,7 @@ mod gui {
                 let g = *data.get(src_off + x * 3 + 1)?;
                 let r = *data.get(src_off + x * 3 + 2)?;
                 let dst = (row * w + x) * 4;
-                rgba[dst]     = r;
+                rgba[dst] = r;
                 rgba[dst + 1] = g;
                 rgba[dst + 2] = b;
                 rgba[dst + 3] = 255;
@@ -208,11 +302,11 @@ mod gui {
     fn init_audio() -> Option<(u32, AudioBuf, cpal::Stream)> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-        let host   = cpal::default_host();
+        let host = cpal::default_host();
         let device = host.default_output_device()?;
         let config = device.default_output_config().ok()?;
-        let sr     = config.sample_rate().0;
-        let ch     = config.channels() as usize;
+        let sr = config.sample_rate().0;
+        let ch = config.channels() as usize;
 
         let buf: AudioBuf = Arc::new(Mutex::new(VecDeque::with_capacity(8192)));
         let buf2 = buf.clone();
@@ -220,50 +314,56 @@ mod gui {
         let err_fn = |e: cpal::StreamError| eprintln!("audio stream error: {e}");
 
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                device.build_output_stream(
+            cpal::SampleFormat::F32 => device
+                .build_output_stream(
                     &config.into(),
                     move |data: &mut [f32], _| {
                         let mut q = buf2.lock().unwrap();
                         for frame in data.chunks_mut(ch) {
                             let s = q.pop_front().unwrap_or(0.0);
-                            for c in frame.iter_mut() { *c = s; }
+                            for c in frame.iter_mut() {
+                                *c = s;
+                            }
                         }
                     },
                     err_fn,
                     None,
-                ).ok()?
-            }
-            cpal::SampleFormat::I16 => {
-                device.build_output_stream(
+                )
+                .ok()?,
+            cpal::SampleFormat::I16 => device
+                .build_output_stream(
                     &config.into(),
                     move |data: &mut [i16], _| {
                         let mut q = buf2.lock().unwrap();
                         for frame in data.chunks_mut(ch) {
                             let s = q.pop_front().unwrap_or(0.0);
                             let v = (s * i16::MAX as f32) as i16;
-                            for c in frame.iter_mut() { *c = v; }
+                            for c in frame.iter_mut() {
+                                *c = v;
+                            }
                         }
                     },
                     err_fn,
                     None,
-                ).ok()?
-            }
-            cpal::SampleFormat::U16 => {
-                device.build_output_stream(
+                )
+                .ok()?,
+            cpal::SampleFormat::U16 => device
+                .build_output_stream(
                     &config.into(),
                     move |data: &mut [u16], _| {
                         let mut q = buf2.lock().unwrap();
                         for frame in data.chunks_mut(ch) {
                             let s = q.pop_front().unwrap_or(0.0);
                             let v = ((s + 1.0) * 0.5 * u16::MAX as f32) as u16;
-                            for c in frame.iter_mut() { *c = v; }
+                            for c in frame.iter_mut() {
+                                *c = v;
+                            }
                         }
                     },
                     err_fn,
                     None,
-                ).ok()?
-            }
+                )
+                .ok()?,
             _ => return None,
         };
 
@@ -273,12 +373,12 @@ mod gui {
 
     /// All 8 toolbar icon textures, pre-loaded at startup.
     struct Icons {
-        help:  Option<egui::TextureHandle>,
-        run:   Option<egui::TextureHandle>,
-        d1:    Option<egui::TextureHandle>,
-        d2:    Option<egui::TextureHandle>,
-        swap:  Option<egui::TextureHandle>,
-        full:  Option<egui::TextureHandle>,
+        help: Option<egui::TextureHandle>,
+        run: Option<egui::TextureHandle>,
+        d1: Option<egui::TextureHandle>,
+        d2: Option<egui::TextureHandle>,
+        swap: Option<egui::TextureHandle>,
+        full: Option<egui::TextureHandle>,
         debug: Option<egui::TextureHandle>,
         setup: Option<egui::TextureHandle>,
     }
@@ -287,7 +387,7 @@ mod gui {
         fn load(ctx: &egui::Context) -> Self {
             let opts = TextureOptions {
                 magnification: egui::TextureFilter::Nearest,
-                minification:  egui::TextureFilter::Nearest,
+                minification: egui::TextureFilter::Nearest,
             };
             let load = |name: &str, raw: &[u8]| -> Option<egui::TextureHandle> {
                 let (w, h, rgba) = decode_bmp_rgba(raw)?;
@@ -295,12 +395,12 @@ mod gui {
                 Some(ctx.load_texture(name, img, opts))
             };
             Self {
-                help:  load("icon_help",  BMP_HELP),
-                run:   load("icon_run",   BMP_RUN),
-                d1:    load("icon_d1",    BMP_D1),
-                d2:    load("icon_d2",    BMP_D2),
-                swap:  load("icon_swap",  BMP_SWAP),
-                full:  load("icon_full",  BMP_FULL),
+                help: load("icon_help", BMP_HELP),
+                run: load("icon_run", BMP_RUN),
+                d1: load("icon_d1", BMP_D1),
+                d2: load("icon_d2", BMP_D2),
+                swap: load("icon_swap", BMP_SWAP),
+                full: load("icon_full", BMP_FULL),
                 debug: load("icon_debug", BMP_DEBUG),
                 setup: load("icon_setup", BMP_SETUP),
             }
@@ -310,51 +410,63 @@ mod gui {
     // ── App state ─────────────────────────────────────────────────────────────
 
     struct EmulatorApp {
-        emu:              Emulator,
-        renderer:         NtscRenderer,
-        fb:               Framebuffer,
-        pixel_buf:        Vec<u8>,
-        texture:          Option<egui::TextureHandle>,
-        logo_texture:     Option<egui::TextureHandle>,
-        icons:            Option<Icons>,
-        frame_no:         u32,
-        disk1:            Option<PathBuf>,
-        disk2:            Option<PathBuf>,
-        fullscreen:       bool,
-        show_about:       bool,
+        emu: Emulator,
+        renderer: NtscRenderer,
+        fb: Framebuffer,
+        pixel_buf: Vec<u8>,
+        texture: Option<egui::TextureHandle>,
+        logo_texture: Option<egui::TextureHandle>,
+        icons: Option<Icons>,
+        frame_no: u32,
+        disk1: Option<PathBuf>,
+        disk2: Option<PathBuf>,
+        fullscreen: bool,
+        show_about: bool,
         // Configuration
-        config:           Config,
-        show_settings:    bool,
-        pending_config:   Config,
-        settings_tab:     usize,
+        config: Config,
+        show_settings: bool,
+        pending_config: Config,
+        settings_tab: usize,
         /// Which slot the Disk II card is currently installed in (derived from config).
-        disk_slot:        usize,
+        disk_slot: usize,
         /// Pending reset type: Some(true)=hard-reset, Some(false)=soft-reset,
         /// None=no pending.  Set when confirm_reboot is true.
-        pending_reset:    Option<bool>,
+        pending_reset: Option<bool>,
         // Audio
-        audio_buf:         Option<AudioBuf>,
-        _audio_stream:     Option<cpal::Stream>,
-        speaker_state:     bool,
-        last_audio_cycle:  u64,
+        audio_buf: Option<AudioBuf>,
+        _audio_stream: Option<cpal::Stream>,
+        speaker_state: bool,
+        last_audio_cycle: u64,
         audio_sample_rate: u32,
         /// Fractional CPU cycles that didn't make a full sample last frame.
-        spkr_cycle_rem:    f64,
+        spkr_cycle_rem: f64,
         /// DC-filter counter (matches Windows `g_uDCFilterState`).
         /// Reset to 32768+10000 on every $C030 toggle; linearly fades to 0.
-        dc_filter_ctr:     u32,
+        dc_filter_ctr: u32,
         /// Wall-clock timestamp of the previous update() call.
         /// Used to execute exactly the right number of CPU cycles regardless of
         /// how often egui calls update() (window resize can cause burst repaints).
-        last_frame_time:   std::time::Instant,
+        last_frame_time: std::time::Instant,
         /// Characters queued for paste injection into the Apple II keyboard.
-        paste_buf:         std::collections::VecDeque<u8>,
+        paste_buf: std::collections::VecDeque<u8>,
         // Debugger
-        show_debugger:     bool,
-        debugger:          apple2_debugger::DebuggerState,
+        show_debugger: bool,
+        debugger: apple2_debugger::DebuggerState,
+        debugger_cmd_input: String,
+        #[allow(dead_code)]
         debugger_bp_input: String,
         // Per-slot options popup open flags (one per slot, 0..8)
         slot_options_open: [bool; 8],
+        // RGB video renderer (used when VideoType::ColorRGB is selected)
+        rgb_renderer: apple2_video::rgb::RgbRenderer,
+        // WAV audio recording
+        wav_recorder: Option<apple2_audio::wav_writer::WavRecorder>,
+        // Status message (shown briefly after save/load state)
+        status_msg: Option<String>,
+        // Gamepad input (gilrs)
+        gilrs: Option<gilrs::Gilrs>,
+        /// The active gamepad ID (first connected pad, or None).
+        active_gamepad: Option<gilrs::GamepadId>,
     }
 
     impl EmulatorApp {
@@ -364,19 +476,20 @@ mod gui {
 
             // Build CharRom from the embedded Apple IIe video ROM
             let font_data = build_font_from_rom(VIDEO_ROM);
-            let mut renderer = NtscRenderer::new(CharRom::new(font_data), config.scanlines);
-            renderer.mono_tint            = config.mono_tint();
+            let char_rom = CharRom::new(font_data);
+            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines);
+            renderer.mono_tint = config.mono_tint();
             renderer.color_vertical_blend = config.color_vertical_blend;
+            let rgb_renderer = apple2_video::rgb::RgbRenderer::new(char_rom, config.scanlines);
 
             // Initialise audio output (best-effort; silent if unavailable)
-            let (audio_buf, _audio_stream, audio_sample_rate) =
-                match init_audio() {
-                    Some((sr, buf, stream)) => (Some(buf), Some(stream), sr),
-                    None => {
-                        eprintln!("Warning: audio output unavailable");
-                        (None, None, 44100)
-                    }
-                };
+            let (audio_buf, _audio_stream, audio_sample_rate) = match init_audio() {
+                Some((sr, buf, stream)) => (Some(buf), Some(stream), sr),
+                None => {
+                    eprintln!("Warning: audio output unavailable");
+                    (None, None, 44100)
+                }
+            };
 
             // Derive disk slot from config before auto-loading disks
             let disk_slot = config.disk2_slot();
@@ -387,8 +500,11 @@ mod gui {
             if let Some(ref p) = config.last_disk1 {
                 let path = PathBuf::from(p);
                 if let Ok(data) = std::fs::read(&path) {
-                    let ext = path.extension()
-                        .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
                     emu.bus.load_disk(disk_slot, 0, &data, &ext);
                     emu.bus.set_disk_path(disk_slot, 0, path.clone());
                     disk1 = Some(path);
@@ -397,8 +513,11 @@ mod gui {
             if let Some(ref p) = config.last_disk2 {
                 let path = PathBuf::from(p);
                 if let Ok(data) = std::fs::read(&path) {
-                    let ext = path.extension()
-                        .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
                     emu.bus.load_disk(disk_slot, 1, &data, &ext);
                     emu.bus.set_disk_path(disk_slot, 1, path.clone());
                     disk2 = Some(path);
@@ -411,13 +530,30 @@ mod gui {
             if config.save_state_on_exit
                 && let Some(path) = config.save_state_path()
                 && let Ok(yaml) = std::fs::read_to_string(&path)
-                && let Ok(snap) = serde_yaml::from_str::<
-                    apple2_core::emulator::EmulatorSnapshot,
-                >(&yaml)
+                && let Ok(snap) =
+                    serde_yaml::from_str::<apple2_core::emulator::EmulatorSnapshot>(&yaml)
             {
                 emu.restore_snapshot(&snap);
                 emu.mode = apple2_core::emulator::AppMode::Running;
             }
+
+            // Initialise gamepad input (best-effort; disabled if unavailable).
+            let (gilrs_inst, active_gamepad) = match gilrs::Gilrs::new() {
+                Ok(g) => {
+                    // Pick the first connected gamepad, if any.
+                    let id = g.gamepads().next().map(|(id, _)| id);
+                    if let Some(id) = id
+                        && let Some(gp) = g.connected_gamepad(id)
+                    {
+                        println!("Gamepad detected: {}", gp.name());
+                    }
+                    (Some(g), id)
+                }
+                Err(e) => {
+                    eprintln!("Warning: gamepad input unavailable: {e}");
+                    (None, None)
+                }
+            };
 
             let initial_cycle = emu.cpu.cycles;
             let pending_config = config.clone();
@@ -425,54 +561,66 @@ mod gui {
             Self {
                 emu,
                 renderer,
-                fb:               Framebuffer::new(),
-                pixel_buf:        vec![0u8; SCREEN_W * SCREEN_H * 4],
-                texture:          None,
-                logo_texture:     None,
-                icons:            None,
-                frame_no:         0,
+                fb: Framebuffer::new(),
+                pixel_buf: vec![0u8; SCREEN_W * SCREEN_H * 4],
+                texture: None,
+                logo_texture: None,
+                icons: None,
+                frame_no: 0,
                 disk1,
                 disk2,
-                fullscreen:       false,
-                show_about:       false,
+                fullscreen: false,
+                show_about: false,
                 config,
-                show_settings:    false,
+                show_settings: false,
                 pending_config,
-                settings_tab:     0,
+                settings_tab: 0,
                 disk_slot,
-                pending_reset:    None,
+                pending_reset: None,
                 audio_buf,
                 _audio_stream,
-                speaker_state:     false,
-                last_audio_cycle:  initial_cycle,
+                speaker_state: false,
+                last_audio_cycle: initial_cycle,
                 audio_sample_rate,
-                spkr_cycle_rem:    0.0,
-                dc_filter_ctr:     0,
-                last_frame_time:   std::time::Instant::now(),
-                paste_buf:         std::collections::VecDeque::new(),
-                show_debugger:     false,
-                debugger:          apple2_debugger::DebuggerState::new(),
+                spkr_cycle_rem: 0.0,
+                dc_filter_ctr: 0,
+                last_frame_time: std::time::Instant::now(),
+                paste_buf: std::collections::VecDeque::new(),
+                show_debugger: false,
+                debugger: {
+                    let mut d = apple2_debugger::DebuggerState::new();
+                    d.load_apple2_symbols();
+                    d
+                },
+                debugger_cmd_input: String::new(),
                 debugger_bp_input: String::new(),
                 slot_options_open: [false; 8],
+                rgb_renderer,
+                wav_recorder: None,
+                status_msg: None,
+                gilrs: gilrs_inst,
+                active_gamepad,
             }
         }
 
         /// Reset the emulator and clear all audio state so no stale signal leaks through.
         fn reset(&mut self, power_cycle: bool) {
-            self.emu.reset(power_cycle);
+            self.emu
+                .reset_with_pattern(power_cycle, self.config.memory_init_pattern);
             // Silence the speaker: discard any pending toggles and reset the DC
             // filter so we don't output a fading ±0.5 hiss after the reset.
-            self.speaker_state    = false;
-            self.dc_filter_ctr    = 0;
-            self.spkr_cycle_rem   = 0.0;
+            self.speaker_state = false;
+            self.dc_filter_ctr = 0;
+            self.spkr_cycle_rem = 0.0;
             self.last_audio_cycle = self.emu.cpu.cycles;
-            self.last_frame_time  = std::time::Instant::now();
+            self.last_frame_time = std::time::Instant::now();
         }
 
         fn reload_disk(emu: &mut Emulator, slot: usize, drive: usize, path: &Option<PathBuf>) {
             if let Some(p) = path {
                 if let Ok(data) = std::fs::read(p) {
-                    let ext = p.extension()
+                    let ext = p
+                        .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
@@ -493,16 +641,52 @@ mod gui {
 
         /// Render the Apple II screen into `self.pixel_buf` via `NtscRenderer`.
         fn render_apple2(&mut self) {
-            self.renderer.render(
-                &self.emu.bus.main_ram,
-                &self.emu.bus.aux_ram,
-                self.emu.bus.mode,
-                self.frame_no,
-                &mut self.fb,
-            );
+            if self.config.video_type == crate::config::VideoType::ColorRGB {
+                self.rgb_renderer.render(
+                    &self.emu.bus.main_ram,
+                    &self.emu.bus.aux_ram,
+                    self.emu.bus.mode,
+                    self.frame_no,
+                    &mut self.fb,
+                );
+            } else {
+                self.renderer.render(
+                    &self.emu.bus.main_ram,
+                    &self.emu.bus.aux_ram,
+                    self.emu.bus.mode,
+                    self.frame_no,
+                    &mut self.fb,
+                );
+            }
             // The framebuffer stores pixels as ABGR u32; on little-endian the
             // in-memory byte order is [R, G, B, A] = RGBA, which egui consumes
             // directly — no channel-swap loop needed.
+            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
+        }
+
+        /// Render the debugger display into the framebuffer, replacing the
+        /// Apple II screen — matching the original AppleWin behaviour.
+        fn render_debugger(&mut self) {
+            use apple2_debugger::display::{self, CpuSnapshot};
+            let cpu = CpuSnapshot {
+                pc: self.emu.cpu.pc,
+                a: self.emu.cpu.a,
+                x: self.emu.cpu.x,
+                y: self.emu.cpu.y,
+                sp: self.emu.cpu.sp,
+                flags: self.emu.cpu.flags.bits(),
+                cycles: self.emu.cpu.cycles,
+            };
+            let mode_bits = self.emu.bus.mode.bits();
+            let cmd_input = self.debugger_cmd_input.clone();
+            display::render(
+                self.fb.pixels_mut(),
+                &self.debugger,
+                &cpu,
+                mode_bits,
+                &cmd_input,
+                |a| self.emu.bus.read_raw(a),
+            );
             self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
     }
@@ -521,10 +705,14 @@ mod gui {
                 && let Some((w, h, rgba)) = decode_bmp24_rgba(BMP_LOGO)
             {
                 let img = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-                self.logo_texture = Some(ctx.load_texture("logo", img, TextureOptions {
-                    magnification: egui::TextureFilter::Linear,
-                    minification:  egui::TextureFilter::Linear,
-                }));
+                self.logo_texture = Some(ctx.load_texture(
+                    "logo",
+                    img,
+                    TextureOptions {
+                        magnification: egui::TextureFilter::Linear,
+                        minification: egui::TextureFilter::Linear,
+                    },
+                ));
             }
 
             let in_logo_mode = self.emu.mode == apple2_core::emulator::AppMode::Logo;
@@ -550,10 +738,15 @@ mod gui {
                     .min(0.1); // 100 ms cap
                 self.last_frame_time = frame_now;
 
+                // Skip execution when the debugger has paused the CPU
+                let debugger_paused = self.debugger.active;
+
                 // CPU clock rate: emulation_speed * 102_300 Hz (1× = 1.023 MHz)
                 let base_hz = self.config.emulation_speed.max(1) as f64 * 102_300.0;
 
-                if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
+                if debugger_paused {
+                    // Debugger is paused — do not execute any cycles
+                } else if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
                     // Full-speed mode — matches AppleWin's g_bFullSpeed behaviour
                     // (IsConditionForFullSpeed: motor on + enhanced disk enabled).
                     //
@@ -577,9 +770,9 @@ mod gui {
                     // drain from the ring buffer as 2–3 s of audible delay.
                     self.emu.bus.speaker_toggles.clear();
                     self.last_audio_cycle = self.emu.cpu.cycles;
-                    self.dc_filter_ctr    = 0;
-                    self.speaker_state    = false;
-                    self.spkr_cycle_rem   = 0.0;
+                    self.dc_filter_ctr = 0;
+                    self.speaker_state = false;
+                    self.spkr_cycle_rem = 0.0;
                     if let Some(buf) = &self.audio_buf {
                         buf.lock().unwrap().clear();
                     }
@@ -597,7 +790,7 @@ mod gui {
             // ── Speaker audio synthesis ───────────────────────────────────────
             // Mirrors AppleWin's UpdateSpkr() / DCFilter() logic from Speaker.cpp.
             {
-                let end_cycle  = self.emu.cpu.cycles;
+                let end_cycle = self.emu.cpu.cycles;
                 let start_cycle = self.last_audio_cycle;
                 self.last_audio_cycle = end_cycle;
 
@@ -607,12 +800,10 @@ mod gui {
                     let sr = self.audio_sample_rate as f64;
                     // Cycles per audio sample (truncated to integer, matching the C++
                     // "Use integer value: Better for MJ Mahon's RT.SYNTH" comment).
-                    let clks_per_sample =
-                        (CPU_HZ / sr).floor().max(1.0);
+                    let clks_per_sample = (CPU_HZ / sr).floor().max(1.0);
 
                     // Total cycles this frame including any fractional carry-over.
-                    let delta = end_cycle.saturating_sub(start_cycle) as f64
-                        + self.spkr_cycle_rem;
+                    let delta = end_cycle.saturating_sub(start_cycle) as f64 + self.spkr_cycle_rem;
                     let n_samples = (delta / clks_per_sample) as usize;
                     self.spkr_cycle_rem = delta - n_samples as f64 * clks_per_sample;
 
@@ -668,9 +859,9 @@ mod gui {
             // all slots instead of once per slot.
             if self.audio_buf.is_some() {
                 use apple2_core::card::CardType;
-                let frame_cycles  = self.config.cycles_per_frame();
-                let sr            = self.audio_sample_rate;
-                let volume_scale  = self.config.master_volume as f32 / 100.0;
+                let frame_cycles = self.config.cycles_per_frame();
+                let sr = self.audio_sample_rate;
+                let volume_scale = self.config.master_volume as f32 / 100.0;
 
                 // Gather samples from every Mockingboard/Phasor slot before locking.
                 // Pre-allocate: ~735 samples/frame at 44100 Hz, 2 cards max.
@@ -687,7 +878,8 @@ mod gui {
 
                 // Single lock acquisition for all collected samples.
                 if !mb_samples.is_empty()
-                    && let Some(buf) = &self.audio_buf {
+                    && let Some(buf) = &self.audio_buf
+                {
                     let mut locked = buf.lock().unwrap();
                     for s in mb_samples {
                         if locked.len() < AUDIO_BUF_MAX {
@@ -697,15 +889,35 @@ mod gui {
                 }
             }
 
+            // ── WAV audio recording — tap the ring buffer ────────────────────
+            // Feed the latest samples to the WAV recorder if active.
+            if let Some(ref mut rec) = self.wav_recorder
+                && let Some(buf) = &self.audio_buf
+            {
+                let locked = buf.lock().unwrap();
+                // Record the last N samples (approximate frame's worth).
+                let n = (self.audio_sample_rate as usize / 60).min(locked.len());
+                let start = locked.len().saturating_sub(n);
+                let chunk: Vec<f32> = locked.range(start..).copied().collect();
+                drop(locked);
+                let _ = rec.write_samples(&chunk);
+            }
+
             // ── Collect input events ──────────────────────────────────────────
-            let mut key_queue:      Vec<u8>         = Vec::new();
-            let mut do_reset:       bool             = false;
-            let mut do_hard_reset:  bool             = false;
-            let mut do_quit:        bool             = false;
-            let mut any_key:        bool             = false;
-            let mut paste_text:     Option<String>   = None;
-            let mut take_screenshot: bool            = false;
+            let mut key_queue: Vec<u8> = Vec::new();
+            let mut do_reset: bool = false;
+            let mut do_hard_reset: bool = false;
+            let mut do_quit: bool = false;
+            let mut any_key: bool = false;
+            let mut paste_text: Option<String> = None;
+            let mut take_screenshot: bool = false;
             let mut video_shortcut: Option<VideoType> = None;
+            let mut do_save_state: bool = false;
+            let mut do_load_state: bool = false;
+            let mut speed_shortcut: Option<u32> = None;
+            let mut toggle_wav_rec: bool = false;
+            let mut alt_left: bool = false;
+            let mut alt_right: bool = false;
 
             // Only process Event::Key with repeat:false — this fires exactly once
             // per physical key-down, never for OS auto-repeat.  Event::Text is
@@ -718,55 +930,149 @@ mod gui {
                         paste_text = Some(text.clone());
                         continue;
                     }
-                    if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
-                        let ctrl  = modifiers.ctrl || modifiers.command;
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } = event
+                    {
+                        let ctrl = modifiers.ctrl || modifiers.command;
                         let shift = modifiers.shift;
+                        let dbg_on = self.show_debugger && self.debugger.active;
                         match key {
-                            Key::F1                => do_hard_reset = true,
-                            Key::F10 if self.config.scrolllock_toggle => {
-                                self.debugger.active = !self.debugger.active;
+                            // ── Global shortcuts (always active) ─────────
+                            Key::F1 => do_hard_reset = true,
+                            // F7 — toggle debugger (original AppleWin key)
+                            Key::F7 if !ctrl && !shift => {
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger
+                                        .activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
                             }
-                            Key::F12               => take_screenshot = true,
-                            Key::Escape if ctrl    => do_quit = true,
-                            Key::F2 if ctrl        => do_reset = true,
-                            // Ctrl+1..5 — video mode shortcuts
-                            Key::Num1 if ctrl => { video_shortcut = Some(VideoType::ColorTV); }
-                            Key::Num2 if ctrl => { video_shortcut = Some(VideoType::ColorIdealized); }
-                            Key::Num3 if ctrl => { video_shortcut = Some(VideoType::ColorRGB); }
-                            Key::Num4 if ctrl => { video_shortcut = Some(VideoType::MonoWhite); }
-                            Key::Num5 if ctrl => { video_shortcut = Some(VideoType::MonoGreen); }
-                            Key::Enter             => { any_key = true; key_queue.push(0x0D); }
-                            Key::Backspace         => { any_key = true; key_queue.push(0x7F); }
-                            Key::Escape            => { any_key = true; key_queue.push(0x1B); }
-                            Key::Tab               => { any_key = true; key_queue.push(0x09); }
-                            Key::ArrowLeft         => { any_key = true; key_queue.push(0x08); }
-                            Key::ArrowRight        => { any_key = true; key_queue.push(0x15); }
-                            Key::ArrowUp           => { any_key = true; key_queue.push(0x0B); }
-                            Key::ArrowDown         => { any_key = true; key_queue.push(0x0A); }
+                            // F10 — also toggles debugger (compat)
+                            Key::F10 if self.config.scrolllock_toggle => {
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger
+                                        .activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
+                            }
+                            // Save / load state
+                            Key::F11 if shift => do_load_state = true,
+                            Key::F11 if !shift => do_save_state = true,
+                            Key::F9 => toggle_wav_rec = true,
+                            Key::F12 => take_screenshot = true,
+                            Key::Escape if ctrl => do_quit = true,
+                            Key::F2 if ctrl => do_reset = true,
+                            // Speed control
+                            Key::Num0 if ctrl => {
+                                speed_shortcut = Some(40);
+                            }
+                            Key::Num1 if ctrl => {
+                                speed_shortcut = Some(10);
+                            }
+                            Key::Num3 if ctrl => {
+                                speed_shortcut = Some(30);
+                            }
+                            // Video mode shortcuts
+                            Key::Num4 if ctrl => {
+                                video_shortcut = Some(VideoType::MonoWhite);
+                            }
+                            Key::Num5 if ctrl => {
+                                video_shortcut = Some(VideoType::MonoGreen);
+                            }
+                            Key::Num6 if ctrl => {
+                                video_shortcut = Some(VideoType::ColorTV);
+                            }
+                            Key::Num7 if ctrl => {
+                                video_shortcut = Some(VideoType::ColorIdealized);
+                            }
+                            Key::Num8 if ctrl => {
+                                video_shortcut = Some(VideoType::ColorRGB);
+                            }
+                            Key::Num9 if ctrl => {
+                                video_shortcut = Some(VideoType::ColorMonitorNtsc);
+                            }
+                            // ── Swallow keys when debugger is active ─────
+                            _ if dbg_on => {}
+                            // ── Apple II keys (only when debugger is NOT active) ─
+                            Key::Enter => {
+                                any_key = true;
+                                key_queue.push(0x0D);
+                            }
+                            Key::Backspace => {
+                                any_key = true;
+                                key_queue.push(0x7F);
+                            }
+                            Key::Escape => {
+                                any_key = true;
+                                key_queue.push(0x1B);
+                            }
+                            Key::Tab => {
+                                any_key = true;
+                                key_queue.push(0x09);
+                            }
+                            Key::ArrowLeft => {
+                                any_key = true;
+                                key_queue.push(0x08);
+                            }
+                            Key::ArrowRight => {
+                                any_key = true;
+                                key_queue.push(0x15);
+                            }
+                            Key::ArrowUp => {
+                                any_key = true;
+                                key_queue.push(0x0B);
+                            }
+                            Key::ArrowDown => {
+                                any_key = true;
+                                key_queue.push(0x0A);
+                            }
                             key if ctrl => {
-                                // Ctrl+letter → Apple II control character (0x01–0x1A).
-                                // Ctrl+V is intercepted for host paste (Event::Paste above).
                                 let c: Option<u8> = match key {
-                                    Key::A => Some(0x01), Key::B => Some(0x02),
-                                    Key::C => Some(0x03), Key::D => Some(0x04),
-                                    Key::E => Some(0x05), Key::F => Some(0x06),
-                                    Key::G => Some(0x07), Key::H => Some(0x08),
-                                    Key::I => Some(0x09), Key::J => Some(0x0A),
-                                    Key::K => Some(0x0B), Key::L => Some(0x0C),
-                                    Key::M => Some(0x0D), Key::N => Some(0x0E),
-                                    Key::O => Some(0x0F), Key::P => Some(0x10),
-                                    Key::Q => Some(0x11), Key::R => Some(0x12),
-                                    Key::S => Some(0x13), Key::T => Some(0x14),
-                                    Key::U => Some(0x15), Key::V => None, // paste — see Event::Paste
-                                    Key::W => Some(0x17), Key::X => Some(0x18),
-                                    Key::Y => Some(0x19), Key::Z => Some(0x1A),
+                                    Key::A => Some(0x01),
+                                    Key::B => Some(0x02),
+                                    Key::C => Some(0x03),
+                                    Key::D => Some(0x04),
+                                    Key::E => Some(0x05),
+                                    Key::F => Some(0x06),
+                                    Key::G => Some(0x07),
+                                    Key::H => Some(0x08),
+                                    Key::I => Some(0x09),
+                                    Key::J => Some(0x0A),
+                                    Key::K => Some(0x0B),
+                                    Key::L => Some(0x0C),
+                                    Key::M => Some(0x0D),
+                                    Key::N => Some(0x0E),
+                                    Key::O => Some(0x0F),
+                                    Key::P => Some(0x10),
+                                    Key::Q => Some(0x11),
+                                    Key::R => Some(0x12),
+                                    Key::S => Some(0x13),
+                                    Key::T => Some(0x14),
+                                    Key::U => Some(0x15),
+                                    Key::V => None,
+                                    Key::W => Some(0x17),
+                                    Key::X => Some(0x18),
+                                    Key::Y => Some(0x19),
+                                    Key::Z => Some(0x1A),
                                     _ => None,
                                 };
-                                if let Some(c) = c { any_key = true; key_queue.push(c); }
+                                if let Some(c) = c {
+                                    any_key = true;
+                                    key_queue.push(c);
+                                }
                             }
                             key => {
-                                // Derive printable ASCII from key + shift.
-                                // Apple II convention: letters are always uppercase.
                                 any_key = true;
                                 if let Some(c) = apple2_ascii_for_key(*key, shift) {
                                     key_queue.push(c);
@@ -803,7 +1109,9 @@ mod gui {
             }
 
             if !in_logo_mode {
-                for k in key_queue { self.emu.bus.key_press(k); }
+                for k in key_queue {
+                    self.emu.bus.key_press(k);
+                }
 
                 // Drain one character per frame from the paste buffer.
                 // Only inject when the keyboard strobe has been cleared (bit 7 == 0),
@@ -815,22 +1123,347 @@ mod gui {
                 }
 
                 // ── Joystick / paddle emulation ──────────────────────────────
-                // Arrow-key joystick: update paddles each frame from key-hold state.
                 use crate::config::JoystickType;
-                if self.config.joystick0_type == JoystickType::KeypadArrows {
-                    let (lx, rx, uy, dy, b0) = ctx.input(|i| (
-                        i.key_down(Key::ArrowLeft),
-                        i.key_down(Key::ArrowRight),
-                        i.key_down(Key::ArrowUp),
-                        i.key_down(Key::ArrowDown),
-                        i.modifiers.alt,
-                    ));
-                    let center = self.config.joystick_self_centering;
-                    self.emu.bus.gamepad.paddle0 = if lx { 0 } else if rx { 255 } else if center { 127 } else { self.emu.bus.gamepad.paddle0 };
-                    self.emu.bus.gamepad.paddle1 = if uy { 0 } else if dy { 255 } else if center { 127 } else { self.emu.bus.gamepad.paddle1 };
-                    let btn = if self.config.joystick_swap_buttons { 0x02u8 } else { 0x01u8 };
-                    if b0 { self.emu.bus.gamepad.buttons |=  btn; }
-                    else  { self.emu.bus.gamepad.buttons &= !btn; }
+
+                // Helper: apply paddle trim (clamped to 0–255).
+                let apply_trim =
+                    |val: u8, trim: i8| -> u8 { (val as i16 + trim as i16).clamp(0, 255) as u8 };
+
+                // --- Physical gamepad polling (gilrs) ---
+                // Process gilrs events to track active gamepad.
+                if let Some(ref mut gilrs) = self.gilrs {
+                    while let Some(ev) = gilrs.next_event() {
+                        match ev.event {
+                            gilrs::EventType::Connected => {
+                                if self.active_gamepad.is_none() {
+                                    self.active_gamepad = Some(ev.id);
+                                }
+                            }
+                            gilrs::EventType::Disconnected => {
+                                if self.active_gamepad == Some(ev.id) {
+                                    self.active_gamepad = gilrs.gamepads().next().map(|(id, _)| id);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Map a gilrs gamepad to joystick N (0 or 1).
+                let poll_gilrs_gamepad = |gilrs: &gilrs::Gilrs,
+                                          gp_id: gilrs::GamepadId,
+                                          swap_buttons: bool|
+                 -> (u8, u8, u8) {
+                    let gp = gilrs.gamepad(gp_id);
+                    // Left stick axes → paddles (–1.0..+1.0 → 0..255)
+                    let ax = gp.value(gilrs::Axis::LeftStickX);
+                    let ay = gp.value(gilrs::Axis::LeftStickY);
+                    let p0 = ((ax + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
+                    // Y-axis: gilrs reports +Y as up; Apple II paddle +Y is down.
+                    let p1 = ((-ay + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
+                    // Buttons: South=btn0, East=btn1
+                    let mut btns = 0u8;
+                    let (b0_mask, b1_mask) = if swap_buttons {
+                        (0x02, 0x01)
+                    } else {
+                        (0x01, 0x02)
+                    };
+                    if gp.is_pressed(gilrs::Button::South) {
+                        btns |= b0_mask;
+                    }
+                    if gp.is_pressed(gilrs::Button::East) {
+                        btns |= b1_mask;
+                    }
+                    if gp.is_pressed(gilrs::Button::West) {
+                        btns |= b0_mask;
+                    }
+                    if gp.is_pressed(gilrs::Button::North) {
+                        btns |= b1_mask;
+                    }
+                    (p0, p1, btns)
+                };
+
+                // Update joystick 0
+                match self.config.joystick0_type {
+                    JoystickType::Joystick1 | JoystickType::Joystick2 => {
+                        if let Some(ref gilrs) = self.gilrs {
+                            // Joystick1 → first gamepad, Joystick2 → second gamepad
+                            let target_idx =
+                                if self.config.joystick0_type == JoystickType::Joystick1 {
+                                    0
+                                } else {
+                                    1
+                                };
+                            if let Some((gp_id, _)) = gilrs.gamepads().nth(target_idx) {
+                                let (p0, p1, btns) = poll_gilrs_gamepad(
+                                    gilrs,
+                                    gp_id,
+                                    self.config.joystick_swap_buttons,
+                                );
+                                self.emu.bus.gamepad.paddle0 =
+                                    apply_trim(p0, self.config.paddle_x_trim);
+                                self.emu.bus.gamepad.paddle1 =
+                                    apply_trim(p1, self.config.paddle_y_trim);
+                                self.emu.bus.gamepad.buttons =
+                                    (self.emu.bus.gamepad.buttons & !0x03) | btns;
+                            }
+                        }
+                    }
+                    JoystickType::KeypadArrows => {
+                        let (lx, rx, uy, dy, b0) = ctx.input(|i| {
+                            (
+                                i.key_down(Key::ArrowLeft),
+                                i.key_down(Key::ArrowRight),
+                                i.key_down(Key::ArrowUp),
+                                i.key_down(Key::ArrowDown),
+                                i.modifiers.alt,
+                            )
+                        });
+                        let center = self.config.joystick_self_centering;
+                        self.emu.bus.gamepad.paddle0 = apply_trim(
+                            if lx {
+                                0
+                            } else if rx {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle0
+                            },
+                            self.config.paddle_x_trim,
+                        );
+                        self.emu.bus.gamepad.paddle1 = apply_trim(
+                            if uy {
+                                0
+                            } else if dy {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle1
+                            },
+                            self.config.paddle_y_trim,
+                        );
+                        let btn = if self.config.joystick_swap_buttons {
+                            0x02u8
+                        } else {
+                            0x01u8
+                        };
+                        if b0 {
+                            self.emu.bus.gamepad.buttons |= btn;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !btn;
+                        }
+                    }
+                    JoystickType::KeypadNumeric => {
+                        // Numpad: 4=left, 6=right, 8=up, 2=down, 0/5=fire
+                        let (lx, rx, uy, dy, b0, b1) = ctx.input(|i| {
+                            (
+                                i.key_down(Key::Num4),
+                                i.key_down(Key::Num6),
+                                i.key_down(Key::Num8),
+                                i.key_down(Key::Num2),
+                                i.key_down(Key::Num0),
+                                i.key_down(Key::Num5),
+                            )
+                        });
+                        let center = self.config.joystick_self_centering;
+                        self.emu.bus.gamepad.paddle0 = apply_trim(
+                            if lx {
+                                0
+                            } else if rx {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle0
+                            },
+                            self.config.paddle_x_trim,
+                        );
+                        self.emu.bus.gamepad.paddle1 = apply_trim(
+                            if uy {
+                                0
+                            } else if dy {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle1
+                            },
+                            self.config.paddle_y_trim,
+                        );
+                        let (b0_mask, b1_mask) = if self.config.joystick_swap_buttons {
+                            (0x02u8, 0x01u8)
+                        } else {
+                            (0x01u8, 0x02u8)
+                        };
+                        if b0 {
+                            self.emu.bus.gamepad.buttons |= b0_mask;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !b0_mask;
+                        }
+                        if b1 {
+                            self.emu.bus.gamepad.buttons |= b1_mask;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !b1_mask;
+                        }
+                    }
+                    JoystickType::Mouse => {
+                        // Map mouse pointer position to paddle values.
+                        // Use the full window rect as the reference area (0..255).
+                        if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                            let r = ctx.input(|i| i.screen_rect);
+                            let nx = ((pos.x - r.left()) / r.width()).clamp(0.0, 1.0);
+                            let ny = ((pos.y - r.top()) / r.height()).clamp(0.0, 1.0);
+                            self.emu.bus.gamepad.paddle0 =
+                                apply_trim((nx * 255.0) as u8, self.config.paddle_x_trim);
+                            self.emu.bus.gamepad.paddle1 =
+                                apply_trim((ny * 255.0) as u8, self.config.paddle_y_trim);
+                        }
+                        // Mouse button → joystick button 0
+                        let mb = ctx.input(|i| i.pointer.primary_down());
+                        let btn = if self.config.joystick_swap_buttons {
+                            0x02u8
+                        } else {
+                            0x01u8
+                        };
+                        if mb {
+                            self.emu.bus.gamepad.buttons |= btn;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !btn;
+                        }
+                    }
+                    JoystickType::Disabled => {}
+                }
+
+                // Update joystick 1 (same logic, separate config)
+                match self.config.joystick1_type {
+                    JoystickType::Joystick1 | JoystickType::Joystick2 => {
+                        if let Some(ref gilrs) = self.gilrs {
+                            let target_idx =
+                                if self.config.joystick1_type == JoystickType::Joystick1 {
+                                    0
+                                } else {
+                                    1
+                                };
+                            if let Some((gp_id, _)) = gilrs.gamepads().nth(target_idx) {
+                                let (p0, p1, btns) = poll_gilrs_gamepad(
+                                    gilrs,
+                                    gp_id,
+                                    self.config.joystick_swap_buttons,
+                                );
+                                // Joystick 1 uses paddle2/paddle3 in AppleWin, but the
+                                // Apple II only has 2 paddles accessible via game port.
+                                // For compatibility, joystick 1 also writes paddle0/1
+                                // (same as AppleWin behaviour for second joystick).
+                                self.emu.bus.gamepad.paddle0 =
+                                    apply_trim(p0, self.config.paddle_x_trim);
+                                self.emu.bus.gamepad.paddle1 =
+                                    apply_trim(p1, self.config.paddle_y_trim);
+                                self.emu.bus.gamepad.buttons =
+                                    (self.emu.bus.gamepad.buttons & !0x03) | btns;
+                            }
+                        }
+                    }
+                    JoystickType::KeypadArrows => {
+                        let (lx, rx, uy, dy, b0) = ctx.input(|i| {
+                            (
+                                i.key_down(Key::ArrowLeft),
+                                i.key_down(Key::ArrowRight),
+                                i.key_down(Key::ArrowUp),
+                                i.key_down(Key::ArrowDown),
+                                i.modifiers.alt,
+                            )
+                        });
+                        let center = self.config.joystick_self_centering;
+                        self.emu.bus.gamepad.paddle0 = apply_trim(
+                            if lx {
+                                0
+                            } else if rx {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle0
+                            },
+                            self.config.paddle_x_trim,
+                        );
+                        self.emu.bus.gamepad.paddle1 = apply_trim(
+                            if uy {
+                                0
+                            } else if dy {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle1
+                            },
+                            self.config.paddle_y_trim,
+                        );
+                        let btn = if self.config.joystick_swap_buttons {
+                            0x02u8
+                        } else {
+                            0x01u8
+                        };
+                        if b0 {
+                            self.emu.bus.gamepad.buttons |= btn;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !btn;
+                        }
+                    }
+                    JoystickType::KeypadNumeric => {
+                        let (lx, rx, uy, dy, b0, b1) = ctx.input(|i| {
+                            (
+                                i.key_down(Key::Num4),
+                                i.key_down(Key::Num6),
+                                i.key_down(Key::Num8),
+                                i.key_down(Key::Num2),
+                                i.key_down(Key::Num0),
+                                i.key_down(Key::Num5),
+                            )
+                        });
+                        let center = self.config.joystick_self_centering;
+                        self.emu.bus.gamepad.paddle0 = apply_trim(
+                            if lx {
+                                0
+                            } else if rx {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle0
+                            },
+                            self.config.paddle_x_trim,
+                        );
+                        self.emu.bus.gamepad.paddle1 = apply_trim(
+                            if uy {
+                                0
+                            } else if dy {
+                                255
+                            } else if center {
+                                127
+                            } else {
+                                self.emu.bus.gamepad.paddle1
+                            },
+                            self.config.paddle_y_trim,
+                        );
+                        let (b0_mask, b1_mask) = if self.config.joystick_swap_buttons {
+                            (0x02u8, 0x01u8)
+                        } else {
+                            (0x01u8, 0x02u8)
+                        };
+                        if b0 {
+                            self.emu.bus.gamepad.buttons |= b0_mask;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !b0_mask;
+                        }
+                        if b1 {
+                            self.emu.bus.gamepad.buttons |= b1_mask;
+                        } else {
+                            self.emu.bus.gamepad.buttons &= !b1_mask;
+                        }
+                    }
+                    JoystickType::Mouse | JoystickType::Disabled => {}
                 }
             }
 
@@ -840,18 +1473,103 @@ mod gui {
                 save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
             }
 
-            if do_hard_reset { self.reset(true); }
-            if do_reset      { self.reset(false); }
-            if do_quit       { frame.close(); return; }
+            // Save / load emulator state (F11 / Shift+F11).
+            if do_save_state
+                && !in_logo_mode
+                && let Some(path) = self.config.save_state_path()
+            {
+                let snap = self.emu.take_snapshot();
+                if let Ok(yaml) = serde_yaml::to_string(&snap) {
+                    let _ = std::fs::write(&path, yaml);
+                    self.status_msg = Some(format!("State saved to {}", path.display()));
+                }
+            }
+            if do_load_state
+                && !in_logo_mode
+                && let Some(path) = self.config.save_state_path()
+                && let Ok(yaml) = std::fs::read_to_string(&path)
+                && let Ok(snap) = serde_yaml::from_str(&yaml)
+            {
+                self.emu.restore_snapshot(&snap);
+                self.status_msg = Some("State loaded".to_string());
+            }
 
-            // ── Render Apple II display to GPU texture (not during logo) ─────
+            // Speed control shortcuts (Ctrl+0/1/3).
+            if let Some(spd) = speed_shortcut {
+                self.config.emulation_speed = spd;
+                self.config.save();
+            }
+
+            // WAV audio recording toggle (F9).
+            if toggle_wav_rec {
+                if let Some(rec) = self.wav_recorder.take() {
+                    let _ = rec.stop();
+                    self.status_msg = Some("Audio recording stopped".to_string());
+                } else {
+                    let dir = crate::config::config_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let path = dir.join(format!("applewin_audio_{ts}.wav"));
+                    match apple2_audio::wav_writer::WavRecorder::start(
+                        &path,
+                        self.audio_sample_rate,
+                    ) {
+                        Ok(rec) => {
+                            self.wav_recorder = Some(rec);
+                            self.status_msg =
+                                Some(format!("Recording audio to {}", path.display()));
+                        }
+                        Err(e) => {
+                            self.status_msg = Some(format!("WAV recording failed: {e}"));
+                        }
+                    }
+                }
+            }
+
+            // Alt key as Open / Closed Apple (button 0 / button 1).
+            if self.config.alt_key_as_apple {
+                ctx.input(|i| {
+                    alt_left = i.modifiers.alt;
+                    alt_right = false; // egui doesn't distinguish left/right Alt
+                });
+                // Map Alt to Open Apple (button 0 bit)
+                if alt_left {
+                    self.emu.bus.gamepad.buttons |= 0x01;
+                } else {
+                    self.emu.bus.gamepad.buttons &= !0x01;
+                }
+            }
+
+            if do_hard_reset {
+                self.reset(true);
+            }
+            if do_reset {
+                self.reset(false);
+            }
+            if do_quit {
+                frame.close();
+                return;
+            }
+
+            // ── Render display to GPU texture ─────────────────────────────────
+            // When debugger is active, render debugger into the framebuffer
+            // instead of the Apple II screen, matching original AppleWin.
             if !in_logo_mode {
-                self.render_apple2();
+                if self.show_debugger && self.debugger.active {
+                    self.render_debugger();
+                } else {
+                    self.render_apple2();
+                }
+
                 let tex_opts = TextureOptions {
                     magnification: egui::TextureFilter::Nearest,
-                    minification:  egui::TextureFilter::Nearest,
+                    minification: egui::TextureFilter::Nearest,
                 };
-                let image = ColorImage::from_rgba_unmultiplied([SCREEN_W, SCREEN_H], &self.pixel_buf);
+                let image =
+                    ColorImage::from_rgba_unmultiplied([SCREEN_W, SCREEN_H], &self.pixel_buf);
                 if let Some(t) = &mut self.texture {
                     t.set(image, tex_opts);
                 } else {
@@ -865,30 +1583,42 @@ mod gui {
             };
 
             // Snapshot emulator state for use in closures (avoids borrow conflicts)
-            let pc       = self.emu.cpu.pc;
-            let cycles   = self.emu.cpu.cycles;
-            let d1_name  = Self::disk_display_name(&self.disk1).to_owned();
-            let d2_name  = Self::disk_display_name(&self.disk2).to_owned();
+            let pc = self.emu.cpu.pc;
+            let cycles = self.emu.cpu.cycles;
+            let d1_name = Self::disk_display_name(&self.disk1).to_owned();
             let d1_loaded = self.disk1.is_some();
             let d2_loaded = self.disk2.is_some();
+            let d1_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 0);
+            let d2_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 1);
+
+            // HDD activity: check all slots for a hard disk controller
+            let hdd_activity =
+                (0..apple2_core::card::NUM_SLOTS)
+                    .find(|&s| {
+                        self.emu.bus.cards.slot(s).is_some_and(|c| {
+                            c.card_type() == apple2_core::card::CardType::GenericHdd
+                        })
+                    })
+                    .map(|s| self.emu.bus.disk_drive_activity(s, 0))
+                    .unwrap_or_default();
 
             // ── Deferred actions (set by panel closures, applied after) ───────
-            let mut act_hard_reset    = false;
-            let mut act_reset         = false;
-            let mut act_quit          = false;
-            let mut act_load_disk1    = false;
-            let mut act_load_disk2    = false;
-            let mut act_eject_disk1   = false;
-            let mut act_eject_disk2   = false;
-            let mut act_swap          = false;
-            let mut act_fullscreen    = false;
-            let mut act_about         = false;
+            let mut act_hard_reset = false;
+            let mut act_reset = false;
+            let mut act_quit = false;
+            let mut act_load_disk1 = false;
+            let mut act_load_disk2 = false;
+            let mut act_eject_disk1 = false;
+            let mut act_eject_disk2 = false;
+            let mut act_swap = false;
+            let mut act_fullscreen = false;
+            let mut act_about = false;
             let mut act_show_settings = false;
-            let mut act_screenshot    = false;
-            let mut act_load_hdd1     = false;
-            let mut act_load_hdd2     = false;
-            let mut act_eject_hdd1    = false;
-            let mut act_eject_hdd2    = false;
+            let mut act_screenshot = false;
+            let mut act_load_hdd1 = false;
+            let mut act_load_hdd2 = false;
+            let mut act_eject_hdd1 = false;
+            let mut act_eject_hdd2 = false;
             let mut act_recent_disk: Option<String> = None;
             let mut act_recent_hdd: Option<String> = None;
 
@@ -904,16 +1634,26 @@ mod gui {
                         ui.menu_button("File", |ui| {
                             // ── Floppy disks ─────────────────────────────────
                             if ui.button("Load Disk 1…").clicked() {
-                                act_load_disk1 = true; ui.close_menu();
+                                act_load_disk1 = true;
+                                ui.close_menu();
                             }
                             if ui.button("Load Disk 2…").clicked() {
-                                act_load_disk2 = true; ui.close_menu();
+                                act_load_disk2 = true;
+                                ui.close_menu();
                             }
-                            if ui.add_enabled(d1_loaded, egui::Button::new("Eject Disk 1")).clicked() {
-                                act_eject_disk1 = true; ui.close_menu();
+                            if ui
+                                .add_enabled(d1_loaded, egui::Button::new("Eject Disk 1"))
+                                .clicked()
+                            {
+                                act_eject_disk1 = true;
+                                ui.close_menu();
                             }
-                            if ui.add_enabled(d2_loaded, egui::Button::new("Eject Disk 2")).clicked() {
-                                act_eject_disk2 = true; ui.close_menu();
+                            if ui
+                                .add_enabled(d2_loaded, egui::Button::new("Eject Disk 2"))
+                                .clicked()
+                            {
+                                act_eject_disk2 = true;
+                                ui.close_menu();
                             }
                             // ── Recent Disks submenu ──────────────────────────
                             ui.menu_button("Recent Disks", |ui| {
@@ -936,27 +1676,43 @@ mod gui {
                             ui.separator();
                             // ── HDD images ───────────────────────────────────
                             {
-                                let hdd1_name = self.config.last_hdd1.as_deref()
+                                let hdd1_name = self
+                                    .config
+                                    .last_hdd1
+                                    .as_deref()
                                     .and_then(|p| std::path::Path::new(p).file_name())
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| "(none)".to_string());
-                                let hdd2_name = self.config.last_hdd2.as_deref()
+                                let hdd2_name = self
+                                    .config
+                                    .last_hdd2
+                                    .as_deref()
                                     .and_then(|p| std::path::Path::new(p).file_name())
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| "(none)".to_string());
                                 let hdd1_loaded = self.config.last_hdd1.is_some();
                                 let hdd2_loaded = self.config.last_hdd2.is_some();
                                 if ui.button(format!("Load HDD 1…  [{}]", hdd1_name)).clicked() {
-                                    act_load_hdd1 = true; ui.close_menu();
+                                    act_load_hdd1 = true;
+                                    ui.close_menu();
                                 }
-                                if ui.add_enabled(hdd1_loaded, egui::Button::new("Eject HDD 1")).clicked() {
-                                    act_eject_hdd1 = true; ui.close_menu();
+                                if ui
+                                    .add_enabled(hdd1_loaded, egui::Button::new("Eject HDD 1"))
+                                    .clicked()
+                                {
+                                    act_eject_hdd1 = true;
+                                    ui.close_menu();
                                 }
                                 if ui.button(format!("Load HDD 2…  [{}]", hdd2_name)).clicked() {
-                                    act_load_hdd2 = true; ui.close_menu();
+                                    act_load_hdd2 = true;
+                                    ui.close_menu();
                                 }
-                                if ui.add_enabled(hdd2_loaded, egui::Button::new("Eject HDD 2")).clicked() {
-                                    act_eject_hdd2 = true; ui.close_menu();
+                                if ui
+                                    .add_enabled(hdd2_loaded, egui::Button::new("Eject HDD 2"))
+                                    .clicked()
+                                {
+                                    act_eject_hdd2 = true;
+                                    ui.close_menu();
                                 }
                             }
                             // ── Recent HDDs submenu ───────────────────────────
@@ -979,44 +1735,53 @@ mod gui {
                             });
                             ui.separator();
                             if ui.button("Screenshot       F12").clicked() {
-                                act_screenshot = true; ui.close_menu();
+                                act_screenshot = true;
+                                ui.close_menu();
                             }
                             ui.separator();
                             if ui.button("Exit").clicked() {
-                                act_quit = true; ui.close_menu();
+                                act_quit = true;
+                                ui.close_menu();
                             }
                         });
                         ui.menu_button("Machine", |ui| {
                             if ui.button("Reset          Ctrl+F2").clicked() {
-                                act_reset = true; ui.close_menu();
+                                act_reset = true;
+                                ui.close_menu();
                             }
                             if ui.button("Hard Reset          F1").clicked() {
-                                act_hard_reset = true; ui.close_menu();
+                                act_hard_reset = true;
+                                ui.close_menu();
                             }
                             ui.separator();
                             if ui.button("Settings…").clicked() {
-                                act_show_settings = true; ui.close_menu();
+                                act_show_settings = true;
+                                ui.close_menu();
                             }
                         });
                         ui.menu_button("View", |ui| {
-                            let label = if self.fullscreen { "Exit Fullscreen  F11" }
-                                        else              { "Fullscreen       F11" };
+                            let label = if self.fullscreen {
+                                "Exit Fullscreen  F11"
+                            } else {
+                                "Fullscreen       F11"
+                            };
                             if ui.button(label).clicked() {
-                                act_fullscreen = true; ui.close_menu();
+                                act_fullscreen = true;
+                                ui.close_menu();
                             }
                             ui.separator();
                             // ── Video Mode submenu ────────────────────────────
                             ui.menu_button("Video Mode", |ui| {
                                 let modes: &[(VideoType, &str)] = &[
-                                    (VideoType::ColorTV,          "Color (NTSC TV)      Ctrl+1"),
-                                    (VideoType::ColorIdealized,   "Color (Composite)    Ctrl+2"),
-                                    (VideoType::ColorRGB,         "RGB                  Ctrl+3"),
-                                    (VideoType::MonoWhite,        "Monochrome (white)   Ctrl+4"),
-                                    (VideoType::MonoGreen,        "Monochrome (green)   Ctrl+5"),
-                                    (VideoType::MonoAmber,        "Monochrome (amber)"),
-                                    (VideoType::MonoTV,           "Monochrome TV"),
+                                    (VideoType::ColorTV, "Color (NTSC TV)      Ctrl+1"),
+                                    (VideoType::ColorIdealized, "Color (Composite)    Ctrl+2"),
+                                    (VideoType::ColorRGB, "RGB                  Ctrl+3"),
+                                    (VideoType::MonoWhite, "Monochrome (white)   Ctrl+4"),
+                                    (VideoType::MonoGreen, "Monochrome (green)   Ctrl+5"),
+                                    (VideoType::MonoAmber, "Monochrome (amber)"),
+                                    (VideoType::MonoTV, "Monochrome TV"),
                                     (VideoType::ColorMonitorNtsc, "Color Monitor NTSC"),
-                                    (VideoType::MonoCustom,       "Monochrome (custom)"),
+                                    (VideoType::MonoCustom, "Monochrome (custom)"),
                                 ];
                                 let current_vt = self.config.video_type;
                                 let mut chosen: Option<VideoType> = None;
@@ -1039,12 +1804,22 @@ mod gui {
                             });
                             ui.separator();
                             // ── Display toggles ───────────────────────────────
-                            if ui.checkbox(&mut self.config.scanlines, "Scanlines").changed() {
+                            if ui
+                                .checkbox(&mut self.config.scanlines, "Scanlines")
+                                .changed()
+                            {
                                 self.renderer.scanlines = self.config.scanlines;
                                 self.config.save();
                             }
-                            if ui.checkbox(&mut self.config.color_vertical_blend, "Colour vertical blend").changed() {
-                                self.renderer.color_vertical_blend = self.config.color_vertical_blend;
+                            if ui
+                                .checkbox(
+                                    &mut self.config.color_vertical_blend,
+                                    "Colour vertical blend",
+                                )
+                                .changed()
+                            {
+                                self.renderer.color_vertical_blend =
+                                    self.config.color_vertical_blend;
                                 self.config.save();
                             }
                             {
@@ -1057,102 +1832,228 @@ mod gui {
                         });
                         ui.menu_button("Help", |ui| {
                             if ui.button("About AppleWin-rs…").clicked() {
-                                act_about = true; ui.close_menu();
+                                act_about = true;
+                                ui.close_menu();
                             }
                         });
                     });
                 });
 
-            // ── Status bar ────────────────────────────────────────────────────
-            egui::TopBottomPanel::bottom("statusbar")
-                .frame(
-                    egui::Frame::none()
-                        .fill(WIN_FACE)
-                        .stroke(Stroke::new(1.0, WIN_SHADOW))
-                        .inner_margin(egui::style::Margin::symmetric(6.0, 3.0)),
-                )
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if self.config.show_disk_status {
-                            disk_led(ui, "D1", d1_loaded, false);
-                            ui.add_space(2.0);
-                            ui.label(
-                                RichText::new(
-                                    if d1_loaded { d1_name.as_str() } else { "—" }
-                                ).small().monospace(),
-                            );
-                            ui.add_space(8.0);
-                            disk_led(ui, "D2", d2_loaded, false);
-                            ui.add_space(2.0);
-                            ui.label(
-                                RichText::new(
-                                    if d2_loaded { d2_name.as_str() } else { "—" }
-                                ).small().monospace(),
-                            );
-                        }
-                        ui.separator();
-                        if in_logo_mode {
-                            ui.label(RichText::new("AppleWin-rs — Press any key to start").small());
-                        } else {
-                            ui.label(RichText::new(format!("PC:${pc:04X}")).small().monospace());
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(format!("Cyc:{cycles}")).small().monospace());
-                        }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new("F1:Reset  Ctrl+Esc:Quit").small());
+            // ── Status bar (hidden when debugger is active) ──────────────────
+            let debugger_fullscreen = self.show_debugger && self.debugger.active;
+            if !debugger_fullscreen {
+                egui::TopBottomPanel::bottom("statusbar")
+                    .frame(
+                        egui::Frame::none()
+                            .fill(WIN_FACE)
+                            .stroke(Stroke::new(1.0, WIN_SHADOW))
+                            .inner_margin(egui::style::Margin::symmetric(6.0, 3.0)),
+                    )
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if self.config.show_disk_status {
+                                // Drive 1: LED + track
+                                ui.label(RichText::new("1").small().monospace());
+                                disk_led(ui, "", d1_activity.motor_on, d1_activity.writing);
+                                ui.label(
+                                    RichText::new(format!("T{:02}", d1_activity.track))
+                                        .small()
+                                        .monospace(),
+                                );
+                                ui.add_space(4.0);
+
+                                // Drive 2: LED + track
+                                ui.label(RichText::new("2").small().monospace());
+                                disk_led(ui, "", d2_activity.motor_on, d2_activity.writing);
+                                ui.label(
+                                    RichText::new(format!("T{:02}", d2_activity.track))
+                                        .small()
+                                        .monospace(),
+                                );
+                                ui.add_space(4.0);
+
+                                // HDD: LED
+                                ui.label(RichText::new("H").small().monospace());
+                                disk_led(ui, "", hdd_activity.motor_on, hdd_activity.writing);
+                                ui.add_space(4.0);
+
+                                // Disk name
+                                ui.label(
+                                    RichText::new(if d1_loaded { d1_name.as_str() } else { "" })
+                                        .small()
+                                        .monospace(),
+                                );
+                            }
+                            ui.separator();
+                            if in_logo_mode {
+                                ui.label(
+                                    RichText::new("AppleWin-rs — Press any key to start").small(),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new(format!("PC:${pc:04X}")).small().monospace(),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new(format!("Cyc:{cycles}")).small().monospace(),
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new("F1:Reset  Ctrl+Esc:Quit").small());
+                            });
                         });
                     });
-                });
+            } // end if !debugger_fullscreen (status bar)
 
-            // ── Right button strip ────────────────────────────────────────────
+            // ── Right button strip (hidden when debugger is active) ───────────
             let icons = self.icons.as_ref();
-            egui::SidePanel::right("buttons")
-                .exact_width(BTN_PANEL_W)
-                .resizable(false)
-                .frame(
-                    egui::Frame::none()
-                        .fill(WIN_FACE)
-                        .stroke(Stroke::new(1.0, WIN_SHADOW))
-                        .inner_margin(egui::style::Margin::same(5.0)),
-                )
-                .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        let sz = Vec2::new(43.0, 41.0);
-                        let isz = Vec2::new(41.0, 41.0);
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.help.as_ref()),  "?",  "Help / About",       sz, isz).clicked() { act_about = true; }
-                        ui.add_space(2.0);
-                        // Matches AppleWin BTN_RUN logic:
-                        //   Ctrl+click → CtrlReset (soft reset, warm CPU)
-                        //   click      → ResetMachineState (power cycle)
-                        if icon_btn(ui, icons.and_then(|ic| ic.run.as_ref()), "↺",
-                                    "Reset  (Ctrl+click = soft reset, click = power cycle)",
-                                    sz, isz).clicked() {
-                            let ctrl = ui.ctx().input(|i| i.modifiers.ctrl || i.modifiers.command);
-                            if ctrl { act_reset = true; } else { act_hard_reset = true; }
-                        }
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.d1.as_ref()),    "①", "Load Disk 1",         sz, isz).clicked() { act_load_disk1 = true; }
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.d2.as_ref()),    "②", "Load Disk 2",         sz, isz).clicked() { act_load_disk2 = true; }
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.swap.as_ref()),  "⇄",  "Swap Drives",         sz, isz).clicked() { act_swap = true; }
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.full.as_ref()),  "⛶",  "Fullscreen (F11)",    sz, isz).clicked() { act_fullscreen = true; }
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.debug.as_ref()), "⚙", "Debugger", sz, isz).clicked() {
-                            self.show_debugger = !self.show_debugger;
-                        }
-                        ui.add_space(2.0);
-                        if icon_btn(ui, icons.and_then(|ic| ic.setup.as_ref()), "⚙",  "Settings",            sz, isz).clicked() { act_show_settings = true; }
+            if !debugger_fullscreen {
+                egui::SidePanel::right("buttons")
+                    .exact_width(BTN_PANEL_W)
+                    .resizable(false)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(WIN_FACE)
+                            .stroke(Stroke::new(1.0, WIN_SHADOW))
+                            .inner_margin(egui::style::Margin::same(5.0)),
+                    )
+                    .show(ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            let sz = Vec2::new(43.0, 41.0);
+                            let isz = Vec2::new(41.0, 41.0);
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.help.as_ref()),
+                                "?",
+                                "Help / About",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                act_about = true;
+                            }
+                            ui.add_space(2.0);
+                            // Matches AppleWin BTN_RUN logic:
+                            //   Ctrl+click → CtrlReset (soft reset, warm CPU)
+                            //   click      → ResetMachineState (power cycle)
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.run.as_ref()),
+                                "↺",
+                                "Reset  (Ctrl+click = soft reset, click = power cycle)",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                let ctrl =
+                                    ui.ctx().input(|i| i.modifiers.ctrl || i.modifiers.command);
+                                if ctrl {
+                                    act_reset = true;
+                                } else {
+                                    act_hard_reset = true;
+                                }
+                            }
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.d1.as_ref()),
+                                "①",
+                                "Load Disk 1",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                act_load_disk1 = true;
+                            }
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.d2.as_ref()),
+                                "②",
+                                "Load Disk 2",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                act_load_disk2 = true;
+                            }
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.swap.as_ref()),
+                                "⇄",
+                                "Swap Drives",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                act_swap = true;
+                            }
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.full.as_ref()),
+                                "⛶",
+                                "Fullscreen (F11)",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                act_fullscreen = true;
+                            }
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.debug.as_ref()),
+                                "⚙",
+                                "Debugger",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                if self.show_debugger && self.debugger.active {
+                                    self.show_debugger = false;
+                                    self.debugger.deactivate();
+                                } else {
+                                    self.show_debugger = true;
+                                    self.debugger
+                                        .activate(apple2_debugger::state::StopReason::UserBreak);
+                                }
+                            }
+                            ui.add_space(2.0);
+                            if icon_btn(
+                                ui,
+                                icons.and_then(|ic| ic.setup.as_ref()),
+                                "⚙",
+                                "Settings",
+                                sz,
+                                isz,
+                            )
+                            .clicked()
+                            {
+                                act_show_settings = true;
+                            }
+                        });
                     });
-                });
+            } // end if !debugger_fullscreen (button strip)
 
             // ── Confirm reboot dialog ─────────────────────────────────────────
             if let Some(power_cycle) = self.pending_reset {
-                let mut do_reset  = false;
+                let mut do_reset = false;
                 let mut do_cancel = false;
-                let label = if power_cycle { "Hard Reset (power cycle)" } else { "Reset" };
+                let label = if power_cycle {
+                    "Hard Reset (power cycle)"
+                } else {
+                    "Reset"
+                };
                 egui::Window::new("Confirm Reset")
                     .collapsible(false)
                     .resizable(false)
@@ -1162,119 +2063,284 @@ mod gui {
                         ui.label(format!("Are you sure you want to {label}?"));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("  OK  ").clicked()     { do_reset  = true; }
-                            if ui.button("Cancel").clicked() { do_cancel = true; }
-                        });
-                    });
-                if do_reset  { self.reset(power_cycle); self.pending_reset = None; }
-                if do_cancel { self.pending_reset = None; }
-            }
-
-            // ── Debugger window ───────────────────────────────────────────────
-            if self.show_debugger {
-                use apple2_debugger::disasm::{disassemble_one, format_instruction};
-                use apple2_debugger::breakpoint::Breakpoint;
-
-                // Snapshot CPU registers before the closure borrows self
-                let pc   = self.emu.cpu.pc;
-                let a    = self.emu.cpu.a;
-                let x    = self.emu.cpu.x;
-                let y    = self.emu.cpu.y;
-                let sp   = self.emu.cpu.sp;
-                let p    = self.emu.cpu.flags.bits();
-                let paused = self.debugger.active;
-
-                let mut do_step      = false;
-                let mut do_pause     = false;
-                let mut do_resume    = false;
-                let mut do_add_bp    = false;
-                let mut do_remove_bp: Option<usize> = None;
-                let mut cursor_update: Option<u16>  = None;
-
-                egui::Window::new("Debugger")
-                    .resizable(true)
-                    .min_width(460.0)
-                    .show(ctx, |ui| {
-                        // ── CPU registers ──────────────────────────────────
-                        ui.monospace(format!(
-                            "PC:{:04X}  A:{:02X}  X:{:02X}  Y:{:02X}  SP:{:02X}  P:{:08b}",
-                            pc, a, x, y, sp, p
-                        ));
-                        ui.separator();
-
-                        // ── Execution controls ──────────────────────────────
-                        ui.horizontal(|ui| {
-                            if paused {
-                                if ui.button("▶ Resume").clicked() { do_resume = true; }
-                                if ui.button("⏭ Step").clicked()   { do_step   = true; }
-                            } else {
-                                if ui.button("⏸ Pause").clicked()  { do_pause  = true; }
+                            if ui.button("  OK  ").clicked() {
+                                do_reset = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                do_cancel = true;
                             }
                         });
-                        ui.separator();
+                    });
+                if do_reset {
+                    self.reset(power_cycle);
+                    self.pending_reset = None;
+                }
+                if do_cancel {
+                    self.pending_reset = None;
+                }
+            }
 
-                        // ── Disassembly listing ─────────────────────────────
-                        ui.label("Disassembly:");
-                        egui::ScrollArea::vertical()
-                            .max_height(200.0)
-                            .id_source("dbg_disasm")
-                            .show(ui, |ui| {
-                                let start = if paused { pc } else { self.debugger.cursor };
-                                let mut addr = start;
-                                for _ in 0..20 {
-                                    let instr = disassemble_one(addr, |a| {
-                                        self.emu.bus.read_raw(a)
-                                    });
-                                    let text = format!(
-                                        "{} {}",
-                                        if addr == pc { "▶" } else { " " },
-                                        format_instruction(&instr),
-                                    );
-                                    let resp = ui.selectable_label(
-                                        addr == self.debugger.cursor,
-                                        egui::RichText::new(text).monospace(),
-                                    );
-                                    if resp.clicked() { cursor_update = Some(addr); }
-                                    addr = addr.wrapping_add(instr.bytes as u16);
-                                }
-                            });
-                        ui.separator();
+            // ── Debugger (renders into framebuffer, command bar at bottom) ────
+            if self.show_debugger && self.debugger.active {
+                use apple2_debugger::commands::{self, CmdResult, CpuRegs};
+                use apple2_debugger::disasm::{disassemble_one, format_instruction};
 
-                        // ── Breakpoints ─────────────────────────────────────
-                        ui.label("Breakpoints:");
-                        let mut remove_idx: Option<usize> = None;
-                        for (idx, bp) in self.debugger.breakpoints.breakpoints.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!("{:04X}", bp.address));
-                                if ui.small_button("✕").clicked() {
-                                    remove_idx = Some(idx);
+                let paused = self.debugger.active;
+                let mut do_step = false;
+                let mut do_step_over = false;
+                let mut do_step_out = false;
+                let mut do_resume = false;
+                let mut do_exec_cmd = false;
+                let cmd_empty = self.debugger_cmd_input.is_empty();
+
+                // AppleWin-compatible keyboard shortcuts
+                ctx.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::Key {
+                            key,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                            ..
+                        } = event
+                        {
+                            let ctrl = modifiers.ctrl || modifiers.command;
+                            let shift = modifiers.shift;
+                            match key {
+                                Key::Space if cmd_empty && !ctrl && !shift => do_step = true,
+                                Key::Space if cmd_empty && ctrl && !shift => do_step_over = true,
+                                Key::Space if cmd_empty && shift && !ctrl => do_step_out = true,
+                                Key::F5 => do_resume = true,
+                                Key::ArrowUp if cmd_empty && !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger
+                                            .goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(1),
+                                    );
                                 }
-                            });
+                                Key::ArrowDown if cmd_empty && !ctrl && !shift => {
+                                    let start = self.debugger.goto_addr.unwrap_or(self.emu.cpu.pc);
+                                    let instr =
+                                        apple2_debugger::disasm::disassemble_one(start, |a| {
+                                            self.emu.bus.read_raw(a)
+                                        });
+                                    self.debugger.goto_addr =
+                                        Some(start.wrapping_add(instr.bytes as u16));
+                                }
+                                Key::PageUp if !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger
+                                            .goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(0x20),
+                                    );
+                                }
+                                Key::PageDown if !ctrl && !shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger
+                                            .goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_add(0x20),
+                                    );
+                                }
+                                Key::PageUp if shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger
+                                            .goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_sub(0x100),
+                                    );
+                                }
+                                Key::PageDown if shift => {
+                                    self.debugger.goto_addr = Some(
+                                        self.debugger
+                                            .goto_addr
+                                            .unwrap_or(self.emu.cpu.pc)
+                                            .wrapping_add(0x100),
+                                    );
+                                }
+                                Key::Home => {
+                                    self.debugger.goto_addr = None;
+                                }
+                                Key::ArrowRight if ctrl && cmd_empty => {
+                                    if let Some(addr) = self.debugger.goto_addr {
+                                        self.emu.cpu.pc = addr;
+                                        self.debugger.print(format!("PC set to ${addr:04X}"));
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
-                        if let Some(idx) = remove_idx { do_remove_bp = Some(idx); }
+                    }
+                });
+
+                // Command input bar
+                let cmd_id = egui::Id::new("dbg_cmd_input");
+                egui::TopBottomPanel::bottom("dbg_cmd")
+                    .frame(
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(16, 16, 32))
+                            .inner_margin(egui::style::Margin::symmetric(6.0, 2.0)),
+                    )
+                    .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("Add:");
-                            ui.text_edit_singleline(&mut self.debugger_bp_input);
-                            if ui.button("Add").clicked() { do_add_bp = true; }
+                            ui.label(
+                                RichText::new("Spc:Step C-Spc:Over S-Spc:Out F5:Go F7:Exit")
+                                    .monospace()
+                                    .small()
+                                    .color(Color32::from_rgb(100, 100, 100)),
+                            );
+                            ui.label(
+                                RichText::new(">")
+                                    .monospace()
+                                    .color(Color32::from_rgb(255, 128, 0)),
+                            );
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.debugger_cmd_input)
+                                    .id(cmd_id)
+                                    .desired_width(ui.available_width() - 8.0)
+                                    .font(FontId::monospace(12.0))
+                                    .text_color(Color32::WHITE),
+                            );
+                            if !resp.has_focus() {
+                                resp.request_focus();
+                            }
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                do_exec_cmd = true;
+                            }
                         });
                     });
-
-                // Apply deferred actions after the closure releases borrows
-                if do_pause  { self.debugger.active = true; }
-                if do_resume { self.debugger.active = false; }
-                if do_step && paused { self.emu.step(); }
-                if do_add_bp
-                    && let Ok(addr) = u16::from_str_radix(self.debugger_bp_input.trim(), 16) {
-                    self.debugger.breakpoints.add(Breakpoint::at(addr));
-                    self.debugger_bp_input.clear();
+                if do_exec_cmd {
+                    ctx.memory_mut(|m| m.request_focus(cmd_id));
                 }
-                if let Some(idx) = do_remove_bp { self.debugger.breakpoints.remove(idx); }
-                if let Some(addr) = cursor_update { self.debugger.cursor = addr; }
+
+                // Apply deferred actions
+                if do_resume {
+                    self.debugger.deactivate();
+                    self.show_debugger = false;
+                }
+                if do_step && paused {
+                    if self.debugger.trace.enabled {
+                        use apple2_debugger::trace::TraceEntry;
+                        let instr = disassemble_one(self.emu.cpu.pc, |a| self.emu.bus.read_raw(a));
+                        self.debugger.trace.push(TraceEntry {
+                            pc: self.emu.cpu.pc,
+                            opcode: instr.opcode,
+                            a: self.emu.cpu.a,
+                            x: self.emu.cpu.x,
+                            y: self.emu.cpu.y,
+                            sp: self.emu.cpu.sp,
+                            flags: self.emu.cpu.flags.bits(),
+                            cycles: self.emu.cpu.cycles,
+                            text: format_instruction(&instr),
+                        });
+                    }
+                    self.emu.step();
+                    self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
+                }
+                if do_step_over && paused {
+                    let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
+                    if opcode == 0x20 {
+                        self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
+                        self.debugger.deactivate();
+                    } else {
+                        self.emu.step();
+                        self.debugger.stop_reason = apple2_debugger::state::StopReason::StepOver;
+                    }
+                }
+                if do_step_out && paused {
+                    self.debugger.step_out_sp = Some(self.emu.cpu.sp);
+                    self.debugger.deactivate();
+                }
+
+                // Execute console command
+                if do_exec_cmd {
+                    let cmd_text = self.debugger_cmd_input.clone();
+                    self.debugger_cmd_input.clear();
+                    self.debugger.print(format!("> {cmd_text}"));
+                    let regs = CpuRegs {
+                        a: self.emu.cpu.a,
+                        x: self.emu.cpu.x,
+                        y: self.emu.cpu.y,
+                        sp: self.emu.cpu.sp,
+                        pc: self.emu.cpu.pc,
+                        flags: self.emu.cpu.flags.bits(),
+                        cycles: self.emu.cpu.cycles,
+                    };
+                    let result = commands::execute_command(
+                        &mut self.debugger,
+                        &cmd_text,
+                        self.emu.cpu.pc,
+                        regs,
+                        |a| self.emu.bus.read_raw(a),
+                    );
+                    match result {
+                        CmdResult::Output(lines) => {
+                            self.debugger.print_lines(&lines);
+                        }
+                        CmdResult::Go => {
+                            self.debugger.deactivate();
+                            self.show_debugger = false;
+                        }
+                        CmdResult::Step => {
+                            self.emu.step();
+                            self.debugger.stop_reason = apple2_debugger::state::StopReason::Step;
+                        }
+                        CmdResult::StepOver => {
+                            let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
+                            if opcode == 0x20 {
+                                self.debugger.step_over_target =
+                                    Some(self.emu.cpu.pc.wrapping_add(3));
+                                self.debugger.deactivate();
+                            } else {
+                                self.emu.step();
+                            }
+                        }
+                        CmdResult::StepOut => {
+                            self.debugger.step_out_sp = Some(self.emu.cpu.sp);
+                            self.debugger.deactivate();
+                        }
+                        CmdResult::Trace(n) => {
+                            self.debugger.trace.enabled = true;
+                            self.debugger.trace_remaining = n;
+                        }
+                        CmdResult::SetPC(addr) => {
+                            self.emu.cpu.pc = addr;
+                            self.debugger.deactivate();
+                        }
+                        CmdResult::MemWrite(addr, val) => {
+                            self.emu.bus.write_raw(addr, val);
+                            self.debugger.print(format!("  ${addr:04X} = {val:02X}"));
+                        }
+                        CmdResult::SetReg(reg, val) => match reg {
+                            'A' => self.emu.cpu.a = val as u8,
+                            'X' => self.emu.cpu.x = val as u8,
+                            'Y' => self.emu.cpu.y = val as u8,
+                            'S' | 'P' if val > 0xFF => self.emu.cpu.pc = val,
+                            'S' => self.emu.cpu.sp = val as u8,
+                            'P' => self.emu.cpu.pc = val,
+                            _ => {}
+                        },
+                        CmdResult::Nop => {}
+                        CmdResult::Error(msg) => {
+                            self.debugger.print(format!("Error: {msg}"));
+                        }
+                        CmdResult::ToggleBreak => {
+                            if self.debugger.active {
+                                self.debugger.deactivate();
+                            } else {
+                                self.debugger
+                                    .activate(apple2_debugger::state::StopReason::UserBreak);
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Settings dialog ───────────────────────────────────────────────
             if self.show_settings {
-                let mut apply_settings  = false;
+                let mut apply_settings = false;
                 let mut cancel_settings = false;
                 egui::Window::new("Settings")
                     .collapsible(false)
@@ -1504,8 +2570,7 @@ mod gui {
                                     });
                                 ui.add_space(4.0);
                                 ui.label(RichText::new(
-                                    "Joystick emulation is not yet implemented.\n\
-                                     Settings are saved for future use."
+                                    "Physical gamepads, keyboard (Arrow/NumPad), and mouse modes supported."
                                 ).small());
                             }
                             5 => {
@@ -1650,15 +2715,16 @@ mod gui {
                     });
 
                 if apply_settings {
-                    let machine_changed =
-                        self.pending_config.machine_type != self.config.machine_type
-                        || self.pending_config.cpu_type  != self.config.cpu_type;
-                    let slots_changed    = self.pending_config.slot_cards    != self.config.slot_cards;
-                    let scale_changed    = self.pending_config.window_scale  != self.config.window_scale;
+                    let machine_changed = self.pending_config.machine_type
+                        != self.config.machine_type
+                        || self.pending_config.cpu_type != self.config.cpu_type;
+                    let slots_changed = self.pending_config.slot_cards != self.config.slot_cards;
+                    let scale_changed =
+                        self.pending_config.window_scale != self.config.window_scale;
                     self.config = self.pending_config.clone();
                     // Apply video settings immediately
-                    self.renderer.scanlines            = self.config.scanlines;
-                    self.renderer.mono_tint            = self.config.mono_tint();
+                    self.renderer.scanlines = self.config.scanlines;
+                    self.renderer.mono_tint = self.config.mono_tint();
                     self.renderer.color_vertical_blend = self.config.color_vertical_blend;
                     // Resize window if scale changed, but only when not maximized.
                     // In maximized state the OS controls the window size; we leave
@@ -1677,15 +2743,17 @@ mod gui {
                         self.emu = super::make_emulator(
                             self.config.machine_type,
                             self.config.cpu_type,
+                            &self.config.custom_rom_path,
+                            &self.config.custom_f8_rom_path,
                         );
                         apply_slot_cards(&mut self.emu, &self.config);
                         self.disk_slot = self.config.disk2_slot();
                         self.emu.mode = apple2_core::emulator::AppMode::Running;
                         Self::reload_disk(&mut self.emu, self.disk_slot, 0, &disk1);
                         Self::reload_disk(&mut self.emu, self.disk_slot, 1, &disk2);
-                        self.speaker_state    = false;
-                        self.dc_filter_ctr    = 0;
-                        self.spkr_cycle_rem   = 0.0;
+                        self.speaker_state = false;
+                        self.dc_filter_ctr = 0;
+                        self.spkr_cycle_rem = 0.0;
                         self.last_audio_cycle = self.emu.cpu.cycles;
                     }
                     self.config.save();
@@ -1693,13 +2761,15 @@ mod gui {
                 }
                 if cancel_settings {
                     self.pending_config = self.config.clone();
-                    self.show_settings  = false;
+                    self.show_settings = false;
                 }
             }
 
             // ── Per-card options popups ───────────────────────────────────────
             for slot in 0..8usize {
-                if !self.slot_options_open[slot] { continue; }
+                if !self.slot_options_open[slot] {
+                    continue;
+                }
                 let card_type = self.pending_config.slot_cards[slot];
                 let title = format!("Slot {} — {} Options", slot, card_name(card_type));
                 let mut still_open = self.slot_options_open[slot];
@@ -1707,55 +2777,49 @@ mod gui {
                     .collapsible(false)
                     .resizable(false)
                     .open(&mut still_open)
-                    .show(ctx, |ui| {
-                        match card_type {
-                            CardType::Mockingboard => {
-                                ui.checkbox(
-                                    &mut self.pending_config.mockingboard_has_speech,
-                                    "Enable SSI263 speech chips",
-                                );
-                            }
-                            CardType::Phasor => {
-                                ui.label("Phasor mode:");
+                    .show(ctx, |ui| match card_type {
+                        CardType::Mockingboard => {
+                            ui.checkbox(
+                                &mut self.pending_config.mockingboard_has_speech,
+                                "Enable SSI263 speech chips",
+                            );
+                        }
+                        CardType::Phasor => {
+                            ui.label("Phasor mode:");
+                            ui.radio_value(
+                                &mut self.pending_config.phasor_native_mode,
+                                true,
+                                "Phasor native mode",
+                            );
+                            ui.radio_value(
+                                &mut self.pending_config.phasor_native_mode,
+                                false,
+                                "Mockingboard compatible mode",
+                            );
+                        }
+                        CardType::Saturn128K => {
+                            ui.label("RAM size:");
+                            for &kb in &[16u32, 32, 64, 128] {
                                 ui.radio_value(
-                                    &mut self.pending_config.phasor_native_mode,
-                                    true,
-                                    "Phasor native mode",
-                                );
-                                ui.radio_value(
-                                    &mut self.pending_config.phasor_native_mode,
-                                    false,
-                                    "Mockingboard compatible mode",
+                                    &mut self.pending_config.saturn_ram_kb,
+                                    kb,
+                                    format!("{kb}K"),
                                 );
                             }
-                            CardType::Saturn128K => {
-                                ui.label("RAM size:");
-                                for &kb in &[16u32, 32, 64, 128] {
-                                    ui.radio_value(
-                                        &mut self.pending_config.saturn_ram_kb,
-                                        kb,
-                                        format!("{kb}K"),
-                                    );
-                                }
+                        }
+                        CardType::RamWorksIII => {
+                            ui.label("RAM size:");
+                            for &kb in &[64u32, 128, 256, 512, 1024, 2048, 4096, 8192] {
+                                let label = if kb >= 1024 {
+                                    format!("{}MB", kb / 1024)
+                                } else {
+                                    format!("{kb}K")
+                                };
+                                ui.radio_value(&mut self.pending_config.ramworks_ram_kb, kb, label);
                             }
-                            CardType::RamWorksIII => {
-                                ui.label("RAM size:");
-                                for &kb in &[64u32, 128, 256, 512, 1024, 2048, 4096, 8192] {
-                                    let label = if kb >= 1024 {
-                                        format!("{}MB", kb / 1024)
-                                    } else {
-                                        format!("{kb}K")
-                                    };
-                                    ui.radio_value(
-                                        &mut self.pending_config.ramworks_ram_kb,
-                                        kb,
-                                        label,
-                                    );
-                                }
-                            }
-                            _ => {
-                                ui.label("No options available.");
-                            }
+                        }
+                        _ => {
+                            ui.label("No options available.");
                         }
                     });
                 self.slot_options_open[slot] = still_open;
@@ -1782,103 +2846,132 @@ mod gui {
                     });
             }
 
-            // ── Central panel — Apple II screen framed with 3D bevel ──────────
+            // ── Central panel — Apple II screen / debugger display ─────────────
+            let central_bg = if debugger_fullscreen {
+                Color32::BLACK
+            } else {
+                WIN_FACE
+            };
+            let central_margin = if debugger_fullscreen { 0.0 } else { 8.0 };
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::none()
-                        .fill(WIN_FACE)
-                        .inner_margin(egui::style::Margin::same(8.0)),
+                        .fill(central_bg)
+                        .inner_margin(egui::style::Margin::same(central_margin)),
                 )
                 .show(ctx, |ui| {
                     let avail = ui.available_rect_before_wrap();
-
                     let sw = SCREEN_W as f32;
                     let sh = SCREEN_H as f32;
-                    // Use integer scaling in PHYSICAL pixels, not egui points.
-                    // At non-100% DPI (e.g. 125%), an egui-point integer scale maps
-                    // to a fractional physical pixel count, causing the GPU to blend
-                    // adjacent framebuffer rows even with Nearest filtering.
                     let ppp = ctx.pixels_per_point();
-                    let avail_pw = (avail.width()  - BEVEL * 2.0) * ppp;
-                    let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
-                    let phys_scale_w = (avail_pw / sw).floor().max(1.0);
-                    let phys_scale_h = (avail_ph / sh).floor().max(1.0);
-                    let phys_scale   = phys_scale_w.min(phys_scale_h);
-                    // Convert back to egui points for layout
-                    let scale = phys_scale / ppp;
-                    let outer_w = sw * scale + BEVEL * 2.0;
-                    let outer_h = sh * scale + BEVEL * 2.0;
 
-                    let ox = avail.left() + ((avail.width()  - outer_w) / 2.0).max(0.0);
-                    let oy = avail.top()  + ((avail.height() - outer_h) / 2.0).max(0.0);
+                    if debugger_fullscreen {
+                        // Debugger mode: fill area, no bevel
+                        let avail_pw = avail.width() * ppp;
+                        let avail_ph = avail.height() * ppp;
+                        let phys_scale = (avail_pw / sw)
+                            .floor()
+                            .min((avail_ph / sh).floor())
+                            .max(1.0);
+                        let scale = phys_scale / ppp;
+                        let disp_w = sw * scale;
+                        let disp_h = sh * scale;
+                        let ox = avail.left() + ((avail.width() - disp_w) / 2.0).max(0.0);
+                        let oy = avail.top() + ((avail.height() - disp_h) / 2.0).max(0.0);
+                        let screen =
+                            Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(disp_w, disp_h));
+                        if let Some(tid) = tex_id {
+                            ui.painter().image(
+                                tid,
+                                screen,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        ui.allocate_rect(avail, Sense::hover());
+                    } else {
+                        // Normal mode: bevel + centred screen
+                        let avail_pw = (avail.width() - BEVEL * 2.0) * ppp;
+                        let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
+                        let phys_scale_w = (avail_pw / sw).floor().max(1.0);
+                        let phys_scale_h = (avail_ph / sh).floor().max(1.0);
+                        let phys_scale = phys_scale_w.min(phys_scale_h);
+                        let scale = phys_scale / ppp;
+                        let outer_w = sw * scale + BEVEL * 2.0;
+                        let outer_h = sh * scale + BEVEL * 2.0;
 
-                    let outer  = Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(outer_w, outer_h));
-                    let screen = outer.shrink(BEVEL);
+                        let ox = avail.left() + ((avail.width() - outer_w) / 2.0).max(0.0);
+                        let oy = avail.top() + ((avail.height() - outer_h) / 2.0).max(0.0);
 
-                    let painter = ui.painter();
-                    draw_sunken_bevel(painter, outer);
+                        let outer =
+                            Rect::from_min_size(Pos2::new(ox, oy), Vec2::new(outer_w, outer_h));
+                        let screen = outer.shrink(BEVEL);
 
-                    if let Some(tid) = tex_id {
-                        painter.image(
-                            tid,
-                            screen,
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    }
+                        let painter = ui.painter();
+                        draw_sunken_bevel(painter, outer);
 
-                    // ── Logo mode overlay — version + prompt ──────────────────
-                    if in_logo_mode {
-                        let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
-                        // Version string position mirrors the C++ DRAWVERSION macro:
-                        // scale*540 x scale*358 relative to the 560×384 logo area.
-                        let vx = screen.left() + screen.width()  * (540.0 / 560.0);
-                        let vy = screen.top()  + screen.height() * (358.0 / 384.0);
-                        let vfont = FontId::proportional(13.0);
-                        // 3-layer rendering matching C++ hi-colour path:
-                        // (+1,+1) dark shadow, (-1,-1) light highlight, (0,0) main purple
-                        painter.text(
-                            Pos2::new(vx + 1.0, vy + 1.0),
-                            egui::Align2::RIGHT_BOTTOM,
-                            &version,
-                            vfont.clone(),
-                            Color32::from_rgb(0x30, 0x30, 0x70),
-                        );
-                        painter.text(
-                            Pos2::new(vx - 1.0, vy - 1.0),
-                            egui::Align2::RIGHT_BOTTOM,
-                            &version,
-                            vfont.clone(),
-                            Color32::from_rgb(0xC0, 0x70, 0xE0),
-                        );
-                        painter.text(
-                            Pos2::new(vx, vy),
-                            egui::Align2::RIGHT_BOTTOM,
-                            &version,
-                            vfont,
-                            Color32::from_rgb(0x70, 0x30, 0xE0),
-                        );
-                        // "Press any key" prompt at bottom-centre
-                        let px = screen.center().x;
-                        let py = screen.bottom() - 10.0;
-                        let pfont = FontId::proportional(13.0);
-                        painter.text(
-                            Pos2::new(px + 1.0, py + 1.0),
-                            egui::Align2::CENTER_BOTTOM,
-                            "Press any key to start",
-                            pfont.clone(),
-                            Color32::BLACK,
-                        );
-                        painter.text(
-                            Pos2::new(px, py),
-                            egui::Align2::CENTER_BOTTOM,
-                            "Press any key to start",
-                            pfont,
-                            Color32::WHITE,
-                        );
-                    }
+                        if let Some(tid) = tex_id {
+                            painter.image(
+                                tid,
+                                screen,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
 
-                    ui.allocate_rect(outer, Sense::hover());
+                        // ── Logo mode overlay — version + prompt ──────────────────
+                        if in_logo_mode {
+                            let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+                            // Version string position mirrors the C++ DRAWVERSION macro:
+                            // scale*540 x scale*358 relative to the 560×384 logo area.
+                            let vx = screen.left() + screen.width() * (540.0 / 560.0);
+                            let vy = screen.top() + screen.height() * (358.0 / 384.0);
+                            let vfont = FontId::proportional(13.0);
+                            // 3-layer rendering matching C++ hi-colour path:
+                            // (+1,+1) dark shadow, (-1,-1) light highlight, (0,0) main purple
+                            painter.text(
+                                Pos2::new(vx + 1.0, vy + 1.0),
+                                egui::Align2::RIGHT_BOTTOM,
+                                &version,
+                                vfont.clone(),
+                                Color32::from_rgb(0x30, 0x30, 0x70),
+                            );
+                            painter.text(
+                                Pos2::new(vx - 1.0, vy - 1.0),
+                                egui::Align2::RIGHT_BOTTOM,
+                                &version,
+                                vfont.clone(),
+                                Color32::from_rgb(0xC0, 0x70, 0xE0),
+                            );
+                            painter.text(
+                                Pos2::new(vx, vy),
+                                egui::Align2::RIGHT_BOTTOM,
+                                &version,
+                                vfont,
+                                Color32::from_rgb(0x70, 0x30, 0xE0),
+                            );
+                            // "Press any key" prompt at bottom-centre
+                            let px = screen.center().x;
+                            let py = screen.bottom() - 10.0;
+                            let pfont = FontId::proportional(13.0);
+                            painter.text(
+                                Pos2::new(px + 1.0, py + 1.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                "Press any key to start",
+                                pfont.clone(),
+                                Color32::BLACK,
+                            );
+                            painter.text(
+                                Pos2::new(px, py),
+                                egui::Align2::CENTER_BOTTOM,
+                                "Press any key to start",
+                                pfont,
+                                Color32::WHITE,
+                            );
+                        }
+
+                        ui.allocate_rect(outer, Sense::hover());
+                    } // end else (normal mode)
                 });
 
             // ── Apply deferred actions ────────────────────────────────────────
@@ -1896,13 +2989,18 @@ mod gui {
                     self.reset(false);
                 }
             }
-            if act_quit        { self.config.save(); frame.close(); }
-            if act_about       { self.show_about = true; }
+            if act_quit {
+                self.config.save();
+                frame.close();
+            }
+            if act_about {
+                self.show_about = true;
+            }
             if act_show_settings {
                 self.pending_config = self.config.clone();
-                self.show_settings  = true;
+                self.show_settings = true;
             }
-            if act_fullscreen  {
+            if act_fullscreen {
                 self.fullscreen = !self.fullscreen;
                 frame.set_fullscreen(self.fullscreen);
             }
@@ -1933,7 +3031,8 @@ mod gui {
                 if let Some(path) = open_disk_dialog("Load Disk 1", start_dir)
                     && let Ok(data) = std::fs::read(&path)
                 {
-                    let ext = path.extension()
+                    let ext = path
+                        .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
@@ -1941,8 +3040,8 @@ mod gui {
                     let path_str = path.to_string_lossy().into_owned();
                     self.config.add_recent_disk(&path_str);
                     self.config.last_disk1 = Some(path_str);
-                    self.config.last_disk_dir = path.parent()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    self.config.last_disk_dir =
+                        path.parent().map(|p| p.to_string_lossy().into_owned());
                     self.disk1 = Some(path);
                     self.config.save();
                 }
@@ -1952,7 +3051,8 @@ mod gui {
                 if let Some(path) = open_disk_dialog("Load Disk 2", start_dir)
                     && let Ok(data) = std::fs::read(&path)
                 {
-                    let ext = path.extension()
+                    let ext = path
+                        .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
@@ -1960,8 +3060,8 @@ mod gui {
                     let path_str = path.to_string_lossy().into_owned();
                     self.config.add_recent_disk(&path_str);
                     self.config.last_disk2 = Some(path_str);
-                    self.config.last_disk_dir = path.parent()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    self.config.last_disk_dir =
+                        path.parent().map(|p| p.to_string_lossy().into_owned());
                     self.disk2 = Some(path);
                     self.config.save();
                 }
@@ -1970,7 +3070,8 @@ mod gui {
             if let Some(path_str) = act_recent_disk {
                 let path = PathBuf::from(&path_str);
                 if let Ok(data) = std::fs::read(&path) {
-                    let ext = path.extension()
+                    let ext = path
+                        .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
@@ -1978,8 +3079,8 @@ mod gui {
                     self.emu.bus.set_disk_path(self.disk_slot, 0, path.clone());
                     self.config.add_recent_disk(&path_str);
                     self.config.last_disk1 = Some(path_str);
-                    self.config.last_disk_dir = path.parent()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    self.config.last_disk_dir =
+                        path.parent().map(|p| p.to_string_lossy().into_owned());
                     self.disk1 = Some(path);
                     self.config.save();
                 }
@@ -1993,14 +3094,15 @@ mod gui {
                     let path_str = path.to_string_lossy().into_owned();
                     self.config.add_recent_hdd(&path_str);
                     self.config.last_hdd1 = Some(path_str);
-                    self.config.last_hdd_dir = path.parent()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    self.config.last_hdd_dir =
+                        path.parent().map(|p| p.to_string_lossy().into_owned());
                     // Apply to any installed HD card
                     for slot in 0..apple2_core::card::NUM_SLOTS {
                         if let Some(card) = self.emu.bus.cards.slot_mut(slot)
                             && card.card_type() == apple2_core::card::CardType::GenericHdd
                         {
-                            if let Some(hd) = card.as_any_mut()
+                            if let Some(hd) = card
+                                .as_any_mut()
                                 .downcast_mut::<apple2_core::cards::hd::HdCard>()
                             {
                                 hd.load_image(0, data);
@@ -2019,13 +3121,14 @@ mod gui {
                     let path_str = path.to_string_lossy().into_owned();
                     self.config.add_recent_hdd(&path_str);
                     self.config.last_hdd2 = Some(path_str);
-                    self.config.last_hdd_dir = path.parent()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    self.config.last_hdd_dir =
+                        path.parent().map(|p| p.to_string_lossy().into_owned());
                     for slot in 0..apple2_core::card::NUM_SLOTS {
                         if let Some(card) = self.emu.bus.cards.slot_mut(slot)
                             && card.card_type() == apple2_core::card::CardType::GenericHdd
                         {
-                            if let Some(hd) = card.as_any_mut()
+                            if let Some(hd) = card
+                                .as_any_mut()
                                 .downcast_mut::<apple2_core::cards::hd::HdCard>()
                             {
                                 hd.load_image(1, data);
@@ -2049,13 +3152,14 @@ mod gui {
                 if let Ok(data) = std::fs::read(&path) {
                     self.config.add_recent_hdd(&path_str);
                     self.config.last_hdd1 = Some(path_str);
-                    self.config.last_hdd_dir = path.parent()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    self.config.last_hdd_dir =
+                        path.parent().map(|p| p.to_string_lossy().into_owned());
                     for slot in 0..apple2_core::card::NUM_SLOTS {
                         if let Some(card) = self.emu.bus.cards.slot_mut(slot)
                             && card.card_type() == apple2_core::card::CardType::GenericHdd
                         {
-                            if let Some(hd) = card.as_any_mut()
+                            if let Some(hd) = card
+                                .as_any_mut()
                                 .downcast_mut::<apple2_core::cards::hd::HdCard>()
                             {
                                 hd.load_image(0, data);
@@ -2073,6 +3177,45 @@ mod gui {
                 save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
             }
 
+            // ── Drag-and-drop disk insertion ─────────────────────────────
+            // First dropped file → drive 1, second → drive 2.
+            {
+                let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.clone());
+                let disk_exts = [
+                    "dsk", "do", "po", "nib", "nb2", "woz", "d13", "gz", "zip", "2mg", "2img",
+                ];
+                for (i, file) in dropped.iter().enumerate() {
+                    if let Some(ref path) = file.path {
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        if disk_exts.iter().any(|&e| e == ext) {
+                            let drive = i.min(1); // 0 or 1
+                            if let Ok(data) = std::fs::read(path) {
+                                self.emu.bus.load_disk(self.disk_slot, drive, &data, &ext);
+                                self.emu
+                                    .bus
+                                    .set_disk_path(self.disk_slot, drive, path.clone());
+                                let path_str = path.to_string_lossy().into_owned();
+                                self.config.add_recent_disk(&path_str);
+                                if drive == 0 {
+                                    self.disk1 = Some(path.clone());
+                                    self.config.last_disk1 = Some(path_str);
+                                } else {
+                                    self.disk2 = Some(path.clone());
+                                    self.config.last_disk2 = Some(path_str);
+                                }
+                                self.config.last_disk_dir =
+                                    path.parent().map(|p| p.to_string_lossy().into_owned());
+                                self.config.save();
+                            }
+                        }
+                    }
+                }
+            }
+
             // F11 fullscreen shortcut (supplement to the action already handled above)
             let f11 = ctx.input(|i| i.key_pressed(Key::F11));
             if f11 {
@@ -2088,8 +3231,7 @@ mod gui {
             self.config.window_maximized = maximized;
             // Only save position when not maximized; the maximized position is
             // the OS-managed full-screen rect, which isn't useful to restore.
-            if !maximized
-                && let Some(pos) = frame.info().window_info.position {
+            if !maximized && let Some(pos) = frame.info().window_info.position {
                 self.config.window_x = Some(pos.x as i32);
                 self.config.window_y = Some(pos.y as i32);
             }
@@ -2123,21 +3265,24 @@ mod gui {
     fn apply_slot_cards(emu: &mut Emulator, config: &Config) {
         use apple2_core::cards::col80::{Col80Card, Extended80ColCard};
         use apple2_core::cards::disk2::Disk2Card;
+        use apple2_core::cards::fourplay::FourPlayCard;
         use apple2_core::cards::hd::HdCard;
+        use apple2_core::cards::languagecard::LanguageCardCard;
+        use apple2_core::cards::megaaudio::MegaAudioCard;
         use apple2_core::cards::mockingboard::MockingboardCard;
         use apple2_core::cards::mouse::MouseCard;
-        use apple2_core::cards::phasor::PhasorCard;
-        use apple2_core::cards::fourplay::FourPlayCard;
         use apple2_core::cards::noslotclock::NoSlotClockCard;
+        use apple2_core::cards::phasor::PhasorCard;
+        use apple2_core::cards::printer::PrinterCard;
         use apple2_core::cards::ramworks::RamWorksCard;
         use apple2_core::cards::sam::SamCard;
         use apple2_core::cards::saturn::Saturn128KCard;
+        use apple2_core::cards::sdmusic::SdMusicCard;
         use apple2_core::cards::snesmax::SnesMaxCard;
         use apple2_core::cards::ssc::SscCard;
-        use apple2_core::cards::printer::PrinterCard;
+        use apple2_core::cards::uthernet::UthernCard;
         use apple2_core::cards::vidhd::VidHdCard;
         use apple2_core::cards::z80card::Z80Card;
-        use apple2_core::cards::uthernet::UthernCard;
         // Clear all slots first
         for slot in 0..apple2_core::card::NUM_SLOTS {
             emu.bus.cards.remove(slot);
@@ -2209,10 +3354,23 @@ mod gui {
                     emu.bus.cards.insert(Box::new(Z80Card::new(slot)));
                 }
                 CardType::Uthernet => {
-                    emu.bus.cards.insert(Box::new(UthernCard::new_uthernet1(slot)));
+                    emu.bus
+                        .cards
+                        .insert(Box::new(UthernCard::new_uthernet1(slot)));
                 }
                 CardType::Uthernet2 => {
-                    emu.bus.cards.insert(Box::new(UthernCard::new_uthernet2(slot)));
+                    emu.bus
+                        .cards
+                        .insert(Box::new(UthernCard::new_uthernet2(slot)));
+                }
+                CardType::LanguageCard => {
+                    emu.bus.cards.insert(Box::new(LanguageCardCard::new(slot)));
+                }
+                CardType::MegaAudio => {
+                    emu.bus.cards.insert(Box::new(MegaAudioCard::new(slot)));
+                }
+                CardType::SdMusic => {
+                    emu.bus.cards.insert(Box::new(SdMusicCard::new(slot)));
                 }
                 _ => {} // not yet implemented — leave slot empty
             }
@@ -2220,13 +3378,19 @@ mod gui {
         // Aux slot (slot 8 / SLOT_AUX)
         match config.aux_slot_card {
             CardType::Extended80Col => {
-                emu.bus.cards.insert_aux(Box::new(Extended80ColCard::new(apple2_core::card::SLOT_AUX)));
+                emu.bus.cards.insert_aux(Box::new(Extended80ColCard::new(
+                    apple2_core::card::SLOT_AUX,
+                )));
             }
             CardType::Col80 => {
-                emu.bus.cards.insert_aux(Box::new(Col80Card::new(apple2_core::card::SLOT_AUX)));
+                emu.bus
+                    .cards
+                    .insert_aux(Box::new(Col80Card::new(apple2_core::card::SLOT_AUX)));
             }
             CardType::RamWorksIII => {
-                emu.bus.cards.insert_aux(Box::new(RamWorksCard::new(apple2_core::card::SLOT_AUX)));
+                emu.bus
+                    .cards
+                    .insert_aux(Box::new(RamWorksCard::new(apple2_core::card::SLOT_AUX)));
             }
             _ => {} // Empty or unsupported — leave aux slot empty
         }
@@ -2264,11 +3428,14 @@ mod gui {
         let w = 1.0f32;
         let p = ui.painter();
         // top
-        p.line_segment([rect.left_top(),  rect.right_top()],    Stroke::new(w, tl));
+        p.line_segment([rect.left_top(), rect.right_top()], Stroke::new(w, tl));
         // left
-        p.line_segment([rect.left_top(),  rect.left_bottom()],  Stroke::new(w, tl));
+        p.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(w, tl));
         // bottom
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(w, br));
+        p.line_segment(
+            [rect.left_bottom(), rect.right_bottom()],
+            Stroke::new(w, br),
+        );
         // right
         p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(w, br));
 
@@ -2298,7 +3465,8 @@ mod gui {
         }
 
         if resp.hovered() {
-            ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, WIN_DSHADOW));
+            ui.painter()
+                .rect_stroke(rect, 2.0, Stroke::new(1.0, WIN_DSHADOW));
         }
 
         resp.on_hover_text(tooltip)
@@ -2326,54 +3494,33 @@ mod gui {
 
     // ── Screenshot ────────────────────────────────────────────────────────────
 
-    /// Save `pixels` (RGBA8888, row-major) as a 24bpp BMP file.
+    /// Save `pixels` (RGBA8888, row-major) as a PNG file.
     fn save_screenshot(pixels: &[u8], w: usize, h: usize) {
-        let path = screenshot_path();
-        let Some(path) = path else { return };
-        let row_stride = (w * 3).div_ceil(4) * 4;
-        let pixel_bytes = row_stride * h;
-        let file_size = (14 + 40 + pixel_bytes) as u32;
+        let Some(path) = screenshot_path() else {
+            return;
+        };
 
-        let mut data = Vec::with_capacity(file_size as usize);
+        let Ok(file) = std::fs::File::create(&path) else {
+            eprintln!("Screenshot failed: could not create {}", path.display());
+            return;
+        };
+        let buf_writer = &mut std::io::BufWriter::new(file);
 
-        // BMP file header (14 bytes)
-        data.extend_from_slice(b"BM");
-        data.extend_from_slice(&file_size.to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        data.extend_from_slice(&54u32.to_le_bytes()); // pixel offset
+        let mut encoder = png::Encoder::new(buf_writer, w as u32, h as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
 
-        // DIB header / BITMAPINFOHEADER (40 bytes)
-        data.extend_from_slice(&40u32.to_le_bytes());  // header size
-        data.extend_from_slice(&(w as i32).to_le_bytes());
-        data.extend_from_slice(&(-(h as i32)).to_le_bytes()); // negative = top-down
-        data.extend_from_slice(&1u16.to_le_bytes());   // planes
-        data.extend_from_slice(&24u16.to_le_bytes());  // bpp
-        data.extend_from_slice(&0u32.to_le_bytes());   // compression (none)
-        data.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
-        data.extend_from_slice(&2835u32.to_le_bytes()); // X pixels/metre
-        data.extend_from_slice(&2835u32.to_le_bytes()); // Y pixels/metre
-        data.extend_from_slice(&0u32.to_le_bytes());   // colors used
-        data.extend_from_slice(&0u32.to_le_bytes());   // important colors
+        let Ok(mut writer) = encoder.write_header() else {
+            eprintln!("Screenshot failed: could not write PNG header");
+            return;
+        };
 
-        // Pixel data (24bpp BGR, top-down because we used negative height)
-        for row in 0..h {
-            let mut written = 0usize;
-            for col in 0..w {
-                let base = (row * w + col) * 4;
-                let r = pixels[base];
-                let g = pixels[base + 1];
-                let b = pixels[base + 2];
-                data.push(b);
-                data.push(g);
-                data.push(r);
-                written += 3;
-            }
-            // Pad row to 4-byte boundary
-            while !written.is_multiple_of(4) { data.push(0); written += 1; }
+        if writer.write_image_data(pixels).is_ok() {
+            eprintln!("Screenshot saved: {}", path.display());
+        } else {
+            eprintln!("Screenshot failed: could not write PNG data");
         }
-
-        let _ = std::fs::write(&path, &data);
-        eprintln!("Screenshot saved: {}", path.display());
     }
 
     /// Returns a timestamped path in %APPDATA%\applewin-rs\screenshots\ (Windows)
@@ -2383,12 +3530,14 @@ mod gui {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let fname = format!("screenshot_{ts}.bmp");
+        let fname = format!("screenshot_{ts}.png");
 
         #[cfg(windows)]
         {
             let appdata = std::env::var_os("APPDATA")?;
-            let dir = PathBuf::from(appdata).join("applewin-rs").join("screenshots");
+            let dir = PathBuf::from(appdata)
+                .join("applewin-rs")
+                .join("screenshots");
             std::fs::create_dir_all(&dir).ok()?;
             Some(dir.join(fname))
         }
@@ -2405,7 +3554,10 @@ mod gui {
             .set_title(title)
             .add_filter(
                 "Apple II Disk Images",
-                &["dsk", "do", "po", "nib", "woz", "hdv", "2mg", "img"],
+                &[
+                    "dsk", "do", "po", "nib", "nb2", "woz", "hdv", "2mg", "2img", "img", "gz",
+                    "zip",
+                ],
             )
             .add_filter("All Files", &["*"]);
         if let Some(dir) = start_dir {
@@ -2417,7 +3569,10 @@ mod gui {
     fn open_hdd_dialog(title: &str, start_dir: Option<&str>) -> Option<PathBuf> {
         let mut d = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("Apple II HDD Images", &["hdv", "po", "2mg", "img"])
+            .add_filter(
+                "Apple II HDD Images",
+                &["hdv", "po", "2mg", "2img", "img", "gz", "zip"],
+            )
             .add_filter("All Files", &["*"]);
         if let Some(dir) = start_dir {
             d = d.set_directory(dir);
@@ -2429,34 +3584,46 @@ mod gui {
 
     fn draw_sunken_bevel(painter: &egui::Painter, outer: Rect) {
         // Outer ring: dark shadow top/left, highlight bottom/right
-        bevel_ring(painter, outer,              2.0, WIN_DSHADOW, WIN_LIGHT);
+        bevel_ring(painter, outer, 2.0, WIN_DSHADOW, WIN_LIGHT);
         // Inner ring: mid-shadow top/left, face-colour bottom/right
-        bevel_ring(painter, outer.shrink(2.0),  2.0, WIN_SHADOW,  WIN_HILIGHT);
+        bevel_ring(painter, outer.shrink(2.0), 2.0, WIN_SHADOW, WIN_HILIGHT);
     }
 
     /// Draw top+left edges in `tl` colour and bottom+right edges in `br` colour.
     fn bevel_ring(painter: &egui::Painter, r: Rect, w: f32, tl: Color32, br: Color32) {
-        let h   = w / 2.0;
+        let h = w / 2.0;
         let stl = Stroke::new(w, tl);
         let sbr = Stroke::new(w, br);
         // top
         painter.line_segment(
-            [Pos2::new(r.left(), r.top() + h), Pos2::new(r.right(), r.top() + h)],
+            [
+                Pos2::new(r.left(), r.top() + h),
+                Pos2::new(r.right(), r.top() + h),
+            ],
             stl,
         );
         // left
         painter.line_segment(
-            [Pos2::new(r.left() + h, r.top()), Pos2::new(r.left() + h, r.bottom())],
+            [
+                Pos2::new(r.left() + h, r.top()),
+                Pos2::new(r.left() + h, r.bottom()),
+            ],
             stl,
         );
         // bottom
         painter.line_segment(
-            [Pos2::new(r.left(), r.bottom() - h), Pos2::new(r.right(), r.bottom() - h)],
+            [
+                Pos2::new(r.left(), r.bottom() - h),
+                Pos2::new(r.right(), r.bottom() - h),
+            ],
             sbr,
         );
         // right
         painter.line_segment(
-            [Pos2::new(r.right() - h, r.top()), Pos2::new(r.right() - h, r.bottom())],
+            [
+                Pos2::new(r.right() - h, r.top()),
+                Pos2::new(r.right() - h, r.bottom()),
+            ],
             sbr,
         );
     }
@@ -2469,24 +3636,103 @@ mod gui {
     fn apple2_ascii_for_key(key: Key, shift: bool) -> Option<u8> {
         let c: u8 = match key {
             // Letters — always uppercase on Apple II
-            Key::A => b'A', Key::B => b'B', Key::C => b'C', Key::D => b'D',
-            Key::E => b'E', Key::F => b'F', Key::G => b'G', Key::H => b'H',
-            Key::I => b'I', Key::J => b'J', Key::K => b'K', Key::L => b'L',
-            Key::M => b'M', Key::N => b'N', Key::O => b'O', Key::P => b'P',
-            Key::Q => b'Q', Key::R => b'R', Key::S => b'S', Key::T => b'T',
-            Key::U => b'U', Key::V => b'V', Key::W => b'W', Key::X => b'X',
-            Key::Y => b'Y', Key::Z => b'Z',
+            Key::A => b'A',
+            Key::B => b'B',
+            Key::C => b'C',
+            Key::D => b'D',
+            Key::E => b'E',
+            Key::F => b'F',
+            Key::G => b'G',
+            Key::H => b'H',
+            Key::I => b'I',
+            Key::J => b'J',
+            Key::K => b'K',
+            Key::L => b'L',
+            Key::M => b'M',
+            Key::N => b'N',
+            Key::O => b'O',
+            Key::P => b'P',
+            Key::Q => b'Q',
+            Key::R => b'R',
+            Key::S => b'S',
+            Key::T => b'T',
+            Key::U => b'U',
+            Key::V => b'V',
+            Key::W => b'W',
+            Key::X => b'X',
+            Key::Y => b'Y',
+            Key::Z => b'Z',
             // Digits and shifted symbols (standard US layout)
-            Key::Num0 => if shift { b')' } else { b'0' },
-            Key::Num1 => if shift { b'!' } else { b'1' },
-            Key::Num2 => if shift { b'@' } else { b'2' },
-            Key::Num3 => if shift { b'#' } else { b'3' },
-            Key::Num4 => if shift { b'$' } else { b'4' },
-            Key::Num5 => if shift { b'%' } else { b'5' },
-            Key::Num6 => if shift { b'^' } else { b'6' },
-            Key::Num7 => if shift { b'&' } else { b'7' },
-            Key::Num8 => if shift { b'*' } else { b'8' },
-            Key::Num9 => if shift { b'(' } else { b'9' },
+            Key::Num0 => {
+                if shift {
+                    b')'
+                } else {
+                    b'0'
+                }
+            }
+            Key::Num1 => {
+                if shift {
+                    b'!'
+                } else {
+                    b'1'
+                }
+            }
+            Key::Num2 => {
+                if shift {
+                    b'@'
+                } else {
+                    b'2'
+                }
+            }
+            Key::Num3 => {
+                if shift {
+                    b'#'
+                } else {
+                    b'3'
+                }
+            }
+            Key::Num4 => {
+                if shift {
+                    b'$'
+                } else {
+                    b'4'
+                }
+            }
+            Key::Num5 => {
+                if shift {
+                    b'%'
+                } else {
+                    b'5'
+                }
+            }
+            Key::Num6 => {
+                if shift {
+                    b'^'
+                } else {
+                    b'6'
+                }
+            }
+            Key::Num7 => {
+                if shift {
+                    b'&'
+                } else {
+                    b'7'
+                }
+            }
+            Key::Num8 => {
+                if shift {
+                    b'*'
+                } else {
+                    b'8'
+                }
+            }
+            Key::Num9 => {
+                if shift {
+                    b'('
+                } else {
+                    b'9'
+                }
+            }
             Key::Space => b' ',
             _ => return None,
         };
@@ -2525,8 +3771,8 @@ mod gui {
 
         let options = eframe::NativeOptions {
             initial_window_size: initial_size,
-            initial_window_pos:  initial_pos,
-            maximized:           config.window_maximized,
+            initial_window_pos: initial_pos,
+            maximized: config.window_maximized,
             min_window_size: Some(egui::vec2(
                 SCREEN_W as f32 + W_OVERHEAD,
                 SCREEN_H as f32 + H_OVERHEAD,
@@ -2580,4 +3826,3 @@ mod gui {
         out
     }
 }
-

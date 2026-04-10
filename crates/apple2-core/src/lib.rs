@@ -5,9 +5,14 @@ pub mod bus;
 pub mod card;
 pub mod cards;
 pub mod cpu;
+pub mod disk_util;
 pub mod emulator;
 pub mod error;
 pub mod model;
+pub mod prodos;
+
+#[cfg(test)]
+mod bus_tests;
 
 pub use emulator::Emulator;
 pub use error::Error;

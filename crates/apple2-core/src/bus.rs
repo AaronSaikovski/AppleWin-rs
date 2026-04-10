@@ -3,9 +3,9 @@
 //! Replaces the global arrays `mem`, `memshadow[]`, `memwrite[]`,
 //! `memreadPageType[]`, `IORead[256]`, `IOWrite[256]` from `source/Memory.h`.
 
+use crate::card::{CardManager, DmaWrite, DriveActivity};
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
-use crate::card::{CardManager, DmaWrite};
 
 // ── Memory mode flags ─────────────────────────────────────────────────────────
 
@@ -56,7 +56,47 @@ bitflags! {
 
 impl Default for MemMode {
     fn default() -> Self {
-        MemMode::empty()
+        // Apple IIe power-on state: bank 2 selected, LC write-enabled.
+        // Matches AppleWin C++ `kMemModeInitialState = MF_BANK2 | MF_WRITERAM`.
+        MemMode::MF_BANK2 | MemMode::MF_WRITERAM
+    }
+}
+
+// ── Copy protection dongles ──────────────────────────────────────────────────
+
+/// Game I/O connector copy-protection dongle types.
+///
+/// These dongles present specific resistance values on the paddle inputs,
+/// used by vintage software to verify that the original hardware dongle
+/// is plugged in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DongleType {
+    /// SDS SpeedStar (Southwestern Data Systems).
+    SdsSpeedStar,
+    /// CodeWriter (Dynatech/Cortechs).
+    CodeWriter,
+    /// Robocom Interface Module (500 variant).
+    Robocom500,
+    /// Robocom Interface Module (1500 variant).
+    Robocom1500,
+    /// Hayden's Applesoft Compiler Key.
+    Hayden,
+}
+
+impl DongleType {
+    /// Return the paddle values (paddle0, paddle1) and button overrides
+    /// (PB0, PB1, PB2) for this dongle type.
+    ///
+    /// Values are derived from the resistance tables in the C++ AppleWin
+    /// `source/Configuration/PropertySheetHelper.cpp`.
+    fn overrides(&self) -> (u8, u8, u8) {
+        match self {
+            DongleType::SdsSpeedStar => (255, 255, 0x04), // PB2 set
+            DongleType::CodeWriter => (128, 128, 0x00),
+            DongleType::Robocom500 => (0, 255, 0x00),
+            DongleType::Robocom1500 => (255, 0, 0x00),
+            DongleType::Hayden => (255, 255, 0x06), // PB1+PB2 set
+        }
     }
 }
 
@@ -79,11 +119,21 @@ pub struct GamepadState {
     paddle0_end: u64,
     /// CPU cycle at which the paddle-1 one-shot timer expires.
     paddle1_end: u64,
+    /// Optional copy-protection dongle.  When set, overrides paddle and button
+    /// values with fixed dongle-specific values.
+    pub dongle: Option<DongleType>,
 }
 
 impl Default for GamepadState {
     fn default() -> Self {
-        Self { paddle0: 127, paddle1: 127, buttons: 0, paddle0_end: 0, paddle1_end: 0 }
+        Self {
+            paddle0: 127,
+            paddle1: 127,
+            buttons: 0,
+            paddle0_end: 0,
+            paddle1_end: 0,
+            dongle: None,
+        }
     }
 }
 
@@ -93,8 +143,24 @@ impl GamepadState {
     /// Timer duration = `value × 11 + 3` CPU cycles, matching the Apple II
     /// hardware spec (~11.149 µs per increment at 1.023 MHz).
     pub fn strobe(&mut self, cycles: u64) {
-        self.paddle0_end = cycles + self.paddle0 as u64 * 11 + 3;
-        self.paddle1_end = cycles + self.paddle1 as u64 * 11 + 3;
+        let (p0, p1) = if let Some(d) = &self.dongle {
+            let (dp0, dp1, _) = d.overrides();
+            (dp0, dp1)
+        } else {
+            (self.paddle0, self.paddle1)
+        };
+        self.paddle0_end = cycles + p0 as u64 * 11 + 3;
+        self.paddle1_end = cycles + p1 as u64 * 11 + 3;
+    }
+
+    /// Return the effective button state, including dongle overrides.
+    pub fn effective_buttons(&self) -> u8 {
+        if let Some(d) = &self.dongle {
+            let (_, _, btn_or) = d.overrides();
+            self.buttons | btn_or
+        } else {
+            self.buttons
+        }
     }
 }
 
@@ -133,11 +199,11 @@ pub struct Bus {
     /// Main 64K RAM.
     pub main_ram: Box<[u8; 65536]>,
     /// Auxiliary 64K RAM (//e and later).
-    pub aux_ram:  Box<[u8; 65536]>,
+    pub aux_ram: Box<[u8; 65536]>,
     /// System ROM (up to 16K for //e).
-    pub rom:      Vec<u8>,
+    pub rom: Vec<u8>,
     /// Peripheral card ROM space ($C100–$CFFF, 3840 bytes = 15 pages).
-    pub cx_rom:   Box<[u8; 0x1000]>,
+    pub cx_rom: Box<[u8; 0x1000]>,
 
     /// Memory mode soft switches.
     pub mode: MemMode,
@@ -179,36 +245,66 @@ pub struct Bus {
     /// 16 KB heap allocation on every bank switch.
     lc_swap_buf: Box<[u8; 16384]>,
 
+    /// Language Card: prewrite flag — set on first read of an odd LC switch.
+    /// A second consecutive read of the same switch enables WRITERAM.
+    lc_prewrite: bool,
+    /// Language Card: last LC soft-switch register accessed (lower 4 bits).
+    lc_last_access: u8,
+
     /// CPU cycle at which the current video frame began.
     ///
     /// Used to compute the within-frame cycle offset without a modulo operation:
     /// `frame_offset = cycles - frame_start_cycles`.  Updated lazily inside the
     /// `$C019` (VBLANK) soft-switch read and by `advance_frame()`.
     frame_start_cycles: u64,
+
+    /// When true, record all memory accesses for debugger breakpoint inspection.
+    /// Cost when false: one predicted branch per Bus::read/write (~0 overhead).
+    pub mem_trace_enabled: bool,
+    /// Per-instruction memory access log: (address, value, is_write).
+    /// Drained after each instruction by `Emulator::execute_debugged`.
+    pub mem_trace: Vec<(u16, u8, bool)>,
+
+    // ── Cassette tape I/O ────────────────────────────────────────────────────
+    /// Raw cassette audio data (8-bit unsigned PCM, ~11025 Hz).
+    /// When `Some`, the $C060 soft switch returns bit 7 from this data stream.
+    pub cassette_input: Option<Vec<u8>>,
+    /// Current read position (byte index) in the cassette data.
+    pub cassette_byte_pos: usize,
+    /// CPU cycle at which cassette playback started — used to derive the
+    /// current sample position from the cycle count.
+    cassette_start_cycle: u64,
 }
 
 impl Bus {
     pub fn new(rom: Vec<u8>) -> Self {
         let mut bus = Self {
-            main_ram:      Box::new([0u8; 65536]),
-            aux_ram:       Box::new([0u8; 65536]),
+            main_ram: Box::new([0u8; 65536]),
+            aux_ram: Box::new([0u8; 65536]),
             rom,
-            cx_rom:        Box::new([0u8; 0x1000]),
-            mode:          MemMode::default(),
-            pages_r:       [PageSrc::Main(0); 256],
-            pages_w:       [PageDst::Main(0); 256],
-            cards:           CardManager::new(),
-            floating_bus:    0,
-            keyboard_data:   0,
-            speaker_state:   false,
+            cx_rom: Box::new([0u8; 0x1000]),
+            mode: MemMode::default(),
+            pages_r: [PageSrc::Main(0); 256],
+            pages_w: [PageDst::Main(0); 256],
+            cards: CardManager::new(),
+            floating_bus: 0,
+            keyboard_data: 0,
+            speaker_state: false,
             speaker_toggles: Vec::with_capacity(65536),
-            gamepad:         GamepadState::default(),
-            rw3_active:      0,
-            rw3_extra:          Vec::new(),
-            ann:                [false; 4],
-            irq_line:           false,
-            lc_swap_buf:        Box::new([0u8; 16384]),
+            gamepad: GamepadState::default(),
+            rw3_active: 0,
+            rw3_extra: Vec::new(),
+            ann: [false; 4],
+            irq_line: false,
+            lc_swap_buf: Box::new([0u8; 16384]),
+            lc_prewrite: false,
+            lc_last_access: 0,
             frame_start_cycles: 0,
+            mem_trace_enabled: false,
+            mem_trace: Vec::new(),
+            cassette_input: None,
+            cassette_byte_pos: 0,
+            cassette_start_cycle: 0,
         };
         bus.rebuild_page_tables();
         bus
@@ -243,21 +339,37 @@ impl Bus {
     /// Called after every soft-switch write, mirroring `MemUpdatePaging()`
     /// in `source/Memory.cpp`.
     pub fn rebuild_page_tables(&mut self) {
-        let aux_read  = self.mode.contains(MemMode::MF_AUXREAD);
+        let aux_read = self.mode.contains(MemMode::MF_AUXREAD);
         let aux_write = self.mode.contains(MemMode::MF_AUXWRITE);
-        let altzp     = self.mode.contains(MemMode::MF_ALTZP);
-        let intcxrom  = self.mode.contains(MemMode::MF_INTCXROM);
-        let highram   = self.mode.contains(MemMode::MF_HIGHRAM);
-        let writeram  = self.mode.contains(MemMode::MF_WRITERAM);
-        let bank2     = self.mode.contains(MemMode::MF_BANK2);
+        let altzp = self.mode.contains(MemMode::MF_ALTZP);
+        let intcxrom = self.mode.contains(MemMode::MF_INTCXROM);
+        let highram = self.mode.contains(MemMode::MF_HIGHRAM);
+        let writeram = self.mode.contains(MemMode::MF_WRITERAM);
+        let bank2 = self.mode.contains(MemMode::MF_BANK2);
 
         // Pages 0x00–0x01: zero page + stack
-        let zp_src = if altzp { PageSrc::Aux(0x0000) } else { PageSrc::Main(0x0000) };
-        let zp_dst = if altzp { PageDst::Aux(0x0000) } else { PageDst::Main(0x0000) };
+        let zp_src = if altzp {
+            PageSrc::Aux(0x0000)
+        } else {
+            PageSrc::Main(0x0000)
+        };
+        let zp_dst = if altzp {
+            PageDst::Aux(0x0000)
+        } else {
+            PageDst::Main(0x0000)
+        };
         self.pages_r[0x00] = zp_src;
-        self.pages_r[0x01] = if altzp { PageSrc::Aux(0x0100) } else { PageSrc::Main(0x0100) };
+        self.pages_r[0x01] = if altzp {
+            PageSrc::Aux(0x0100)
+        } else {
+            PageSrc::Main(0x0100)
+        };
         self.pages_w[0x00] = zp_dst;
-        self.pages_w[0x01] = if altzp { PageDst::Aux(0x0100) } else { PageDst::Main(0x0100) };
+        self.pages_w[0x01] = if altzp {
+            PageDst::Aux(0x0100)
+        } else {
+            PageDst::Main(0x0100)
+        };
 
         // Pages 0x02–0xBF: main/aux RAM
         for page in 0x02u16..=0xBF {
@@ -274,15 +386,57 @@ impl Bus {
             };
         }
 
+        // 80STORE overrides: when active, PAGE2 selects between main/aux for
+        // display pages, OVERRIDING AUXREAD/AUXWRITE for those address ranges.
+        //
+        //   PAGE2=0 → display pages forced to MAIN (even if AUXREAD/AUXWRITE set)
+        //   PAGE2=1 → display pages forced to AUX  (even if AUXREAD/AUXWRITE clear)
+        //
+        // Affected pages: text page 1 ($0400–$07FF) always,
+        //                 HGR page 1 ($2000–$3FFF) only when HIRES is also set.
+        if self.mode.contains(MemMode::MF_80STORE) {
+            let page2 = self.mode.contains(MemMode::MF_PAGE2);
+            // Text page 1 ($0400–$07FF)
+            for page in 0x04u16..=0x07 {
+                let base = page << 8;
+                if page2 {
+                    self.pages_r[page as usize] = PageSrc::Aux(base);
+                    self.pages_w[page as usize] = PageDst::Aux(base);
+                } else {
+                    self.pages_r[page as usize] = PageSrc::Main(base);
+                    self.pages_w[page as usize] = PageDst::Main(base);
+                }
+            }
+            if self.mode.contains(MemMode::MF_HIRES) {
+                // HiRes page 1 ($2000–$3FFF)
+                for page in 0x20u16..=0x3F {
+                    let base = page << 8;
+                    if page2 {
+                        self.pages_r[page as usize] = PageSrc::Aux(base);
+                        self.pages_w[page as usize] = PageDst::Aux(base);
+                    } else {
+                        self.pages_r[page as usize] = PageSrc::Main(base);
+                        self.pages_w[page as usize] = PageDst::Main(base);
+                    }
+                }
+            }
+        }
+
         // Page 0xC0: I/O
         self.pages_r[0xC0] = PageSrc::Io;
         self.pages_w[0xC0] = PageDst::Inhibit;
 
         // Pages 0xC1–0xCF: peripheral ROM or internal ROM
+        let slotc3rom = self.mode.contains(MemMode::MF_SLOTC3ROM);
         for slot in 1u8..=0xF {
             let page = (0xC0 + slot) as usize;
             if intcxrom {
+                // INTCXROM on: all slots read from internal ROM
                 self.pages_r[page] = PageSrc::Rom(0xC000 + (slot as u16) * 0x100);
+            } else if slot == 3 && !slotc3rom {
+                // Apple IIe special: when SLOTC3ROM is off, $C300–$C3FF always
+                // shows the internal 80-column firmware, not an external card.
+                self.pages_r[page] = PageSrc::Rom(0xC300);
             } else {
                 self.pages_r[page] = PageSrc::Io; // card Cx ROM — dispatched per read
             }
@@ -298,7 +452,11 @@ impl Bus {
                 // LC RAM active — choose bank via MF_BANK2
                 let lc_base = if bank2 { base } else { base - 0x1000 };
                 self.pages_r[page as usize] = PageSrc::Aux(lc_base);
-                self.pages_w[page as usize] = if writeram { PageDst::Aux(lc_base) } else { PageDst::Inhibit };
+                self.pages_w[page as usize] = if writeram {
+                    PageDst::Aux(lc_base)
+                } else {
+                    PageDst::Inhibit
+                };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
                 self.pages_w[page as usize] = if writeram {
@@ -316,10 +474,19 @@ impl Bus {
             let base = page << 8;
             if highram {
                 self.pages_r[page as usize] = PageSrc::Aux(base);
-                self.pages_w[page as usize] = if writeram { PageDst::Aux(base) } else { PageDst::Inhibit };
+                self.pages_w[page as usize] = if writeram {
+                    PageDst::Aux(base)
+                } else {
+                    PageDst::Inhibit
+                };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
-                self.pages_w[page as usize] = PageDst::Inhibit;
+                // Write to LC RAM even while ROM is being read (same as $D000–$DFFF)
+                self.pages_w[page as usize] = if writeram {
+                    PageDst::Aux(base)
+                } else {
+                    PageDst::Inhibit
+                };
             }
         }
     }
@@ -354,13 +521,9 @@ impl Bus {
     #[inline]
     pub fn read(&mut self, addr: u16, cycles: u64) -> u8 {
         let page = (addr >> 8) as usize;
-        match self.pages_r[page] {
-            PageSrc::Main(base) => {
-                self.main_ram[(base | (addr & 0xFF)) as usize]
-            }
-            PageSrc::Aux(base) => {
-                self.aux_read((base | (addr & 0xFF)) as usize)
-            }
+        let val = match self.pages_r[page] {
+            PageSrc::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize],
+            PageSrc::Aux(base) => self.aux_read((base | (addr & 0xFF)) as usize),
             PageSrc::Rom(base) => {
                 let rom_off = (base | (addr & 0xFF)) as usize;
                 // ROM is mapped starting at $C000; offset accordingly
@@ -369,12 +532,19 @@ impl Bus {
             }
             PageSrc::Io => self.io_read(addr, cycles),
             PageSrc::FloatingBus => self.floating_bus,
+        };
+        if self.mem_trace_enabled {
+            self.mem_trace.push((addr, val, false));
         }
+        val
     }
 
     /// Write a byte, triggering I/O side-effects.
     #[inline]
     pub fn write(&mut self, addr: u16, val: u8, cycles: u64) {
+        if self.mem_trace_enabled {
+            self.mem_trace.push((addr, val, true));
+        }
         let page = (addr >> 8) as usize;
         match self.pages_w[page] {
             PageDst::Main(base) => {
@@ -399,10 +569,8 @@ impl Bus {
         let page = (addr >> 8) as usize;
         match self.pages_r[page] {
             PageSrc::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize],
-            PageSrc::Aux(base)  => {
-                self.aux_read((base | (addr & 0xFF)) as usize)
-            }
-            PageSrc::Rom(base)  => {
+            PageSrc::Aux(base) => self.aux_read((base | (addr & 0xFF)) as usize),
+            PageSrc::Rom(base) => {
                 let index = ((base | (addr & 0xFF)) as usize).saturating_sub(0xC000);
                 self.rom.get(index).copied().unwrap_or(0)
             }
@@ -416,10 +584,10 @@ impl Bus {
         let page = (addr >> 8) as usize;
         match self.pages_w[page] {
             PageDst::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize] = val,
-            PageDst::Aux(base)  => {
+            PageDst::Aux(base) => {
                 self.aux_write((base | (addr & 0xFF)) as usize, val);
             }
-            PageDst::Inhibit    => {}
+            PageDst::Inhibit => {}
         }
     }
 
@@ -486,7 +654,7 @@ impl Bus {
             // advanced lazily here; `advance_frame()` may also be called from the execute loop.
             0x19 => {
                 const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
-                const CYCLES_VISIBLE:   u64 = 65 * 192; // 12480
+                const CYCLES_VISIBLE: u64 = 65 * 192; // 12480
                 let mut offset = cycles.wrapping_sub(self.frame_start_cycles);
                 if offset >= CYCLES_PER_FRAME {
                     // Advance by whole frames so frame_start_cycles stays accurate even if
@@ -498,7 +666,13 @@ impl Bus {
                 if offset < CYCLES_VISIBLE { 0x80 } else { 0x00 }
             }
             // $C01A: RDTEXT — bit 7 = 1 when TEXT mode (graphics switch clear)
-            0x1A => if !self.mode.contains(MemMode::MF_GRAPHICS) { 0x80 } else { 0x00 },
+            0x1A => {
+                if !self.mode.contains(MemMode::MF_GRAPHICS) {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
             // $C01B: RDMIXED — bit 7 = 1 when mixed mode
             0x1B => self.flag_byte(MemMode::MF_MIXED),
             0x1C => self.flag_byte(MemMode::MF_PAGE2),
@@ -506,20 +680,65 @@ impl Bus {
             0x1E => self.flag_byte(MemMode::MF_ALTCHAR),
             0x1F => self.flag_byte(MemMode::MF_VID80),
             // $C061–$C063: game port buttons (bit 7 = pressed)
-            0x61 => if self.gamepad.buttons & 0x01 != 0 { 0x80 } else { 0x00 },
-            0x62 => if self.gamepad.buttons & 0x02 != 0 { 0x80 } else { 0x00 },
-            0x63 => if self.gamepad.buttons & 0x04 != 0 { 0x80 } else { 0x00 },
+            0x61 => {
+                if self.gamepad.effective_buttons() & 0x01 != 0 {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
+            0x62 => {
+                if self.gamepad.effective_buttons() & 0x02 != 0 {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
+            0x63 => {
+                if self.gamepad.effective_buttons() & 0x04 != 0 {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
             // $C064–$C067: paddle one-shot timers (bit 7 high until timer expires)
-            0x64 => if cycles < self.gamepad.paddle0_end { 0x80 } else { 0x00 },
-            0x65 => if cycles < self.gamepad.paddle1_end { 0x80 } else { 0x00 },
+            0x64 => {
+                if cycles < self.gamepad.paddle0_end {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
+            0x65 => {
+                if cycles < self.gamepad.paddle1_end {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
             0x66 | 0x67 => 0x00, // paddles 2/3 not connected
             // $C070: paddle strobe — resets timers and returns floating bus
-            0x70 => { self.gamepad.strobe(cycles); self.floating_bus }
+            0x70 => {
+                self.gamepad.strobe(cycles);
+                self.floating_bus
+            }
             // $C050–$C057: video soft-switch reads are strobes just like writes
-            0x50 => { self.mode.insert(MemMode::MF_GRAPHICS);                      self.floating_bus }
-            0x51 => { self.mode.remove(MemMode::MF_GRAPHICS);                      self.floating_bus }
-            0x52 => { self.mode.remove(MemMode::MF_MIXED);                         self.floating_bus }
-            0x53 => { self.mode.insert(MemMode::MF_MIXED);                         self.floating_bus }
+            0x50 => {
+                self.mode.insert(MemMode::MF_GRAPHICS);
+                self.floating_bus
+            }
+            0x51 => {
+                self.mode.remove(MemMode::MF_GRAPHICS);
+                self.floating_bus
+            }
+            0x52 => {
+                self.mode.remove(MemMode::MF_MIXED);
+                self.floating_bus
+            }
+            0x53 => {
+                self.mode.insert(MemMode::MF_MIXED);
+                self.floating_bus
+            }
             // $C054–$C057: PAGE2 / HIRES soft-switch reads act as strobes.
             // Only rebuild the page tables when the bit actually changes — programs
             // that poll these registers in tight loops would otherwise trigger a full
@@ -553,17 +772,62 @@ impl Bus {
                 self.floating_bus
             }
             // $C058–$C05D: annunciators 0–2 (read-strobes, same as write)
-            0x58 => { self.ann[0] = false; self.floating_bus }
-            0x59 => { self.ann[0] = true;  self.floating_bus }
-            0x5A => { self.ann[1] = false; self.floating_bus }
-            0x5B => { self.ann[1] = true;  self.floating_bus }
-            0x5C => { self.ann[2] = false; self.floating_bus }
-            0x5D => { self.ann[2] = true;  self.floating_bus }
+            0x58 => {
+                self.ann[0] = false;
+                self.floating_bus
+            }
+            0x59 => {
+                self.ann[0] = true;
+                self.floating_bus
+            }
+            0x5A => {
+                self.ann[1] = false;
+                self.floating_bus
+            }
+            0x5B => {
+                self.ann[1] = true;
+                self.floating_bus
+            }
+            0x5C => {
+                self.ann[2] = false;
+                self.floating_bus
+            }
+            0x5D => {
+                self.ann[2] = true;
+                self.floating_bus
+            }
             // $C05E/$C05F: DHIRESON/DHIRESOFF — read also acts as write (same as $C050-$C057)
-            0x5E => { self.mode.insert(MemMode::MF_DHIRES); self.floating_bus }
-            0x5F => { self.mode.remove(MemMode::MF_DHIRES); self.floating_bus }
-            // $C060: cassette input — always 0 (no tape support)
-            0x60 => 0x00,
+            0x5E => {
+                self.mode.insert(MemMode::MF_DHIRES);
+                self.floating_bus
+            }
+            0x5F => {
+                self.mode.remove(MemMode::MF_DHIRES);
+                self.floating_bus
+            }
+            // $C060: cassette input — bit 7 reflects the cassette audio waveform.
+            // When no cassette is loaded, returns 0 (high-impedance / silence).
+            0x60 => {
+                if let Some(ref data) = self.cassette_input {
+                    // Derive sample position from CPU cycles elapsed since playback
+                    // started.  Cassette audio is 11025 Hz; CPU is ~1.023 MHz.
+                    // sample = (cycles - start) * 11025 / 1023000
+                    const CASSETTE_RATE: u64 = 11025;
+                    const CPU_RATE: u64 = 1_023_000;
+                    let elapsed = cycles.saturating_sub(self.cassette_start_cycle);
+                    let sample_pos = (elapsed * CASSETTE_RATE / CPU_RATE) as usize;
+                    self.cassette_byte_pos = sample_pos;
+                    if sample_pos < data.len() {
+                        // Unsigned 8-bit PCM: 128 = silence.  Return bit 7 based
+                        // on whether the sample is above or below the midpoint.
+                        if data[sample_pos] >= 128 { 0x80 } else { 0x00 }
+                    } else {
+                        0x00 // past end of tape
+                    }
+                } else {
+                    0x00
+                }
+            }
             // $C07E: RDIOUDES — bit 7 = 1 when IOUDIS is set; $C07D: alternate read
             0x7D | 0x7E => self.flag_byte(MemMode::MF_IOUDIS),
             // $C07F: RDDHIRES — bit 7 = 1 when double hi-res is active
@@ -573,7 +837,7 @@ impl Bus {
             // $C09x = slot 1, $C0Ax = slot 2, ..., $C0Ex = slot 6, $C0Fx = slot 7
             0x90..=0xFF => {
                 let slot = ((reg as usize) >> 4) - 8; // 0x90>>4=9 → slot 1 .. 0xF0>>4=15 → slot 7
-                let lo   = reg & 0x0F;
+                let lo = reg & 0x0F;
                 if let Some(card) = self.cards.slot_mut(slot) {
                     let result = card.slot_io_read(lo, cycles);
                     self.process_card_dma(slot);
@@ -589,61 +853,159 @@ impl Bus {
 
     fn soft_switch_write(&mut self, reg: u8, val: u8, cycles: u64) {
         match reg {
-            0x00 => { self.mode.remove(MemMode::MF_80STORE); self.rebuild_page_tables(); }
-            0x01 => { self.mode.insert(MemMode::MF_80STORE); self.rebuild_page_tables(); }
+            0x00 => {
+                self.mode.remove(MemMode::MF_80STORE);
+                self.rebuild_page_tables();
+            }
+            0x01 => {
+                self.mode.insert(MemMode::MF_80STORE);
+                self.rebuild_page_tables();
+            }
             // $C010: KBDSTRB — writing clears the keyboard strobe (same as reading it).
             // Many programs use STA $C010 rather than LDA $C010 to clear the strobe.
-            0x10 => { self.keyboard_data &= 0x7F; }
-            0x02 => { self.mode.remove(MemMode::MF_AUXREAD); self.rebuild_page_tables(); }
-            0x03 => { self.mode.insert(MemMode::MF_AUXREAD); self.rebuild_page_tables(); }
-            0x04 => { self.mode.remove(MemMode::MF_AUXWRITE); self.rebuild_page_tables(); }
-            0x05 => { self.mode.insert(MemMode::MF_AUXWRITE); self.rebuild_page_tables(); }
-            0x06 => { self.mode.remove(MemMode::MF_INTCXROM); self.rebuild_page_tables(); }
-            0x07 => { self.mode.insert(MemMode::MF_INTCXROM); self.rebuild_page_tables(); }
-            0x08 => { self.mode.remove(MemMode::MF_ALTZP); self.rebuild_page_tables(); }
-            0x09 => { self.mode.insert(MemMode::MF_ALTZP); self.rebuild_page_tables(); }
-            0x0A => { self.mode.remove(MemMode::MF_SLOTC3ROM); self.rebuild_page_tables(); }
-            0x0B => { self.mode.insert(MemMode::MF_SLOTC3ROM); self.rebuild_page_tables(); }
+            0x10 => {
+                self.keyboard_data &= 0x7F;
+            }
+            0x02 => {
+                self.mode.remove(MemMode::MF_AUXREAD);
+                self.rebuild_page_tables();
+            }
+            0x03 => {
+                self.mode.insert(MemMode::MF_AUXREAD);
+                self.rebuild_page_tables();
+            }
+            0x04 => {
+                self.mode.remove(MemMode::MF_AUXWRITE);
+                self.rebuild_page_tables();
+            }
+            0x05 => {
+                self.mode.insert(MemMode::MF_AUXWRITE);
+                self.rebuild_page_tables();
+            }
+            0x06 => {
+                self.mode.remove(MemMode::MF_INTCXROM);
+                self.rebuild_page_tables();
+            }
+            0x07 => {
+                self.mode.insert(MemMode::MF_INTCXROM);
+                self.rebuild_page_tables();
+            }
+            0x08 => {
+                self.mode.remove(MemMode::MF_ALTZP);
+                self.rebuild_page_tables();
+            }
+            0x09 => {
+                self.mode.insert(MemMode::MF_ALTZP);
+                self.rebuild_page_tables();
+            }
+            0x0A => {
+                self.mode.remove(MemMode::MF_SLOTC3ROM);
+                self.rebuild_page_tables();
+            }
+            0x0B => {
+                self.mode.insert(MemMode::MF_SLOTC3ROM);
+                self.rebuild_page_tables();
+            }
             // $C00C/$C00D: CLR/SET80VID — 80-column display mode
-            0x0C => { self.mode.remove(MemMode::MF_VID80); }
-            0x0D => { self.mode.insert(MemMode::MF_VID80); }
+            0x0C => {
+                self.mode.remove(MemMode::MF_VID80);
+            }
+            0x0D => {
+                self.mode.insert(MemMode::MF_VID80);
+            }
             // $C00E/$C00F: CLRALTCHAR/SETALTCHAR — alternate character set
-            0x0E => { self.mode.remove(MemMode::MF_ALTCHAR); }
-            0x0F => { self.mode.insert(MemMode::MF_ALTCHAR); }
+            0x0E => {
+                self.mode.remove(MemMode::MF_ALTCHAR);
+            }
+            0x0F => {
+                self.mode.insert(MemMode::MF_ALTCHAR);
+            }
             // $C070: paddle strobe — reset one-shot timers
-            0x70 => { self.gamepad.strobe(cycles); }
+            0x70 => {
+                self.gamepad.strobe(cycles);
+            }
             // $C073: RamWorks III bank select
-            0x73 => { self.rw3_switch(val); }
+            0x73 => {
+                self.rw3_switch(val);
+            }
             0x30 => {
                 self.speaker_state = !self.speaker_state;
                 self.speaker_toggles.push(cycles);
             }
             // Text/graphics + mixed mode soft switches — video-only, no paging side-effects
-            0x50 => { self.mode.insert(MemMode::MF_GRAPHICS); }
-            0x51 => { self.mode.remove(MemMode::MF_GRAPHICS); }
-            0x52 => { self.mode.remove(MemMode::MF_MIXED); }
-            0x53 => { self.mode.insert(MemMode::MF_MIXED); }
-            0x54 => { if  self.mode.contains(MemMode::MF_PAGE2) { self.mode.remove(MemMode::MF_PAGE2); self.rebuild_page_tables(); } }
-            0x55 => { if !self.mode.contains(MemMode::MF_PAGE2) { self.mode.insert(MemMode::MF_PAGE2); self.rebuild_page_tables(); } }
-            0x56 => { if  self.mode.contains(MemMode::MF_HIRES)  { self.mode.remove(MemMode::MF_HIRES);  self.rebuild_page_tables(); } }
-            0x57 => { if !self.mode.contains(MemMode::MF_HIRES)  { self.mode.insert(MemMode::MF_HIRES);  self.rebuild_page_tables(); } }
+            0x50 => {
+                self.mode.insert(MemMode::MF_GRAPHICS);
+            }
+            0x51 => {
+                self.mode.remove(MemMode::MF_GRAPHICS);
+            }
+            0x52 => {
+                self.mode.remove(MemMode::MF_MIXED);
+            }
+            0x53 => {
+                self.mode.insert(MemMode::MF_MIXED);
+            }
+            0x54 => {
+                if self.mode.contains(MemMode::MF_PAGE2) {
+                    self.mode.remove(MemMode::MF_PAGE2);
+                    self.rebuild_page_tables();
+                }
+            }
+            0x55 => {
+                if !self.mode.contains(MemMode::MF_PAGE2) {
+                    self.mode.insert(MemMode::MF_PAGE2);
+                    self.rebuild_page_tables();
+                }
+            }
+            0x56 => {
+                if self.mode.contains(MemMode::MF_HIRES) {
+                    self.mode.remove(MemMode::MF_HIRES);
+                    self.rebuild_page_tables();
+                }
+            }
+            0x57 => {
+                if !self.mode.contains(MemMode::MF_HIRES) {
+                    self.mode.insert(MemMode::MF_HIRES);
+                    self.rebuild_page_tables();
+                }
+            }
             // $C058–$C05D: annunciators 0–2
-            0x58 => { self.ann[0] = false; }
-            0x59 => { self.ann[0] = true; }
-            0x5A => { self.ann[1] = false; }
-            0x5B => { self.ann[1] = true; }
-            0x5C => { self.ann[2] = false; }
-            0x5D => { self.ann[2] = true; }
+            0x58 => {
+                self.ann[0] = false;
+            }
+            0x59 => {
+                self.ann[0] = true;
+            }
+            0x5A => {
+                self.ann[1] = false;
+            }
+            0x5B => {
+                self.ann[1] = true;
+            }
+            0x5C => {
+                self.ann[2] = false;
+            }
+            0x5D => {
+                self.ann[2] = true;
+            }
             // $C05E/$C05F: DHIRESON/DHIRESOFF
-            0x5E => { self.mode.insert(MemMode::MF_DHIRES); }
-            0x5F => { self.mode.remove(MemMode::MF_DHIRES); }
+            0x5E => {
+                self.mode.insert(MemMode::MF_DHIRES);
+            }
+            0x5F => {
+                self.mode.remove(MemMode::MF_DHIRES);
+            }
             // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)
-            0x7E => { self.mode.insert(MemMode::MF_IOUDIS); }
-            0x7F => { self.mode.remove(MemMode::MF_IOUDIS); }
+            0x7E => {
+                self.mode.insert(MemMode::MF_IOUDIS);
+            }
+            0x7F => {
+                self.mode.remove(MemMode::MF_IOUDIS);
+            }
             0x80..=0x8F => self.lc_write(reg),
             0x90..=0xFF => {
                 let slot = ((reg as usize) >> 4) - 8;
-                let lo   = reg & 0x0F;
+                let lo = reg & 0x0F;
                 if let Some(card) = self.cards.slot_mut(slot) {
                     card.slot_io_write(lo, val, cycles);
                     self.process_card_dma(slot);
@@ -671,8 +1033,8 @@ impl Bus {
             && let Some(DmaWrite { dest, data }) = card.take_dma_write()
         {
             let dest = dest as usize;
-            let end  = (dest + data.len()).min(65536);
-            let len  = end - dest;
+            let end = (dest + data.len()).min(65536);
+            let len = end - dest;
             self.main_ram[dest..end].copy_from_slice(&data[..len]);
         }
         // DMA read: main RAM → card (pass slice directly; no heap copy needed)
@@ -688,7 +1050,9 @@ impl Bus {
 
     /// RamWorks III: switch to the given aux bank (0 = primary aux_ram).
     fn rw3_switch(&mut self, bank: u8) {
-        if self.rw3_active == bank { return; }
+        if self.rw3_active == bank {
+            return;
+        }
         let needed = bank as usize;
         while self.rw3_extra.len() < needed {
             self.rw3_extra.push(Box::new([0u8; 65536]));
@@ -701,12 +1065,17 @@ impl Bus {
     /// If the card in `slot` has a pending swap, the bus copies the new bank
     /// data into `aux_ram[$C000..]` and gives the displaced data back to the card.
     fn process_lc_bank_swap(&mut self, slot: usize) {
-        let new_data = match self.cards.slot_mut(slot).and_then(|c| c.take_lc_bank_swap()) {
+        let new_data = match self
+            .cards
+            .slot_mut(slot)
+            .and_then(|c| c.take_lc_bank_swap())
+        {
             Some(d) => d,
-            None    => return,
+            None => return,
         };
         // Save displaced bank into pre-allocated scratch buffer (no heap allocation).
-        self.lc_swap_buf.copy_from_slice(&self.aux_ram[0xC000..0xC000 + 16384]);
+        self.lc_swap_buf
+            .copy_from_slice(&self.aux_ram[0xC000..0xC000 + 16384]);
         // Install the incoming bank.
         self.aux_ram[0xC000..0xC000 + 16384].copy_from_slice(&*new_data);
         // Return the displaced data to the card via a reference — the card copies
@@ -718,48 +1087,73 @@ impl Bus {
 
     /// Language card soft-switch logic (simplified).
     /// Full implementation in `source/LanguageCard.cpp`.
+    /// Language Card READ handler ($C080–$C08F).
+    ///
+    /// Implements the prewrite state machine matching real Apple II hardware:
+    /// - Even addresses ($C080/2/4/6/8/A/C/E): clear prewrite, disable WRITERAM
+    /// - Odd addresses ($C081/3/5/7/9/B/D/F): enable WRITERAM only after two
+    ///   consecutive reads of the same register; first read sets prewrite flag
     fn lc_read(&mut self, reg: u8) -> u8 {
-        // Lower two bits of reg encode bank/write-enable state
-        self.lc_switch(reg);
+        let sel = reg & 0x03;
+        let bank2 = (reg & 0x08) == 0;
+        let reg4 = reg & 0x0F;
+
+        // WRITERAM logic: only odd-addressed reads can enable it
+        if sel & 1 == 0 {
+            // Even: clear prewrite, disable WRITERAM
+            self.lc_prewrite = false;
+            self.mode.remove(MemMode::MF_WRITERAM);
+        } else {
+            // Odd: need two consecutive reads of same register
+            if self.lc_prewrite && self.lc_last_access == reg4 {
+                self.mode.insert(MemMode::MF_WRITERAM);
+            } else {
+                self.lc_prewrite = true;
+            }
+        }
+
+        // HIGHRAM (read-from-RAM vs read-from-ROM)
+        match sel {
+            0x00 | 0x03 => self.mode.insert(MemMode::MF_HIGHRAM),
+            0x01 | 0x02 => self.mode.remove(MemMode::MF_HIGHRAM),
+            _ => unreachable!(),
+        }
+
+        // Bank selection
+        if bank2 {
+            self.mode.insert(MemMode::MF_BANK2);
+        } else {
+            self.mode.remove(MemMode::MF_BANK2);
+        }
+
+        self.lc_last_access = reg4;
+        self.rebuild_page_tables();
         self.floating_bus
     }
 
+    /// Language Card WRITE handler ($C080–$C08F).
+    ///
+    /// Writes always clear the prewrite flag and never enable WRITERAM.
+    /// Even-addressed writes also disable WRITERAM; odd-addressed writes
+    /// leave WRITERAM unchanged.  HIGHRAM and BANK2 update normally.
     fn lc_write(&mut self, reg: u8) {
-        self.lc_switch(reg);
-    }
-
-    fn lc_switch(&mut self, reg: u8) {
-        // Apple II Language Card soft-switch register map ($C080–$C08F).
-        // Bits [1:0] of offset from $C080 (= reg & 0x03):
-        //   00 ($C080/4/8/C) → read RAM,  write-protect  (HIGHRAM=1, WRITERAM=0)
-        //   01 ($C081/5/9/D) → read ROM,  write-enable   (HIGHRAM=0, WRITERAM=1)
-        //   10 ($C082/6/A/E) → read ROM,  write-protect  (HIGHRAM=0, WRITERAM=0)
-        //   11 ($C083/7/B/F) → read RAM,  write-enable   (HIGHRAM=1, WRITERAM=1)
-        // Bit 3 (0x08) selects bank: 0 = bank2 ($C080–$C087), 1 = bank1 ($C088–$C08F)
-        let sel   = reg & 0x03;
+        let sel = reg & 0x03;
         let bank2 = (reg & 0x08) == 0;
+        let reg4 = reg & 0x0F;
 
+        // Any write clears prewrite
+        self.lc_prewrite = false;
+
+        // Writes NEVER enable WRITERAM; even writes also disable it
+        if sel & 1 == 0 {
+            self.mode.remove(MemMode::MF_WRITERAM);
+        }
+        // Odd writes: WRITERAM unchanged
+
+        // HIGHRAM and BANK2 still update normally
         match sel {
-            0x00 => {
-                // Read RAM, write-protect
-                self.mode.insert(MemMode::MF_HIGHRAM);
-                self.mode.remove(MemMode::MF_WRITERAM);
-            }
-            0x01 => {
-                // Read ROM, write-enable
-                self.mode.remove(MemMode::MF_HIGHRAM);
-                self.mode.insert(MemMode::MF_WRITERAM);
-            }
-            0x02 => {
-                // Read ROM, write-protect
-                self.mode.remove(MemMode::MF_HIGHRAM);
-                self.mode.remove(MemMode::MF_WRITERAM);
-            }
-            0x03 => {
-                // Read RAM, write-enable
-                self.mode.insert(MemMode::MF_HIGHRAM);
-                self.mode.insert(MemMode::MF_WRITERAM);
-            }
+            0x00 | 0x03 => self.mode.insert(MemMode::MF_HIGHRAM),
+            0x01 | 0x02 => self.mode.remove(MemMode::MF_HIGHRAM),
             _ => unreachable!(),
         }
 
@@ -769,7 +1163,32 @@ impl Bus {
             self.mode.remove(MemMode::MF_BANK2);
         }
 
+        self.lc_last_access = reg4;
         self.rebuild_page_tables();
+    }
+
+    // ── Cassette helpers ──────────────────────────────────────────────────────
+
+    /// Load raw unsigned 8-bit PCM cassette audio data (assumed 11025 Hz mono).
+    ///
+    /// Resets the playback position so the next $C060 read starts from the
+    /// beginning of the data.  Pass the current CPU cycle count so the
+    /// cycle-to-sample mapping starts correctly.
+    pub fn load_cassette(&mut self, data: Vec<u8>, current_cycles: u64) {
+        self.cassette_input = Some(data);
+        self.cassette_byte_pos = 0;
+        self.cassette_start_cycle = current_cycles;
+    }
+
+    /// Eject the cassette (stop providing data on $C060).
+    pub fn eject_cassette(&mut self) {
+        self.cassette_input = None;
+        self.cassette_byte_pos = 0;
+    }
+
+    /// Returns true if a cassette tape is loaded.
+    pub fn cassette_loaded(&self) -> bool {
+        self.cassette_input.is_some()
     }
 
     // ── Disk helpers ─────────────────────────────────────────────────────────
@@ -779,14 +1198,33 @@ impl Bus {
         (0..8).any(|s| self.cards.slot(s).is_some_and(|c| c.disk_motor_on()))
     }
 
+    /// Returns the activity state for a specific drive on the card in `slot`.
+    pub fn disk_drive_activity(&self, slot: usize, drive: usize) -> DriveActivity {
+        self.cards
+            .slot(slot)
+            .map(|c| c.disk_drive_activity(drive))
+            .unwrap_or_default()
+    }
+
     /// Load a disk image into the Disk2Card in `slot` (0–7), drive 0 or 1.
-    /// Returns `true` if the card was found and accepted the image.
+    ///
+    /// Automatically decompresses `.gz` / `.zip` wrappers and strips 2IMG
+    /// headers before passing the raw image data to the Disk2 controller.
     pub fn load_disk(&mut self, slot: usize, drive: usize, data: &[u8], ext: &str) -> bool {
         use crate::cards::disk2::Disk2Card;
+        use crate::disk_util;
+
+        // Decompress if gzip/zip, then unwrap 2IMG if present.
+        let (data, ext) = disk_util::decompress(data, ext);
+        let (data, ext) = match disk_util::unwrap_2img(&data) {
+            Some((inner, fmt)) => (inner, fmt.to_string()),
+            None => (data, ext),
+        };
+
         if let Some(card) = self.cards.slot_mut(slot)
             && let Some(disk2) = card.as_any_mut().downcast_mut::<Disk2Card>()
         {
-            return disk2.load_drive(drive, data, ext);
+            return disk2.load_drive(drive, &data, &ext);
         }
         false
     }
@@ -816,19 +1254,19 @@ impl Bus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusSnapshot {
     #[serde(with = "serde_bytes")]
-    pub main_ram:     Vec<u8>,
+    pub main_ram: Vec<u8>,
     #[serde(with = "serde_bytes")]
-    pub aux_ram:      Vec<u8>,
-    pub mode:         u32,
+    pub aux_ram: Vec<u8>,
+    pub mode: u32,
     pub speaker_state: bool,
 }
 
 impl Bus {
     pub fn take_snapshot(&self) -> BusSnapshot {
         BusSnapshot {
-            main_ram:      self.main_ram.to_vec(),
-            aux_ram:       self.aux_ram.to_vec(),
-            mode:          self.mode.bits(),
+            main_ram: self.main_ram.to_vec(),
+            aux_ram: self.aux_ram.to_vec(),
+            mode: self.mode.bits(),
             speaker_state: self.speaker_state,
         }
     }
@@ -836,7 +1274,7 @@ impl Bus {
     pub fn restore_snapshot(&mut self, snap: &BusSnapshot) {
         self.main_ram.copy_from_slice(&snap.main_ram);
         self.aux_ram.copy_from_slice(&snap.aux_ram);
-        self.mode          = MemMode::from_bits_truncate(snap.mode);
+        self.mode = MemMode::from_bits_truncate(snap.mode);
         self.speaker_state = snap.speaker_state;
         self.rebuild_page_tables();
     }

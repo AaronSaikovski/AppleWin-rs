@@ -19,6 +19,7 @@ thiserror  = { workspace = true }
 tracing    = { workspace = true }
 serde      = { workspace = true }
 serde_yaml = { workspace = true }
+png        = { workspace = true }
 
 # Platform I/O — optional at build time for headless / CI builds
 eframe = { version = "0.23", optional = true }
@@ -28,6 +29,9 @@ gilrs  = { version = "0.10", optional = true }
 toml   = { version = "0.8",  optional = true }
 # eframe 0.23 transitively needs these winapi features on Windows
 winapi = { version = "0.3", features = ["winuser", "windef"], optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [features]
 default  = ["gui"]

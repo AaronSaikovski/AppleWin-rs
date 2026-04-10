@@ -1,9 +1,18 @@
 # AppleWin-rs
 
-A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows.
+![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
+![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
+![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
+
+A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
 > **Original project:** [https://github.com/AppleWin/AppleWin](https://github.com/AppleWin/AppleWin)
 > **This port:** [https://github.com/AaronSaikovski/AppleWin-rs](https://github.com/AaronSaikovski/AppleWin-rs)
+
+## Downloads
+
+Pre-built binaries for Windows, macOS, and Linux are available on the [Releases](https://github.com/AaronSaikovski/AppleWin-rs/releases) page.
 
 ---
 
@@ -12,8 +21,7 @@ A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-f
 - Apple II (`][`)
 - Apple II+ (`][+`)
 - Apple IIe (`//e`)
-- Apple IIe Enhanced (`//e Enhanced`)
-- Various clones (Pravets, TK3000, Base 64)
+- Apple IIe Enhanced (`//e Enhanced`) — default
 
 > No support currently for the //c, //c+, Laser 128, Laser 128EX/EX2, or Apple IIgs.
 
@@ -21,21 +29,36 @@ A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-f
 
 ## Peripheral Cards & Add-on Hardware
 
-- Mockingboard, Phasor and SAM sound cards
-- Disk II interface for floppy disk drives
-- Hard disk controller
-- Super Serial Card (SSC)
-- Parallel printer card
-- Mouse interface
-- Apple IIe Extended 80-Column Text Card and RamWorks III (8MB)
-- RGB cards: Apple's Extended 80-Column Text/AppleColor Adaptor Card and 'Le Chat Mauve' Féline
-- CP/M SoftCard (Z80)
-- Uthernet I and II (ethernet cards)
-- Language Card and Saturn 64/128K
-- 4Play and SNES MAX joystick cards
-- VidHD card (IIgs Super Hi-Res video modes)
-- No Slot Clock (NSC)
-- Game I/O Connector copy protection dongles
+21 expansion cards are implemented across 8 slots plus an auxiliary slot:
+
+| Card | Description |
+|------|-------------|
+| Disk II | 5.25" floppy controller (DSK/DO/PO/NIB/WOZ v1 & v2/D13) |
+| Hard Disk Controller | ProDOS block device (HDV/PO/2MG), up to 8 drives |
+| Mockingboard | Dual 6522 VIA + 2x AY-3-8910 PSG sound card |
+| Phasor | Mockingboard superset with native dual-mode |
+| MegaAudio | Mockingboard-compatible with enhanced 3rd PSG |
+| SD Music | Mockingboard-compatible with SD card music streaming |
+| SAM | Software Automated Mouth (8-bit DAC) |
+| SSI263 | Phoneme-based speech synthesizer (used with Mockingboard/Phasor) |
+| Super Serial Card | 6551 ACIA emulation with TCP/UDP support |
+| Parallel Printer | Output to `printer.txt` file |
+| Mouse Interface | Mouse card with firmware ROM |
+| 80-Column Text Card | 1K and Extended 64K variants |
+| RamWorks III | Auxiliary RAM expansion (64K-8192K configurable) |
+| Language Card | 16K RAM expansion ($D000-$FFFF) |
+| Saturn 128K | Up to 8 banks of 16K language card RAM |
+| Uthernet I | CS8900A ethernet (register stubs for detection) |
+| Uthernet II | WIZnet W5100 with TCP/UDP sockets and Virtual DNS |
+| 4Play | 4-port digital joystick interface |
+| SNES MAX | Dual SNES controller serial interface |
+| VidHD | Modern video output card |
+| Z80 SoftCard | CP/M card (card present, Z80 CPU not yet emulated) |
+| No Slot Clock | Dallas DS1216 real-time clock |
+
+**Additional hardware:**
+- Game I/O connector copy protection dongles (5 types)
+- Cassette tape I/O (WAV file loading)
 
 ---
 
@@ -58,11 +81,11 @@ AppleWin-rs/
 
 | Crate | Purpose | Key Dependencies |
 |---|---|---|
-| `apple2-core` | 6502/65C02 CPU, memory bus, 19 expansion card implementations | `bitflags`, `thiserror`, `tracing`, `serde` |
+| `apple2-core` | 6502/65C02 CPU, memory bus, 21 expansion card implementations | `bitflags`, `thiserror`, `tracing`, `serde` |
 | `apple2-audio` | AY8910 PSG synthesis, SSI263 speech, speaker emulation | `thiserror`, `tracing`, `serde` |
-| `apple2-video` | Framebuffer, NTSC signal chain, all video mode rendering | `apple2-core`, `thiserror`, `tracing`, `serde` |
+| `apple2-video` | Framebuffer (560x384), NTSC signal chain, all video mode rendering | `apple2-core`, `thiserror`, `tracing`, `serde` |
 | `apple2-debugger` | Disassembler, breakpoint manager, symbol table loader | `apple2-core`, `thiserror`, `tracing`, `serde` |
-| `applewin` | GUI (egui/eframe), audio output (cpal), gamepad (gilrs), config (toml) | all above + `eframe`, `cpal`, `gilrs`, `rfd`, `winapi` |
+| `applewin` | GUI (egui/eframe), audio output (cpal), gamepad (gilrs), config (toml) | all above + `eframe`, `cpal`, `gilrs`, `rfd`, `png` |
 
 ### Design Principles
 
@@ -78,15 +101,15 @@ AppleWin-rs/
 
 ### Prerequisites
 
-- Rust toolchain: **1.85+** (edition 2024 workspace)
-- On Windows, MSVC build tools or the `x86_64-pc-windows-msvc` target
-- On Linux/macOS, standard C toolchain (`gcc`/`clang`) for native audio/GUI crate build scripts
-
-Install Rust via [rustup](https://rustup.rs):
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
+- Rust toolchain: **1.85+** (edition 2024 workspace) — install via [rustup](https://rustup.rs)
+- **Windows:** MSVC build tools (`x86_64-pc-windows-msvc` target)
+- **Linux:** system packages for audio, GUI, and gamepad:
+  ```sh
+  sudo apt-get install libasound2-dev libgtk-3-dev \
+      libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+      libxkbcommon-dev libudev-dev
+  ```
+- **macOS:** standard Xcode command-line tools
 
 ### Standard (GUI) Build
 
@@ -117,7 +140,7 @@ cargo build --release --no-default-features --features headless
 cargo run --release
 ```
 
-Or run the compiled binary directly and optionally pass a disk image:
+Or run the compiled binary directly:
 
 ```sh
 ./target/release/applewin
@@ -130,25 +153,96 @@ Or run the compiled binary directly and optionally pass a disk image:
 | `gui` | yes | Enables the full egui/eframe GUI, audio (cpal), gamepad (gilrs), and file dialogs (rfd) |
 | `headless` | no | Strips all GUI/audio/I/O for pure emulation builds |
 
+### Testing
+
+```sh
+cargo test
+```
+
+Runs 297 tests across all crates:
+
+| Crate | Tests | Coverage |
+|---|---|---|
+| `apple2-core` | 247 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, expansion cards |
+| `apple2-core` (integration) | 9 | Boot sequence, program execution, snapshots, Fibonacci |
+| `apple2-audio` | 9 | Speaker interpolation, DC filter, amplitude |
+| `apple2-video` | 14 | NTSC tables, text/lores/hires/dlores rendering, mixed mode |
+| `apple2-debugger` | 18 | Disassembly, breakpoints, assembler |
+
 ---
 
-## Workspace Dependencies
+## Disk Image Support
 
-All shared dependency versions are pinned in the root `Cargo.toml` and referenced with `workspace = true` in each crate:
+| Format | Extension | Description |
+|---|---|---|
+| DOS 3.3 | `.dsk`, `.do` | 140K floppy, 6+2 GCR encoding |
+| ProDOS | `.po` | 140K floppy, ProDOS sector order |
+| Nibble | `.nib` | Raw nibblized tracks |
+| WOZ v1/v2 | `.woz` | Flux-level bitstream with weak bit support for copy-protected disks |
+| DOS 3.2 | `.d13` | 113K floppy, 5+3 GCR encoding (13-sector) |
+| Hard disk | `.hdv`, `.po`, `.2mg` | ProDOS block device (512-byte blocks) |
+| Compressed | `.gz`, `.zip` | Auto-decompressed wrappers around any of the above |
 
-| Crate | Version |
-|---|---|
-| `bitflags` | 2.x (with `serde` feature) |
-| `thiserror` | 1.x |
-| `tracing` | 0.1 |
-| `serde` | 1.x (with `derive` feature) |
-| `serde_yaml` | 0.9 |
-| `serde_bytes` | 0.11 |
-| `eframe` / `egui` | 0.23 (GUI only) |
-| `cpal` | 0.15 (GUI only) |
-| `gilrs` | 0.10 (GUI only) |
-| `rfd` | 0.12 (GUI only) |
-| `toml` | 0.8 (GUI only) |
+---
+
+## Features
+
+- **Drag-and-drop** disk image loading
+- **Clipboard** copy/paste (Ctrl+C copies text screen, Ctrl+V pastes as keystrokes)
+- **Screenshot** capture (F12, saves PNG to screenshots directory)
+- **WAV recording** of emulator audio (F9 toggle)
+- **Disk activity indicators** — drive LEDs with real-time track numbers and HDD activity in the status bar
+- **Cassette tape** I/O (load WAV files for tape-based software)
+- **Symbolic debugger** with disassembler, breakpoints, watches, and single-step
+- **Save/restore** emulator state (F11 / Shift+F11)
+- **Gamepad support** via gilrs (Xbox, PlayStation, and other controllers)
+- **TOML configuration** with platform-standard paths
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| F1 | Hard reset |
+| Ctrl+F2 | Soft reset |
+| F7 | Toggle debugger |
+| F9 | Toggle WAV audio recording |
+| F11 | Save state |
+| Shift+F11 | Load state |
+| F12 | Screenshot (PNG) |
+| Ctrl+Esc | Quit |
+| Ctrl+C | Copy text screen to clipboard |
+| Ctrl+V | Paste clipboard as keystrokes |
+| Ctrl+0 | Speed 40x |
+| Ctrl+1 | Speed 10x (normal) |
+| Ctrl+3 | Speed 30x |
+| Ctrl+4 | Video: Monochrome White |
+| Ctrl+5 | Video: Monochrome Green |
+| Ctrl+6 | Video: Color TV |
+| Ctrl+7 | Video: Color Idealized |
+| Ctrl+8 | Video: Color RGB |
+| Ctrl+9 | Video: Color NTSC |
+
+**Debugger keys:** Space (step), Ctrl+Space (step over), Shift+Space (step out), F5 (resume)
+
+---
+
+## Video Modes
+
+| Mode | Description |
+|------|-------------|
+| Color TV | Color NTSC signal-chain TV rendering (default) |
+| Color Idealized | Simplified NTSC colour-cell rendering |
+| Color RGB | RGB card/monitor output |
+| Color Monitor NTSC | Color NTSC signal-chain monitor rendering |
+| Mono TV | Monochrome TV (white phosphor, composite bandwidth) |
+| Mono Amber | Amber phosphor monochrome |
+| Mono Green | Green phosphor monochrome |
+| Mono White | Pure white phosphor monochrome |
+| Mono Custom | Custom monochrome color (0xRRGGBB) |
+
+Additional options: scanlines, color vertical blending, 50/60 Hz refresh rate.
 
 ---
 
@@ -162,13 +256,24 @@ On first run, `applewin` creates a TOML config file in the platform-standard loc
 | macOS | `~/Library/Application Support/applewin-rs/config.toml` |
 | Linux | `$XDG_CONFIG_HOME/applewin-rs/config.toml` |
 
-### Video Modes
+### Configurable Options
 
-`Mono Custom`, `Color Idealized`, `Color RGB`, `Color NTSC`, `Color TV`, `Mono TV`, `Mono Amber`, `Mono Green`, `Mono White`
+- **Machine:** Model, CPU type (6502/65C02), slot card assignments
+- **Video:** Mode, scanlines, color blending, monochrome color, refresh rate
+- **Audio:** Master volume (0-100%)
+- **Speed:** Emulation speed (0-40, 10 = normal), enhanced disk speed (16x during motor spin)
+- **Input:** Joystick type per port, paddle trim, auto-fire, self-centering, button swap, mouse options
+- **Memory:** RAM initialization pattern (0-7), custom ROM paths
+- **Save state:** Auto-save on exit, custom save state path
+- **UI:** Window scale, position, disk activity LEDs, confirm reboot dialog
 
-### Joystick / Input Modes
+### Save States
 
-`Disabled`, `Joystick 1`, `Joystick 2`, `Numeric Keypad`, `Arrow Keys`, `Mouse`
+Save states are stored in YAML format alongside the config file as `applewin-rs.aws.yaml`. Use F11 to save and Shift+F11 to restore. Optionally enable auto-save on exit in the settings.
+
+### Screenshots
+
+Screenshots are saved as PNG files to `%APPDATA%\applewin-rs\screenshots\` on Windows, or the current directory on other platforms.
 
 ---
 
@@ -178,6 +283,23 @@ These ports allow building the original C++ AppleWin on non-Windows platforms:
 
 - [Linux](https://github.com/audetto/AppleWin)
 - [macOS](https://github.com/sh95014/AppleWin)
+
+---
+
+## CI/CD
+
+**Continuous Integration** runs on every push and PR to `main` and `development` branches:
+- `cargo fmt --all --check` — code formatting
+- `cargo clippy --workspace --all-targets -- -D warnings` — lint (all platforms)
+- `cargo test` — test suite (all platforms)
+- `cargo build --release` — GUI and headless builds (all platforms)
+
+**Release builds** are triggered by version tags (`v*.*.*`) and produce archives for:
+- Windows x86_64 (`.zip`)
+- macOS x86_64 and aarch64 (`.tar.gz`)
+- Linux x86_64 and aarch64 (`.tar.gz`)
+
+Each release includes SHA256 checksums and auto-generated release notes.
 
 ---
 

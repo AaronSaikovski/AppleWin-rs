@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/AaronSaikovski/AppleWin-rs"
@@ -27,3 +27,7 @@ tracing          = "0.1"
 serde            = { version = "1", features = ["derive"] }
 serde_yaml       = "0.9"
 serde_bytes      = "0.11"
+flate2           = "1"
+zip              = { version = "2", default-features = false, features = ["deflate"] }
+hound            = "3"
+png              = "0.17"

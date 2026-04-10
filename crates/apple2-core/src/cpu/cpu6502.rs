@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 /// Corresponds to `regsrec` + the various globals in `source/CPU.h`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cpu {
-    pub a:  u8,
-    pub x:  u8,
-    pub y:  u8,
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
     pub sp: u8,
     pub pc: u16,
     pub flags: Flags,
@@ -33,6 +33,12 @@ pub struct Cpu {
     /// When an IRQ first asserts on the last cycle of an opcode, we defer by
     /// one opcode before taking the interrupt — matching 6502 hardware behaviour.
     pub irq_defer: bool,
+
+    /// 65C02 WAI: CPU is halted waiting for an interrupt (IRQ or NMI).
+    /// When true, the CPU does not execute instructions; it just advances
+    /// time until an interrupt arrives, at which point `waiting` is cleared
+    /// and the interrupt is serviced normally.
+    pub waiting: bool,
 }
 
 impl Default for Cpu {
@@ -50,6 +56,7 @@ impl Default for Cpu {
             jammed: false,
             is_65c02: true,
             irq_defer: false,
+            waiting: false,
         }
     }
 }
@@ -71,6 +78,7 @@ impl Cpu {
         self.sp = 0xFF;
         self.flags = Flags::power_on();
         self.jammed = false;
+        self.waiting = false;
         self.irq_pending = 0;
         self.nmi_pending = 0;
         self.irq_defer = false;
@@ -197,7 +205,11 @@ impl Cpu {
             return 0;
         }
         let new_pc = self.pc.wrapping_add(offset as u16);
-        let extra = if (new_pc & 0xFF00) != (self.pc & 0xFF00) { 2 } else { 1 };
+        let extra = if (new_pc & 0xFF00) != (self.pc & 0xFF00) {
+            2
+        } else {
+            1
+        };
         self.pc = new_pc;
         extra
     }
@@ -233,7 +245,10 @@ impl Cpu {
         // Binary result used for N/V/Z flags (NMOS quirk).
         let bin_sum = self.a as u16 + val as u16 + c as u16;
         self.flags.set(Flags::N, (bin_sum & 0x80) != 0);
-        self.flags.set(Flags::V, ((self.a ^ val) & 0x80 == 0) && ((self.a as u16 ^ bin_sum) & 0x80 != 0));
+        self.flags.set(
+            Flags::V,
+            ((self.a ^ val) & 0x80 == 0) && ((self.a as u16 ^ bin_sum) & 0x80 != 0),
+        );
         self.flags.set(Flags::Z, (bin_sum & 0xFF) == 0);
 
         // Low nibble BCD correction — save lo_carry BEFORE modifying lo.
@@ -271,7 +286,10 @@ impl Cpu {
         // Binary result used for N/V/Z flags (NMOS quirk).
         let bin_diff = self.a as i16 - val as i16 - borrow as i16;
         self.flags.set(Flags::N, (bin_diff & 0x80) != 0);
-        self.flags.set(Flags::V, ((self.a as i16 ^ bin_diff) & 0x80 != 0) && ((self.a ^ val) & 0x80 != 0));
+        self.flags.set(
+            Flags::V,
+            ((self.a as i16 ^ bin_diff) & 0x80 != 0) && ((self.a ^ val) & 0x80 != 0),
+        );
         self.flags.set(Flags::Z, (bin_diff & 0xFF) == 0);
 
         // Low nibble BCD correction — save lo_borrow BEFORE modifying lo.
