@@ -30,3 +30,4 @@ serde_bytes      = "0.11"
 flate2           = "1"
 zip              = { version = "2", default-features = false, features = ["deflate"] }
 hound            = "3"
+png              = "0.17"

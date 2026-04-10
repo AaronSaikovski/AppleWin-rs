@@ -223,6 +223,7 @@ dependencies = [
  "cpal",
  "eframe",
  "gilrs",
+ "png",
  "rfd",
  "serde",
  "serde_yaml",

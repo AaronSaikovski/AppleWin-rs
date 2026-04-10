@@ -19,22 +19,27 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: applewin.exe
-            asset_name: applewin-windows-x86_64.exe
+            archive: applewin-windows-x86_64.zip
 
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: applewin
-            asset_name: applewin-macos-x86_64
+            archive: applewin-macos-x86_64.tar.gz
 
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: applewin
-            asset_name: applewin-macos-aarch64
+            archive: applewin-macos-aarch64.tar.gz
 
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: applewin
-            asset_name: applewin-linux-x86_64
+            archive: applewin-linux-x86_64.tar.gz
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: applewin
+            archive: applewin-linux-aarch64.tar.gz
 
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +52,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Linux GUI dependencies
+      - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -57,22 +62,46 @@ jobs:
             libxcb-render0-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            libudev-dev
+
+      - name: Install cross-compilation tools (aarch64-linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename artifact
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} \
-             ${{ matrix.asset_name }}
+          staging="applewin-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "$staging/"
+          cp LICENSE README.md "$staging/"
+          7z a "${{ matrix.archive }}" "$staging"
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          staging="applewin-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar czf "${{ matrix.archive }}" "$staging"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
           if-no-files-found: error
 
   release:
@@ -89,6 +118,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2

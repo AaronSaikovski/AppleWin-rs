@@ -2893,54 +2893,31 @@ mod gui {
 
     // ── Screenshot ────────────────────────────────────────────────────────────
 
-    /// Save `pixels` (RGBA8888, row-major) as a 24bpp BMP file.
+    /// Save `pixels` (RGBA8888, row-major) as a PNG file.
     fn save_screenshot(pixels: &[u8], w: usize, h: usize) {
-        let path = screenshot_path();
-        let Some(path) = path else { return };
-        let row_stride = (w * 3).div_ceil(4) * 4;
-        let pixel_bytes = row_stride * h;
-        let file_size = (14 + 40 + pixel_bytes) as u32;
+        let Some(path) = screenshot_path() else { return };
 
-        let mut data = Vec::with_capacity(file_size as usize);
+        let Ok(file) = std::fs::File::create(&path) else {
+            eprintln!("Screenshot failed: could not create {}", path.display());
+            return;
+        };
+        let buf_writer = &mut std::io::BufWriter::new(file);
 
-        // BMP file header (14 bytes)
-        data.extend_from_slice(b"BM");
-        data.extend_from_slice(&file_size.to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        data.extend_from_slice(&54u32.to_le_bytes()); // pixel offset
+        let mut encoder = png::Encoder::new(buf_writer, w as u32, h as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
 
-        // DIB header / BITMAPINFOHEADER (40 bytes)
-        data.extend_from_slice(&40u32.to_le_bytes());  // header size
-        data.extend_from_slice(&(w as i32).to_le_bytes());
-        data.extend_from_slice(&(-(h as i32)).to_le_bytes()); // negative = top-down
-        data.extend_from_slice(&1u16.to_le_bytes());   // planes
-        data.extend_from_slice(&24u16.to_le_bytes());  // bpp
-        data.extend_from_slice(&0u32.to_le_bytes());   // compression (none)
-        data.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
-        data.extend_from_slice(&2835u32.to_le_bytes()); // X pixels/metre
-        data.extend_from_slice(&2835u32.to_le_bytes()); // Y pixels/metre
-        data.extend_from_slice(&0u32.to_le_bytes());   // colors used
-        data.extend_from_slice(&0u32.to_le_bytes());   // important colors
+        let Ok(mut writer) = encoder.write_header() else {
+            eprintln!("Screenshot failed: could not write PNG header");
+            return;
+        };
 
-        // Pixel data (24bpp BGR, top-down because we used negative height)
-        for row in 0..h {
-            let mut written = 0usize;
-            for col in 0..w {
-                let base = (row * w + col) * 4;
-                let r = pixels[base];
-                let g = pixels[base + 1];
-                let b = pixels[base + 2];
-                data.push(b);
-                data.push(g);
-                data.push(r);
-                written += 3;
-            }
-            // Pad row to 4-byte boundary
-            while !written.is_multiple_of(4) { data.push(0); written += 1; }
+        if writer.write_image_data(pixels).is_ok() {
+            eprintln!("Screenshot saved: {}", path.display());
+        } else {
+            eprintln!("Screenshot failed: could not write PNG data");
         }
-
-        let _ = std::fs::write(&path, &data);
-        eprintln!("Screenshot saved: {}", path.display());
     }
 
     /// Returns a timestamped path in %APPDATA%\applewin-rs\screenshots\ (Windows)
@@ -2950,7 +2927,7 @@ mod gui {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let fname = format!("screenshot_{ts}.bmp");
+        let fname = format!("screenshot_{ts}.png");
 
         #[cfg(windows)]
         {

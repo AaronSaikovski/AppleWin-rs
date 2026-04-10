@@ -19,6 +19,7 @@ thiserror  = { workspace = true }
 tracing    = { workspace = true }
 serde      = { workspace = true }
 serde_yaml = { workspace = true }
+png        = { workspace = true }
 
 # Platform I/O — optional at build time for headless / CI builds
 eframe = { version = "0.23", optional = true }
