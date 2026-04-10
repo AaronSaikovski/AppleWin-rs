@@ -114,6 +114,10 @@ pub trait Card: Send + 'static {
     /// Only meaningful for Disk II cards; all others return false.
     fn disk_motor_on(&self) -> bool { false }
 
+    /// Returns the activity state for the given drive (0 or 1).
+    /// Only meaningful for Disk II cards; all others return the default (inactive).
+    fn disk_drive_activity(&self, _drive: usize) -> DriveActivity { DriveActivity::default() }
+
     /// Optional DMA write to Apple II main RAM, triggered by a card I/O access.
     /// The Bus drains this after each slot_io_read or slot_io_write call.
     fn take_dma_write(&mut self) -> Option<DmaWrite> { None }
@@ -176,6 +180,15 @@ impl Card for EmptyCard {
     fn save_state(&self, _out: &mut dyn Write) -> Result<()> { Ok(()) }
     fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+}
+
+// ── DriveActivity ─────────────────────────────────────────────────────────────
+
+/// Per-drive activity state for disk controllers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DriveActivity {
+    pub motor_on: bool,
+    pub writing: bool,
 }
 
 // ── CardManager ───────────────────────────────────────────────────────────────

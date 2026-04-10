@@ -871,6 +871,8 @@ mod gui {
             let d2_name  = Self::disk_display_name(&self.disk2).to_owned();
             let d1_loaded = self.disk1.is_some();
             let d2_loaded = self.disk2.is_some();
+            let d1_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 0);
+            let d2_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 1);
 
             // ── Deferred actions (set by panel closures, applied after) ───────
             let mut act_hard_reset    = false;
@@ -1074,7 +1076,7 @@ mod gui {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         if self.config.show_disk_status {
-                            disk_led(ui, "D1", d1_loaded, false);
+                            disk_led(ui, "D1", d1_activity.motor_on, d1_activity.writing);
                             ui.add_space(2.0);
                             ui.label(
                                 RichText::new(
@@ -1082,7 +1084,7 @@ mod gui {
                                 ).small().monospace(),
                             );
                             ui.add_space(8.0);
-                            disk_led(ui, "D2", d2_loaded, false);
+                            disk_led(ui, "D2", d2_activity.motor_on, d2_activity.writing);
                             ui.add_space(2.0);
                             ui.label(
                                 RichText::new(

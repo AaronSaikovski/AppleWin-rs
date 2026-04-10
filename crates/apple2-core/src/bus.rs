@@ -5,7 +5,7 @@
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
-use crate::card::{CardManager, DmaWrite};
+use crate::card::{CardManager, DmaWrite, DriveActivity};
 
 // ── Memory mode flags ─────────────────────────────────────────────────────────
 
@@ -777,6 +777,13 @@ impl Bus {
     /// Returns true if any Disk II card in any slot currently has its motor on.
     pub fn disk_motor_on(&self) -> bool {
         (0..8).any(|s| self.cards.slot(s).is_some_and(|c| c.disk_motor_on()))
+    }
+
+    /// Returns the activity state for a specific drive on the card in `slot`.
+    pub fn disk_drive_activity(&self, slot: usize, drive: usize) -> DriveActivity {
+        self.cards.slot(slot)
+            .map(|c| c.disk_drive_activity(drive))
+            .unwrap_or_default()
     }
 
     /// Load a disk image into the Disk2Card in `slot` (0–7), drive 0 or 1.

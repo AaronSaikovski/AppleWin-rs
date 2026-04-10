@@ -4,7 +4,7 @@
 //! and translated from `source/Disk.cpp` / `source/DiskImageHelper.cpp`.
 
 use std::io::{Read, Write};
-use crate::card::{Card, CardType};
+use crate::card::{Card, CardType, DriveActivity};
 use crate::error::Result;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -364,6 +364,14 @@ impl Card for Disk2Card {
     fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
 
     fn disk_motor_on(&self) -> bool { self.motor_on }
+
+    fn disk_drive_activity(&self, drive: usize) -> DriveActivity {
+        if drive < 2 && self.motor_on && self.active_drive == drive {
+            DriveActivity { motor_on: true, writing: self.write_mode }
+        } else {
+            DriveActivity::default()
+        }
+    }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
