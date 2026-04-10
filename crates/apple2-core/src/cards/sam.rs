@@ -5,16 +5,16 @@
 //!
 //! Reference: source/SAM.cpp
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 pub struct SamCard {
-    slot:         usize,
+    slot: usize,
     /// Queue of DAC samples waiting to be mixed into audio output.
-    samples:      Vec<f32>,
+    samples: Vec<f32>,
     /// Accumulates excess cycles for fractional sample timing.
-    cycles_rem:   f64,
+    cycles_rem: f64,
     /// Phoneme output buffer — records raw byte values written to the card.
     phoneme_buffer: Vec<u8>,
     /// Countdown of buzz samples remaining (generated when phonemes are written).
@@ -43,13 +43,21 @@ impl SamCard {
 }
 
 impl Card for SamCard {
-    fn card_type(&self) -> CardType { CardType::Sam }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::Sam
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
+    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
-    fn slot_io_read(&mut self, _reg: u8, _cycles: u64) -> u8 { 0xFF }
+    fn slot_io_read(&mut self, _reg: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
 
     fn slot_io_write(&mut self, _reg: u8, value: u8, _cycles: u64) {
         // Record the phoneme byte
@@ -99,7 +107,11 @@ impl Card for SamCard {
             let n = (self.buzz_samples_remaining as usize).min(out.len());
             for sample in out.iter_mut().take(n) {
                 let phase_in_period = (self.buzz_phase * buzz_freq / sr).fract();
-                let buzz = if phase_in_period < 0.5 { 0.15_f32 } else { -0.15_f32 };
+                let buzz = if phase_in_period < 0.5 {
+                    0.15_f32
+                } else {
+                    -0.15_f32
+                };
                 *sample += buzz;
                 self.buzz_phase += 1.0;
             }
@@ -133,7 +145,9 @@ impl Card for SamCard {
         Ok(())
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

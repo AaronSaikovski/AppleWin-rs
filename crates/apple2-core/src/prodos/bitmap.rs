@@ -33,8 +33,10 @@ fn bitmap_byte_count(disk_size: usize) -> usize {
 /// Mirrors `ProDOS_BlockInitFree`.
 pub fn init_free(image: &mut [u8], disk_size: usize, bitmap_block: u16, total_blocks: &mut u16) {
     let offset = bitmap_offset(bitmap_block);
-    let size   = bitmap_byte_count(disk_size);
-    for b in &mut image[offset..offset + size] { *b = 0xFF; }
+    let size = bitmap_byte_count(disk_size);
+    for b in &mut image[offset..offset + size] {
+        *b = 0xFF;
+    }
 
     let blocks = block_count(disk_size);
     *total_blocks = if blocks > MAX_BLOCKS as usize {
@@ -57,7 +59,7 @@ pub fn bitmap_block_count(disk_size: usize) -> usize {
 /// Mirrors `ProDOS_BlockGetFirstFree`.
 pub fn get_first_free(image: &[u8], disk_size: usize, bitmap_block: u16) -> Option<u32> {
     let offset = bitmap_offset(bitmap_block);
-    let size   = bitmap_byte_count(disk_size);
+    let size = bitmap_byte_count(disk_size);
     let mut block: u32 = 0;
 
     for byte in 0..size {
@@ -68,7 +70,9 @@ pub fn get_first_free(image: &[u8], disk_size: usize, bitmap_block: u16) -> Opti
             }
             mask >>= 1;
             block += 1;
-            if mask == 0 { break; }
+            if mask == 0 {
+                break;
+            }
         }
     }
     None
@@ -79,11 +83,10 @@ pub fn get_first_free(image: &[u8], disk_size: usize, bitmap_block: u16) -> Opti
 /// Mirrors `ProDOS_BlockSetUsed`.
 pub fn set_used(image: &mut [u8], bitmap_block: u16, block: u32) {
     let offset = bitmap_offset(bitmap_block);
-    let byte   = (block / 8) as usize;
-    let bit    = (block % 8) as u8;
-    let mask   = 0x80u8 >> bit;
+    let byte = (block / 8) as usize;
+    let bit = (block % 8) as u8;
+    let mask = 0x80u8 >> bit;
     // XOR after OR — equivalent to clearing the bit (matches C++ exactly)
     image[offset + byte] |= mask;
     image[offset + byte] ^= mask;
 }
-

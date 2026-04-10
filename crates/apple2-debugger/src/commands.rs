@@ -46,10 +46,15 @@ fn parse_hex(s: &str) -> Option<u16> {
 fn parse_value(s: &str) -> Option<u16> {
     if s.starts_with('$') {
         parse_hex(s)
-    } else if s.chars().any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit()) {
+    } else if s
+        .chars()
+        .any(|c| c.is_ascii_hexdigit() && !c.is_ascii_digit())
+    {
         u16::from_str_radix(s, 16).ok()
     } else {
-        s.parse::<u16>().ok().or_else(|| u16::from_str_radix(s, 16).ok())
+        s.parse::<u16>()
+            .ok()
+            .or_else(|| u16::from_str_radix(s, 16).ok())
     }
 }
 
@@ -89,8 +94,9 @@ where
         // ── Execution ────────────────────────────────────────────────────
         "G" | "GO" => {
             if let Some(addr_str) = args.first()
-                && let Some(addr) = parse_hex(addr_str) {
-                    return CmdResult::SetPC(addr);
+                && let Some(addr) = parse_hex(addr_str)
+            {
+                return CmdResult::SetPC(addr);
             }
             CmdResult::Go
         }
@@ -107,9 +113,10 @@ where
             if let Some(reg_str) = args.first() {
                 let reg = reg_str.to_uppercase();
                 if let Some(val_str) = args.get(1)
-                    && let Some(val) = parse_hex(val_str) {
-                        let ch = reg.chars().next().unwrap_or('?');
-                        return CmdResult::SetReg(ch, val);
+                    && let Some(val) = parse_hex(val_str)
+                {
+                    let ch = reg.chars().next().unwrap_or('?');
+                    return CmdResult::SetReg(ch, val);
                 }
                 return CmdResult::Error("Usage: R <reg> <value>  (e.g. R A 42)".to_string());
             }
@@ -126,7 +133,9 @@ where
             for _ in 0..count {
                 let instr = disassemble_one(addr, &mut read_mem);
                 let marker = if addr == pc { ">" } else { " " };
-                let sym = state.symbols.name_at(addr)
+                let sym = state
+                    .symbols
+                    .name_at(addr)
                     .map(|s| format!(" ; {s}"))
                     .unwrap_or_default();
                 lines.push(format!("{marker}{}{sym}", format_instruction(&instr)));
@@ -138,7 +147,9 @@ where
 
         // ── Memory dump ──────────────────────────────────────────────────
         "M" | "MEM" | "MD" | "MEMORY" => {
-            let start = args.first().and_then(|s| parse_hex(s))
+            let start = args
+                .first()
+                .and_then(|s| parse_hex(s))
                 .unwrap_or(state.mem_dump_addr);
             let count = args.get(1).and_then(|s| parse_value(s)).unwrap_or(128) as usize;
             let lines = format_mem_dump(start, count, &mut read_mem);
@@ -165,10 +176,11 @@ where
         // ── Breakpoints ──────────────────────────────────────────────────
         "BP" | "BRK" => {
             if let Some(addr_str) = args.first()
-                && let Some(addr) = parse_hex(addr_str) {
-                    let bp = Breakpoint::at(addr);
-                    let idx = state.breakpoints.add(bp);
-                    return CmdResult::Output(vec![format!("Breakpoint #{idx} set at ${addr:04X}")]);
+                && let Some(addr) = parse_hex(addr_str)
+            {
+                let bp = Breakpoint::at(addr);
+                let idx = state.breakpoints.add(bp);
+                return CmdResult::Output(vec![format!("Breakpoint #{idx} set at ${addr:04X}")]);
             }
             // List breakpoints
             let lines = list_breakpoints(state);
@@ -177,46 +189,57 @@ where
         "BPM" => {
             // Break on memory access
             if let Some(addr_str) = args.first()
-                && let Some(addr) = parse_hex(addr_str) {
-                    let kind = if args.get(1).is_some_and(|s| s.eq_ignore_ascii_case("W")) {
-                        BreakpointKind::MemWrite
-                    } else {
-                        BreakpointKind::MemRead
-                    };
-                    let bp = Breakpoint { kind, address: addr, length: 1, enabled: true, label: None };
-                    let idx = state.breakpoints.add(bp);
-                    return CmdResult::Output(vec![format!("Memory breakpoint #{idx} at ${addr:04X}")]);
+                && let Some(addr) = parse_hex(addr_str)
+            {
+                let kind = if args.get(1).is_some_and(|s| s.eq_ignore_ascii_case("W")) {
+                    BreakpointKind::MemWrite
+                } else {
+                    BreakpointKind::MemRead
+                };
+                let bp = Breakpoint {
+                    kind,
+                    address: addr,
+                    length: 1,
+                    enabled: true,
+                    label: None,
+                };
+                let idx = state.breakpoints.add(bp);
+                return CmdResult::Output(vec![format!("Memory breakpoint #{idx} at ${addr:04X}")]);
             }
             CmdResult::Error("Usage: BPM <addr> [R|W]".into())
         }
         "BPC" => {
             // Clear breakpoint
             if let Some(idx_str) = args.first()
-                && let Some(idx) = parse_value(idx_str) {
-                    state.breakpoints.remove(idx as usize);
-                    return CmdResult::Output(vec![format!("Breakpoint #{idx} cleared")]);
+                && let Some(idx) = parse_value(idx_str)
+            {
+                state.breakpoints.remove(idx as usize);
+                return CmdResult::Output(vec![format!("Breakpoint #{idx} cleared")]);
             } else if let Some(idx_str) = args.first()
-                && *idx_str == "*" {
-                    state.breakpoints.clear_all();
-                    return CmdResult::Output(vec!["All breakpoints cleared".into()]);
+                && *idx_str == "*"
+            {
+                state.breakpoints.clear_all();
+                return CmdResult::Output(vec!["All breakpoints cleared".into()]);
             }
             CmdResult::Error("Usage: BPC <index> | BPC *".into())
         }
         "BPD" => {
             // Disable breakpoint
             if let Some(idx_str) = args.first()
-                && let Some(idx) = parse_value(idx_str) {
-                    state.breakpoints.set_enabled(idx as usize, false);
-                    return CmdResult::Output(vec![format!("Breakpoint #{idx} disabled")]);
+                && let Some(idx) = parse_value(idx_str)
+            {
+                state.breakpoints.set_enabled(idx as usize, false);
+                return CmdResult::Output(vec![format!("Breakpoint #{idx} disabled")]);
             }
             CmdResult::Error("Usage: BPD <index>".into())
         }
         "BPE" => {
             // Enable breakpoint
             if let Some(idx_str) = args.first()
-                && let Some(idx) = parse_value(idx_str) {
-                    state.breakpoints.set_enabled(idx as usize, true);
-                    return CmdResult::Output(vec![format!("Breakpoint #{idx} enabled")]);
+                && let Some(idx) = parse_value(idx_str)
+            {
+                state.breakpoints.set_enabled(idx as usize, true);
+                return CmdResult::Output(vec![format!("Breakpoint #{idx} enabled")]);
             }
             CmdResult::Error("Usage: BPE <index>".into())
         }
@@ -228,10 +251,11 @@ where
         // ── Watch points ─────────────────────────────────────────────────
         "W" | "WATCH" => {
             if let Some(addr_str) = args.first()
-                && let Some(addr) = parse_hex(addr_str) {
-                    let len = args.get(1).and_then(|s| parse_value(s)).unwrap_or(1);
-                    state.watches.add(addr, len);
-                    return CmdResult::Output(vec![format!("Watch added at ${addr:04X} len {len}")]);
+                && let Some(addr) = parse_hex(addr_str)
+            {
+                let len = args.get(1).and_then(|s| parse_value(s)).unwrap_or(1);
+                state.watches.add(addr, len);
+                return CmdResult::Output(vec![format!("Watch added at ${addr:04X} len {len}")]);
             }
             // List watches
             let lines = format_watches(state, &mut read_mem);
@@ -254,9 +278,10 @@ where
         // ── Symbols ──────────────────────────────────────────────────────
         "SYM" | "SYMBOL" => {
             if args.len() >= 2
-                && let Some(addr) = parse_hex(args[1]) {
-                    state.symbols.insert(args[0], addr);
-                    return CmdResult::Output(vec![format!("{} = ${addr:04X}", args[0])]);
+                && let Some(addr) = parse_hex(args[1])
+            {
+                state.symbols.insert(args[0], addr);
+                return CmdResult::Output(vec![format!("{} = ${addr:04X}", args[0])]);
             }
             if let Some(name) = args.first() {
                 if let Some(addr) = state.symbols.addr_of(name) {
@@ -273,7 +298,8 @@ where
                 return CmdResult::Error("Usage: F <start> <byte> [byte...]".into());
             }
             if let Some(start) = parse_hex(args[0]) {
-                let pattern: Vec<u8> = args[1..].iter()
+                let pattern: Vec<u8> = args[1..]
+                    .iter()
                     .filter_map(|s| parse_hex(s).map(|v| v as u8))
                     .collect();
                 if pattern.is_empty() {
@@ -283,7 +309,8 @@ where
                 if results.is_empty() {
                     return CmdResult::Output(vec!["Not found".into()]);
                 }
-                let lines: Vec<String> = results.iter()
+                let lines: Vec<String> = results
+                    .iter()
                     .take(16)
                     .map(|&a| format!("  Found at ${a:04X}"))
                     .collect();
@@ -306,9 +333,9 @@ where
         }
 
         // ── Soft switches info ───────────────────────────────────────────
-        "SS" | "SOFTSWITCH" => {
-            CmdResult::Output(vec!["Use the Soft Switches panel to view current state".into()])
-        }
+        "SS" | "SOFTSWITCH" => CmdResult::Output(vec![
+            "Use the Soft Switches panel to view current state".into(),
+        ]),
 
         // ── Fill memory ──────────────────────────────────────────────────
         "FILL" => {
@@ -320,9 +347,7 @@ where
         }
 
         // ── Help ─────────────────────────────────────────────────────────
-        "H" | "HELP" | "?" => {
-            CmdResult::Output(help_text())
-        }
+        "H" | "HELP" | "?" => CmdResult::Output(help_text()),
 
         _ => CmdResult::Error(format!("Unknown command: {cmd}")),
     }
@@ -349,8 +374,14 @@ fn format_registers(r: CpuRegs) -> Vec<String> {
     let z = if r.flags & 0x02 != 0 { 'Z' } else { '.' };
     let c = if r.flags & 0x01 != 0 { 'C' } else { '.' };
     vec![
-        format!("  A={:02X}  X={:02X}  Y={:02X}  SP={:02X}  PC={:04X}", r.a, r.x, r.y, r.sp, r.pc),
-        format!("  P={:02X}  [{n}{v}.{b}{d}{i}{z}{c}]  Cycles={}", r.flags, r.cycles),
+        format!(
+            "  A={:02X}  X={:02X}  Y={:02X}  SP={:02X}  PC={:04X}",
+            r.a, r.x, r.y, r.sp, r.pc
+        ),
+        format!(
+            "  P={:02X}  [{n}{v}.{b}{d}{i}{z}{c}]  Cycles={}",
+            r.flags, r.cycles
+        ),
     ]
 }
 
@@ -368,9 +399,15 @@ where
         for i in 0..16u16 {
             let a = addr.wrapping_add(i);
             let b = read(a);
-            if i == 8 { hex.push(' '); }
+            if i == 8 {
+                hex.push(' ');
+            }
             hex.push_str(&format!("{:02X} ", b));
-            ascii.push(if (0x20..=0x7E).contains(&b) { b as char } else { '.' });
+            ascii.push(if (0x20..=0x7E).contains(&b) {
+                b as char
+            } else {
+                '.'
+            });
         }
         lines.push(format!("{:04X}: {hex} |{ascii}|", addr));
         addr = addr.wrapping_add(16);
@@ -409,13 +446,13 @@ fn list_breakpoints(state: &DebuggerState) -> Vec<String> {
     let mut lines = vec!["  # Addr   Kind     Enabled".into()];
     for (i, bp) in state.breakpoints.breakpoints.iter().enumerate() {
         let kind = match bp.kind {
-            BreakpointKind::Opcode    => "PC      ",
-            BreakpointKind::MemRead   => "MemRead ",
-            BreakpointKind::MemWrite  => "MemWrite",
-            BreakpointKind::Register  => "Register",
+            BreakpointKind::Opcode => "PC      ",
+            BreakpointKind::MemRead => "MemRead ",
+            BreakpointKind::MemWrite => "MemWrite",
+            BreakpointKind::Register => "Register",
             BreakpointKind::Interrupt => "IRQ     ",
-            BreakpointKind::IoRead    => "IoRead  ",
-            BreakpointKind::IoWrite   => "IoWrite ",
+            BreakpointKind::IoRead => "IoRead  ",
+            BreakpointKind::IoWrite => "IoWrite ",
             _ => "Other   ",
         };
         let en = if bp.enabled { "Yes" } else { "No " };
@@ -463,11 +500,17 @@ where
         }
         if matched {
             results.push(addr);
-            if results.len() >= 64 { break; }
+            if results.len() >= 64 {
+                break;
+            }
         }
-        if (addr as u32) >= end { break; }
+        if (addr as u32) >= end {
+            break;
+        }
         addr = addr.wrapping_add(1);
-        if addr == 0 { break; } // wrapped around
+        if addr == 0 {
+            break;
+        } // wrapped around
     }
     results
 }

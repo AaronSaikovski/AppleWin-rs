@@ -7,9 +7,9 @@
 //!
 //! Reference: source/Memory.cpp (RamWorks III section)
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 /// Marker card for RamWorks III.
 ///
@@ -26,10 +26,16 @@ impl RamWorksCard {
 }
 
 impl Card for RamWorksCard {
-    fn card_type(&self) -> CardType { CardType::RamWorksIII }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::RamWorksIII
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
+    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
     fn reset(&mut self, _power_cycle: bool) {}
@@ -46,5 +52,7 @@ impl Card for RamWorksCard {
         Ok(())
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

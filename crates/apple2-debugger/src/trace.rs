@@ -5,15 +5,15 @@
 /// One trace entry.
 #[derive(Debug, Clone)]
 pub struct TraceEntry {
-    pub pc:      u16,
-    pub opcode:  u8,
-    pub a:       u8,
-    pub x:       u8,
-    pub y:       u8,
-    pub sp:      u8,
-    pub flags:   u8,
-    pub cycles:  u64,
-    pub text:    String,
+    pub pc: u16,
+    pub opcode: u8,
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
+    pub sp: u8,
+    pub flags: u8,
+    pub cycles: u64,
+    pub text: String,
 }
 
 /// Ring buffer of trace entries.
@@ -44,7 +44,9 @@ impl TraceBuffer {
     }
 
     pub fn push(&mut self, entry: TraceEntry) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
         if self.entries.len() < self.capacity {
             self.entries.push(entry);
         } else {

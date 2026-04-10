@@ -18,15 +18,15 @@
 //!
 //! Reference: source/Harddisk.cpp, resource/Hddrvr.bin
 
-use std::io::{Read, Write};
-use crate::card::{Card, CardType, DmaWrite};
+use crate::card::{Card, CardType, DmaWrite, DriveActivity};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 // ── Error codes (ProDOS block device error codes) ─────────────────────────────
 
-const ERR_OK:         u8 = 0x00;
-const ERR_IO:         u8 = 0x27;
-const ERR_NO_DEVICE:  u8 = 0x28;
+const ERR_OK: u8 = 0x00;
+const ERR_IO: u8 = 0x27;
+const ERR_NO_DEVICE: u8 = 0x28;
 
 // ── Firmware ROM (embedded from resource/Hddrvr.bin) ─────────────────────────
 //
@@ -38,8 +38,8 @@ static HD_FIRMWARE: &[u8; 256] = include_bytes!("../../roms/Hddrvr.bin");
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 const CMD_STATUS: u8 = 0x00;
-const CMD_READ:   u8 = 0x01;
-const CMD_WRITE:  u8 = 0x02;
+const CMD_READ: u8 = 0x01;
+const CMD_WRITE: u8 = 0x02;
 
 /// 512-byte ProDOS block size.
 const BLOCK_SIZE: usize = 512;
@@ -67,7 +67,9 @@ impl Drive {
 
     fn write_block(&mut self, block: u32, data: &[u8]) -> bool {
         let off = block as usize * BLOCK_SIZE;
-        if data.len() < BLOCK_SIZE { return false; }
+        if data.len() < BLOCK_SIZE {
+            return false;
+        }
         // Grow the image if needed
         let needed = off + BLOCK_SIZE;
         if needed > self.image.len() {
@@ -84,26 +86,32 @@ impl Drive {
 pub const MAX_HD_DRIVES: usize = 8;
 
 pub struct HdCard {
-    slot:    usize,
-    drives:  [Option<Drive>; MAX_HD_DRIVES],
+    slot: usize,
+    drives: [Option<Drive>; MAX_HD_DRIVES],
 
     // I/O registers
     command: u8,
-    unit:    u8,
-    buf_lo:  u8,
-    buf_hi:  u8,
-    blk_lo:  u8,
-    blk_hi:  u8,
+    unit: u8,
+    buf_lo: u8,
+    buf_hi: u8,
+    blk_lo: u8,
+    blk_hi: u8,
 
     // Execution result
-    status:  u8,   // b0 = error flag
+    status: u8, // b0 = error flag
 
     // Pending DMA write (card → Apple II RAM) after a successful READ
     dma_write: Option<DmaWrite>,
     // Pending DMA read request (Apple II RAM → card) before a WRITE
-    dma_read_req:  Option<(u16, u16)>,  // (src_addr, len)
-    dma_write_buf: Option<Vec<u8>>,     // received RAM data for WRITE
-    dma_write_blk: Option<u32>,         // block number for the pending WRITE
+    dma_read_req: Option<(u16, u16)>, // (src_addr, len)
+    dma_write_buf: Option<Vec<u8>>,   // received RAM data for WRITE
+    dma_write_blk: Option<u32>,       // block number for the pending WRITE
+
+    /// Countdown of update ticks remaining for the activity LED.
+    /// Set on each command execution, decremented by `update()`.
+    activity_ticks: u32,
+    /// True when the last command was a write (LED colour hint).
+    last_was_write: bool,
 }
 
 impl HdCard {
@@ -122,6 +130,8 @@ impl HdCard {
             dma_read_req: None,
             dma_write_buf: None,
             dma_write_blk: None,
+            activity_ticks: 0,
+            last_was_write: false,
         }
     }
 
@@ -164,11 +174,17 @@ impl HdCard {
     }
 
     fn block_count(&self, drive: usize) -> u32 {
-        self.drives[drive].as_ref().map(|d| d.block_count()).unwrap_or(0)
+        self.drives[drive]
+            .as_ref()
+            .map(|d| d.block_count())
+            .unwrap_or(0)
     }
 
     /// Execute the current command.  Returns the status byte.
     fn execute(&mut self) -> u8 {
+        // Light the activity LED for ~100ms (~6 update ticks at 60 Hz)
+        self.activity_ticks = 6;
+        self.last_was_write = self.command == CMD_WRITE;
         let drv = self.drive_idx();
         match self.command {
             CMD_STATUS => {
@@ -214,8 +230,12 @@ impl HdCard {
 }
 
 impl Card for HdCard {
-    fn card_type(&self) -> CardType { CardType::GenericHdd }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::GenericHdd
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
     fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
         // $Cn00–$CnFF: firmware ROM
@@ -258,11 +278,11 @@ impl Card for HdCard {
     fn slot_io_write(&mut self, reg: u8, val: u8, _cycles: u64) {
         match reg {
             0x2 => self.command = val,
-            0x3 => self.unit    = val,
-            0x4 => self.buf_lo  = val,
-            0x5 => self.buf_hi  = val,
-            0x6 => self.blk_lo  = val,
-            0x7 => self.blk_hi  = val,
+            0x3 => self.unit = val,
+            0x4 => self.buf_lo = val,
+            0x5 => self.buf_hi = val,
+            0x6 => self.blk_lo = val,
+            0x7 => self.blk_hi = val,
             _ => {}
         }
     }
@@ -291,17 +311,33 @@ impl Card for HdCard {
 
     fn reset(&mut self, _power_cycle: bool) {
         self.command = 0;
-        self.status  = 0;
+        self.status = 0;
         self.dma_write = None;
         self.dma_read_req = None;
         self.dma_write_buf = None;
         self.dma_write_blk = None;
     }
 
-    fn update(&mut self, _cycles: u64) {}
+    fn update(&mut self, _cycles: u64) {
+        self.activity_ticks = self.activity_ticks.saturating_sub(1);
+    }
 
-    fn save_state(&self, _out: &mut dyn Write) -> Result<()> { Ok(()) }
-    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
+    fn save_state(&self, _out: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> {
+        Ok(())
+    }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn disk_drive_activity(&self, _drive: usize) -> DriveActivity {
+        DriveActivity {
+            motor_on: self.activity_ticks > 0,
+            writing: self.activity_ticks > 0 && self.last_was_write,
+            track: 0,
+        }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

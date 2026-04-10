@@ -3,10 +3,10 @@
 //! Mirrors the `-wav-speaker` / `-wav-mockingboard` functionality from
 //! the C++ AppleWin.
 
-use std::io::BufWriter;
+use hound::{SampleFormat, WavSpec, WavWriter};
 use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
-use hound::{WavSpec, WavWriter, SampleFormat};
 
 /// Streams f32 samples to a WAV file.
 pub struct WavRecorder {

@@ -3,14 +3,10 @@
 // Util_ProDOS_ForwardSectorInterleave, Util_ProDOS_ReverseSectorInterleave
 // in AppleWin/source/ProDOS_Utils.cpp
 
+use super::bitmap::{bitmap_block_count, get_first_free, init_free, set_used};
 use super::types::{
-    BLOCK_SIZE, ROOT_BLOCK,
-    Access, ProDosKind,
-    VolumeHeader, copy_upper,
-    set_volume_header, put_u16,
-};
-use super::bitmap::{
-    init_free, bitmap_block_count, get_first_free, set_used,
+    Access, BLOCK_SIZE, ProDosKind, ROOT_BLOCK, VolumeHeader, copy_upper, put_u16,
+    set_volume_header,
 };
 
 // ── DOS 3.3 constants ─────────────────────────────────────────────────────────
@@ -23,8 +19,7 @@ const DEFAULT_VOLUME_NUMBER: u8 = 254;
 /// Physical sector order for DOS 3.3 <-> ProDOS interleave swizzle.
 /// Index = logical sector → value = physical sector.
 const INTERLEAVE_DSK: [usize; 16] = [
-    0x0, 0xE, 0xD, 0xC, 0xB, 0xA, 0x9, 0x8,
-    0x7, 0x6, 0x5, 0x4, 0x3, 0x2, 0x1, 0xF,
+    0x0, 0xE, 0xD, 0xC, 0xB, 0xA, 0x9, 0x8, 0x7, 0x6, 0x5, 0x4, 0x3, 0x2, 0x1, 0xF,
 ];
 
 // ── ProDOS filesystem formatting ──────────────────────────────────────────────
@@ -42,7 +37,9 @@ pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) 
     // Clear everything from block 2 onward, preserving both boot blocks (0 and 1).
     // Mirrors Util_ProDOS_FormatFileSystem which clears from byte 0x400 = ROOT_OFFSET.
     let boot_size = ROOT_BLOCK as usize * BLOCK_SIZE; // = 0x400 = 1024
-    for b in &mut image[boot_size..disk_size] { *b = 0; }
+    for b in &mut image[boot_size..disk_size] {
+        *b = 0;
+    }
 
     const N_ROOT_DIR_BLOCKS: usize = 4;
 
@@ -91,7 +88,7 @@ pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) 
     // Build and write volume header
     let mut vh = VolumeHeader {
         kind: ProDosKind::Root as u8,
-        entry_len: 0x27, // 39 bytes per entry
+        entry_len: 0x27,                      // 39 bytes per entry
         entry_num: (BLOCK_SIZE / 0x27) as u8, // 13
         file_count: 0,
         bitmap_block,
@@ -116,7 +113,7 @@ pub fn format_filesystem(image: &mut [u8], disk_size: usize, volume_name: &str) 
 /// Mirrors `Util_DOS33_SetTrackSectorUsage`.
 fn dos33_set_track_sector_usage(vtoc: &mut [u8], track: usize, bitmask: u16) {
     let off = 0x38 + track * 4;
-    vtoc[off]     = ((bitmask >> 8) & 0xFF) as u8;
+    vtoc[off] = ((bitmask >> 8) & 0xFF) as u8;
     vtoc[off + 1] = (bitmask & 0xFF) as u8;
     vtoc[off + 2] = 0x00;
     vtoc[off + 3] = 0x00;
@@ -146,17 +143,17 @@ pub fn format_dos33_filesystem(image: &mut [u8], disk_size: usize, vtoc_track: u
     const FTOC_ENTRIES: u8 = 122;
 
     let vtoc_off = vtoc_track * TRACK_DENIBBLIZED_SIZE;
-    image[vtoc_off + 0x01] = vtoc_track as u8;   // catalog track
-    image[vtoc_off + 0x02] = 0x0F;               // catalog sector
-    image[vtoc_off + 0x03] = 0x03;               // DOS 3.3
+    image[vtoc_off + 0x01] = vtoc_track as u8; // catalog track
+    image[vtoc_off + 0x02] = 0x0F; // catalog sector
+    image[vtoc_off + 0x03] = 0x03; // DOS 3.3
     image[vtoc_off + 0x06] = DEFAULT_VOLUME_NUMBER;
     image[vtoc_off + 0x27] = FTOC_ENTRIES;
-    image[vtoc_off + 0x30] = vtoc_track as u8;   // last track allocated
-    image[vtoc_off + 0x31] = 1;                  // direction = +1
+    image[vtoc_off + 0x30] = vtoc_track as u8; // last track allocated
+    image[vtoc_off + 0x31] = 1; // direction = +1
     image[vtoc_off + 0x34] = n_tracks as u8;
-    image[vtoc_off + 0x35] = 16;                 // sectors/track
-    image[vtoc_off + 0x36] = 0x00;               // 256 bytes/sector lo
-    image[vtoc_off + 0x37] = 0x01;               // 256 bytes/sector hi
+    image[vtoc_off + 0x35] = 16; // sectors/track
+    image[vtoc_off + 0x36] = 0x00; // 256 bytes/sector lo
+    image[vtoc_off + 0x37] = 0x01; // 256 bytes/sector hi
 
     // Set track usage bitmap for all tracks
     let mut vtoc_block = vec![0u8; TRACK_DENIBBLIZED_SIZE];
@@ -172,8 +169,7 @@ pub fn format_dos33_filesystem(image: &mut [u8], disk_size: usize, vtoc_track: u
         dos33_set_track_sector_usage(&mut vtoc_block, track, bitmask);
     }
 
-    image[vtoc_off..vtoc_off + TRACK_DENIBBLIZED_SIZE]
-        .copy_from_slice(&vtoc_block);
+    image[vtoc_off..vtoc_off + TRACK_DENIBBLIZED_SIZE].copy_from_slice(&vtoc_block);
 }
 
 // ── Sector interleave swizzling ───────────────────────────────────────────────
@@ -185,7 +181,9 @@ pub fn format_dos33_filesystem(image: &mut [u8], disk_size: usize, vtoc_track: u
 /// Mirrors `Util_ProDOS_ForwardSectorInterleave` with `INTERLEAVE_DOS33_ORDER`.
 pub fn forward_sector_interleave(image: &mut [u8], disk_size: usize) {
     let n_tracks = disk_size / TRACK_DENIBBLIZED_SIZE;
-    if !disk_size.is_multiple_of(TRACK_DENIBBLIZED_SIZE) || n_tracks == 0 { return; }
+    if !disk_size.is_multiple_of(TRACK_DENIBBLIZED_SIZE) || n_tracks == 0 {
+        return;
+    }
 
     let source = image[..disk_size].to_vec();
     let mut offset = 0;
@@ -207,7 +205,9 @@ pub fn forward_sector_interleave(image: &mut [u8], disk_size: usize) {
 /// Mirrors `Util_ProDOS_ReverseSectorInterleave` with `INTERLEAVE_DOS33_ORDER`.
 pub fn reverse_sector_interleave(image: &mut [u8], disk_size: usize) {
     let n_tracks = disk_size / TRACK_DENIBBLIZED_SIZE;
-    if !disk_size.is_multiple_of(TRACK_DENIBBLIZED_SIZE) || n_tracks == 0 { return; }
+    if !disk_size.is_multiple_of(TRACK_DENIBBLIZED_SIZE) || n_tracks == 0 {
+        return;
+    }
 
     let source = image[..disk_size].to_vec();
     let mut offset = 0;
@@ -222,4 +222,3 @@ pub fn reverse_sector_interleave(image: &mut [u8], disk_size: usize) {
         offset += TRACK_DENIBBLIZED_SIZE;
     }
 }
-

@@ -3,30 +3,30 @@
 //! serial shift-register protocol.
 //! Reference: source/NoSlotClock.cpp
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 const MAGIC: u64 = 0x5CA33AC55CA33AC5;
 
 pub struct NoSlotClockCard {
-    slot:               usize,
-    comparison_reg:     u64,    // shift register being loaded with input bits
-    comparison_count:   u8,     // how many bits loaded so far (0-64)
-    clock_reg:          u64,    // loaded once magic matches
-    clock_count:        u8,     // how many bits read so far (0-64)
-    clock_enabled:      bool,   // true after magic sequence matched
+    slot: usize,
+    comparison_reg: u64,  // shift register being loaded with input bits
+    comparison_count: u8, // how many bits loaded so far (0-64)
+    clock_reg: u64,       // loaded once magic matches
+    clock_count: u8,      // how many bits read so far (0-64)
+    clock_enabled: bool,  // true after magic sequence matched
 }
 
 impl NoSlotClockCard {
     pub fn new(slot: usize) -> Self {
         Self {
             slot,
-            comparison_reg:   0,
+            comparison_reg: 0,
             comparison_count: 0,
-            clock_reg:        0,
-            clock_count:      0,
-            clock_enabled:    false,
+            clock_reg: 0,
+            clock_count: 0,
+            clock_enabled: false,
         }
     }
 
@@ -52,11 +52,12 @@ impl NoSlotClockCard {
         let month = (day_of_year / 30).clamp(0, 11) + 1;
         let date = (day_of_year % 30) + 1;
 
-        fn bcd(n: u64) -> u64 { ((n / 10) << 4) | (n % 10) }
+        fn bcd(n: u64) -> u64 {
+            ((n / 10) << 4) | (n % 10)
+        }
 
         // Pack 64-bit clock register (8 bytes, each BCD-encoded, LSB first per field)
-        self.clock_reg =
-              bcd(0)           // centiseconds (always 0)
+        self.clock_reg = bcd(0)           // centiseconds (always 0)
             | (bcd(s)    << 8)
             | (bcd(m)    << 16)
             | (bcd(h)    << 24)
@@ -69,8 +70,12 @@ impl NoSlotClockCard {
 }
 
 impl Card for NoSlotClockCard {
-    fn card_type(&self) -> CardType { CardType::GenericClock }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::GenericClock
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
     /// NSC intercepts reads from $Cn ROM space. The address low bit provides serial data.
     fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
@@ -105,15 +110,17 @@ impl Card for NoSlotClockCard {
     }
 
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
-    fn slot_io_read(&mut self, _reg: u8, _cycles: u64) -> u8 { 0xFF }
+    fn slot_io_read(&mut self, _reg: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn slot_io_write(&mut self, _reg: u8, _value: u8, _cycles: u64) {}
 
     fn reset(&mut self, _power_cycle: bool) {
-        self.comparison_reg   = 0;
+        self.comparison_reg = 0;
         self.comparison_count = 0;
-        self.clock_reg        = 0;
-        self.clock_count      = 0;
-        self.clock_enabled    = false;
+        self.clock_reg = 0;
+        self.clock_count = 0;
+        self.clock_enabled = false;
     }
 
     fn update(&mut self, _cycles: u64) {}
@@ -127,5 +134,7 @@ impl Card for NoSlotClockCard {
         src.read_exact(&mut ver)?;
         Ok(())
     }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -15,22 +15,22 @@ pub enum AddrMode {
     AbsoluteX,
     AbsoluteY,
     Indirect,
-    IndirectX,    // (zp,X)
-    IndirectY,    // (zp),Y
-    IndirectZp,   // 65C02: (zp)
-    IndAbsX,      // 65C02: (abs,X)
+    IndirectX,  // (zp,X)
+    IndirectY,  // (zp),Y
+    IndirectZp, // 65C02: (zp)
+    IndAbsX,    // 65C02: (abs,X)
     Relative,
 }
 
 /// One decoded instruction.
 #[derive(Debug, Clone)]
 pub struct Instruction {
-    pub addr:    u16,
-    pub opcode:  u8,
+    pub addr: u16,
+    pub opcode: u8,
     pub mnemonic: &'static str,
-    pub mode:    AddrMode,
-    pub operand: u32,  // up to 2 bytes
-    pub bytes:   u8,   // total instruction length
+    pub mode: AddrMode,
+    pub operand: u32, // up to 2 bytes
+    pub bytes: u8,    // total instruction length
 }
 
 /// Mnemonic and addressing mode table entry.
@@ -40,7 +40,12 @@ struct OpInfo {
 }
 
 macro_rules! op {
-    ($m:expr, $mode:ident) => { OpInfo { mnemonic: $m, mode: AddrMode::$mode } };
+    ($m:expr, $mode:ident) => {
+        OpInfo {
+            mnemonic: $m,
+            mode: AddrMode::$mode,
+        }
+    };
 }
 
 /// 6502 / 65C02 opcode table (65C02 superset).
@@ -170,20 +175,20 @@ pub fn format_instruction(instr: &Instruction) -> String {
             let target = (instr.addr as i16).wrapping_add(2).wrapping_add(offset) as u16;
             format!("${:04X}", target)
         }
-        AddrMode::Implied    => String::new(),
+        AddrMode::Implied => String::new(),
         AddrMode::Accumulator => "A".to_string(),
-        AddrMode::Immediate  => format!("#${:02X}", op),
-        AddrMode::ZeroPage   => format!("${:02X}", op),
-        AddrMode::ZeroPageX  => format!("${:02X},X", op),
-        AddrMode::ZeroPageY  => format!("${:02X},Y", op),
-        AddrMode::Absolute   => format!("${:04X}", op),
-        AddrMode::AbsoluteX  => format!("${:04X},X", op),
-        AddrMode::AbsoluteY  => format!("${:04X},Y", op),
-        AddrMode::Indirect   => format!("(${:04X})", op),
-        AddrMode::IndirectX  => format!("(${:02X},X)", op),
-        AddrMode::IndirectY  => format!("(${:02X}),Y", op),
+        AddrMode::Immediate => format!("#${:02X}", op),
+        AddrMode::ZeroPage => format!("${:02X}", op),
+        AddrMode::ZeroPageX => format!("${:02X},X", op),
+        AddrMode::ZeroPageY => format!("${:02X},Y", op),
+        AddrMode::Absolute => format!("${:04X}", op),
+        AddrMode::AbsoluteX => format!("${:04X},X", op),
+        AddrMode::AbsoluteY => format!("${:04X},Y", op),
+        AddrMode::Indirect => format!("(${:04X})", op),
+        AddrMode::IndirectX => format!("(${:02X},X)", op),
+        AddrMode::IndirectY => format!("(${:02X}),Y", op),
         AddrMode::IndirectZp => format!("(${:02X})", op),
-        AddrMode::IndAbsX    => format!("(${:04X},X)", op),
+        AddrMode::IndAbsX => format!("(${:04X},X)", op),
     };
     if target.is_empty() {
         format!("{:04X}: {:3}", instr.addr, instr.mnemonic)

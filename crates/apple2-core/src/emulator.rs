@@ -3,11 +3,11 @@
 //! Collapses all ~52 globals from the C++ codebase into one owned struct.
 //! Mirrors the architecture section "Global State → Owned State" in the plan.
 
-use serde::{Deserialize, Serialize};
 use crate::bus::{Bus, BusSnapshot};
 use crate::cpu::cpu6502::{Cpu, CpuSnapshot};
 use crate::cpu::dispatch;
 use crate::model::{Apple2Model, CpuType};
+use serde::{Deserialize, Serialize};
 
 /// Run mode, matching `g_nAppMode` / `AppMode_e` in the C++ source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -25,10 +25,10 @@ pub enum AppMode {
 
 /// The complete emulator state.
 pub struct Emulator {
-    pub cpu:   Cpu,
-    pub bus:   Bus,
+    pub cpu: Cpu,
+    pub bus: Bus,
     pub model: Apple2Model,
-    pub mode:  AppMode,
+    pub mode: AppMode,
 }
 
 impl Emulator {
@@ -101,9 +101,7 @@ impl Emulator {
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
             // the last cycle of this opcode → defer by one opcode (if I flag is clear).
-            if !irq_before && self.bus.irq_line
-                && !self.cpu.flags.contains(super::cpu::Flags::I)
-            {
+            if !irq_before && self.bus.irq_line && !self.cpu.flags.contains(super::cpu::Flags::I) {
                 // Clear pending so we don't take it immediately next opcode.
                 self.cpu.irq_pending &= !0x01;
                 self.cpu.irq_defer = true;
@@ -216,18 +214,18 @@ pub fn init_memory_pattern(ram: &mut [u8; 65536], pattern: u8) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmulatorSnapshot {
     pub version: u32,
-    pub model:   Apple2Model,
-    pub cpu:     CpuSnapshot,
-    pub memory:  BusSnapshot,
+    pub model: Apple2Model,
+    pub cpu: CpuSnapshot,
+    pub memory: BusSnapshot,
 }
 
 impl Emulator {
     pub fn take_snapshot(&self) -> EmulatorSnapshot {
         EmulatorSnapshot {
             version: 1,
-            model:   self.model,
-            cpu:     CpuSnapshot::from(&self.cpu),
-            memory:  self.bus.take_snapshot(),
+            model: self.model,
+            cpu: CpuSnapshot::from(&self.cpu),
+            memory: self.bus.take_snapshot(),
         }
     }
 

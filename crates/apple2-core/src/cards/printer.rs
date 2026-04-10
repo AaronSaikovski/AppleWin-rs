@@ -9,9 +9,9 @@
 //!
 //! Reference: source/Printer.cpp
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 pub struct PrinterCard {
     slot: usize,
@@ -21,7 +21,11 @@ pub struct PrinterCard {
 
 impl PrinterCard {
     pub fn new(slot: usize) -> Self {
-        Self { slot, data: 0, buffer: Vec::new() }
+        Self {
+            slot,
+            data: 0,
+            buffer: Vec::new(),
+        }
     }
 
     fn strobe(&mut self) {
@@ -38,10 +42,14 @@ impl PrinterCard {
     }
 
     fn flush(&mut self) {
-        if self.buffer.is_empty() { return; }
+        if self.buffer.is_empty() {
+            return;
+        }
         // Try to append to printer.txt in the current directory
         if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true).append(true).open("printer.txt")
+            .create(true)
+            .append(true)
+            .open("printer.txt")
         {
             let _ = f.write_all(&self.buffer);
         }
@@ -50,10 +58,16 @@ impl PrinterCard {
 }
 
 impl Card for PrinterCard {
-    fn card_type(&self) -> CardType { CardType::GenericPrinter }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::GenericPrinter
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
+    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
     fn slot_io_read(&mut self, reg: u8, _cycles: u64) -> u8 {
@@ -72,9 +86,17 @@ impl Card for PrinterCard {
         }
     }
 
-    fn reset(&mut self, _power_cycle: bool) { self.buffer.clear(); }
+    fn reset(&mut self, _power_cycle: bool) {
+        self.buffer.clear();
+    }
     fn update(&mut self, _cycles: u64) {}
-    fn save_state(&self, _out: &mut dyn Write) -> Result<()> { Ok(()) }
-    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn save_state(&self, _out: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> {
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

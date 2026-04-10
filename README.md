@@ -103,10 +103,11 @@ AppleWin-rs/
 
 - Rust toolchain: **1.85+** (edition 2024 workspace) — install via [rustup](https://rustup.rs)
 - **Windows:** MSVC build tools (`x86_64-pc-windows-msvc` target)
-- **Linux:** system packages for audio and GUI:
+- **Linux:** system packages for audio, GUI, and gamepad:
   ```sh
   sudo apt-get install libasound2-dev libgtk-3-dev \
-      libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+      libxkbcommon-dev libudev-dev
   ```
 - **macOS:** standard Xcode command-line tools
 
@@ -190,6 +191,7 @@ Runs 297 tests across all crates:
 - **Clipboard** copy/paste (Ctrl+C copies text screen, Ctrl+V pastes as keystrokes)
 - **Screenshot** capture (F12, saves PNG to screenshots directory)
 - **WAV recording** of emulator audio (F9 toggle)
+- **Disk activity indicators** — drive LEDs with real-time track numbers and HDD activity in the status bar
 - **Cassette tape** I/O (load WAV files for tape-based software)
 - **Symbolic debugger** with disassembler, breakpoints, watches, and single-step
 - **Save/restore** emulator state (F11 / Shift+F11)
@@ -281,6 +283,23 @@ These ports allow building the original C++ AppleWin on non-Windows platforms:
 
 - [Linux](https://github.com/audetto/AppleWin)
 - [macOS](https://github.com/sh95014/AppleWin)
+
+---
+
+## CI/CD
+
+**Continuous Integration** runs on every push and PR to `main` and `development` branches:
+- `cargo fmt --all --check` — code formatting
+- `cargo clippy --workspace --all-targets -- -D warnings` — lint (all platforms)
+- `cargo test` — test suite (all platforms)
+- `cargo build --release` — GUI and headless builds (all platforms)
+
+**Release builds** are triggered by version tags (`v*.*.*`) and produce archives for:
+- Windows x86_64 (`.zip`)
+- macOS x86_64 and aarch64 (`.tar.gz`)
+- Linux x86_64 and aarch64 (`.tar.gz`)
+
+Each release includes SHA256 checksums and auto-generated release notes.
 
 ---
 

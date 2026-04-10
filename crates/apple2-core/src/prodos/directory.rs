@@ -2,10 +2,7 @@
 // Ported from ProDOS_BlockGetDirectoryBlockCount, ProDOS_BlockGetPathOffset,
 // and ProDOS_DirGetFirstFreeEntryOffset in AppleWin/source/ProDOS_FileSystem.h
 
-use super::types::{
-    BLOCK_SIZE, ROOT_OFFSET,
-    get_u16, get_file_header, ProDosKind,
-};
+use super::types::{BLOCK_SIZE, ProDosKind, ROOT_OFFSET, get_file_header, get_u16};
 
 // ── Directory block helpers ───────────────────────────────────────────────────
 
@@ -19,7 +16,9 @@ pub fn get_dir_block_count(image: &[u8], mut offset: usize) -> usize {
     loop {
         count += 1;
         let next_block = get_u16(image, offset + 2) as usize;
-        if next_block == 0 { break; }
+        if next_block == 0 {
+            break;
+        }
         offset = next_block * BLOCK_SIZE;
     }
     count
@@ -64,7 +63,9 @@ pub fn get_first_free_entry_offset(
         }
 
         let next_block = get_u16(image, block_off + 2) as usize;
-        if next_block == 0 { break; }
+        if next_block == 0 {
+            break;
+        }
         block_off = next_block * BLOCK_SIZE;
     }
     None

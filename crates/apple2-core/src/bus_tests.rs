@@ -1,6 +1,6 @@
 //! Unit tests for the Apple II memory bus (soft switches, language card, page tables).
 
-use crate::bus::{Bus, MemMode, PageSrc, PageDst};
+use crate::bus::{Bus, MemMode, PageDst, PageSrc};
 
 /// Create a minimal Bus with a 16K zero-filled ROM.
 fn make_bus() -> Bus {
@@ -303,7 +303,7 @@ fn page_table_auxread_preserves_zp() {
     bus.write(0xC003, 0, 0);
     assert!(matches!(bus.pages_r[0x00], PageSrc::Main(_))); // ZP still main
     assert!(matches!(bus.pages_r[0x01], PageSrc::Main(_))); // Stack still main
-    assert!(matches!(bus.pages_r[0x02], PageSrc::Aux(_)));  // $0200+ aux
+    assert!(matches!(bus.pages_r[0x02], PageSrc::Aux(_))); // $0200+ aux
 }
 
 // ===========================================================================
@@ -352,8 +352,9 @@ fn altzp_routes_zero_page_to_aux() {
 fn soft_switch_status_reads() {
     let mut bus = make_bus();
 
-    // Initially all switches off -> bit 7 clear
-    assert_eq!(bus.read(0xC011, 0) & 0x80, 0x00); // BANK2
+    // Power-on default: MF_BANK2 | MF_WRITERAM are set (Apple IIe initial state).
+    // BANK2 is active, so $C011 bit 7 is set; others are clear.
+    assert_eq!(bus.read(0xC011, 0) & 0x80, 0x80); // BANK2 (on at power-up)
     assert_eq!(bus.read(0xC012, 0) & 0x80, 0x00); // HIGHRAM
     assert_eq!(bus.read(0xC013, 0) & 0x80, 0x00); // AUXREAD
     assert_eq!(bus.read(0xC018, 0) & 0x80, 0x00); // 80STORE

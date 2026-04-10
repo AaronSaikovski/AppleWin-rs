@@ -95,7 +95,10 @@ fn op_ora_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
-fn op_nop(cpu: &mut Cpu, _bus: &mut Bus) -> u8 { let _ = cpu; 0 }
+fn op_nop(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
+    let _ = cpu;
+    0
+}
 
 fn op_ora_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);

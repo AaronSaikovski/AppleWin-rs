@@ -8,12 +8,15 @@ AppleWin-rs is a Rust rewrite of the [AppleWin](https://github.com/AppleWin/Appl
 
 ## Code Quality Requirements
 
-**MANDATORY: After every code change or update, you MUST run the following checks before considering the work complete. No exceptions.**
+**MANDATORY: After every code change or update, you MUST run the following three checks in order before considering the work complete. No exceptions.**
 
-1. Build cleanly with no errors or warnings: `cargo build --release`
+1. Format all code: `cargo fmt --all`
 2. Pass Clippy with no warnings: `cargo clippy --workspace --all-targets -- -D warnings`
+3. Build cleanly with no errors or warnings: `cargo build --release`
 
-If either check fails, fix all errors and warnings immediately before moving on. The codebase must be in a clean, warning-free state at all times.
+All three checks must pass. If any check fails, fix all errors and warnings immediately before moving on. The codebase must be in a clean, formatted, warning-free state at all times.
+
+**CI enforces these same checks** on every push and PR to `main` and `development` branches. A PR will not merge if any check fails.
 
 ## Build & Test Commands
 
@@ -118,8 +121,10 @@ At runtime, `applewin` stores a TOML config file at the platform config dir (`%A
 
 ### 4. Verification Before Done
 
+- **Always run `cargo fmt --all` after every change** — code must be formatted
 - **Always run `cargo clippy --workspace --all-targets -- -D warnings` after every change** — zero warnings allowed
 - **Always run `cargo build --release`** — must compile cleanly
+- All three checks must pass before marking any task complete
 - Never mark a task complete without proving it works
 - Diff behavior between main and your changes when relevant
 - Ask yourself: "Would a staff engineer approve this?"

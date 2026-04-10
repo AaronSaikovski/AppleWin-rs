@@ -660,7 +660,7 @@ fn cmp_less() {
     step(&mut cpu, &mut bus);
     assert!(!cpu.flags.contains(Flags::Z));
     assert!(!cpu.flags.contains(Flags::C)); // A < val
-    assert!(cpu.flags.contains(Flags::N));  // result is negative
+    assert!(cpu.flags.contains(Flags::N)); // result is negative
 }
 
 #[test]
@@ -969,14 +969,18 @@ fn txs_tsx() {
 fn flag_instructions() {
     let mut bus = make_bus();
     let mut cpu = cpu_6502(0x0200);
-    poke(&mut bus, 0x0200, &[
-        0x38, // SEC
-        0x18, // CLC
-        0xF8, // SED
-        0xD8, // CLD
-        0x78, // SEI
-        0x58, // CLI
-    ]);
+    poke(
+        &mut bus,
+        0x0200,
+        &[
+            0x38, // SEC
+            0x18, // CLC
+            0xF8, // SED
+            0xD8, // CLD
+            0x78, // SEI
+            0x58, // CLI
+        ],
+    );
     step(&mut cpu, &mut bus);
     assert!(cpu.flags.contains(Flags::C));
     step(&mut cpu, &mut bus);
@@ -1013,9 +1017,9 @@ fn bit_zero_page() {
     bus.main_ram[0x30] = 0xC0; // bits 7 and 6 set
     poke(&mut bus, 0x0200, &[0x24, 0x30]); // BIT $30
     step(&mut cpu, &mut bus);
-    assert!(cpu.flags.contains(Flags::N));  // bit 7 of memory
-    assert!(cpu.flags.contains(Flags::V));  // bit 6 of memory
-    assert!(cpu.flags.contains(Flags::Z));  // A & M == 0
+    assert!(cpu.flags.contains(Flags::N)); // bit 7 of memory
+    assert!(cpu.flags.contains(Flags::V)); // bit 6 of memory
+    assert!(cpu.flags.contains(Flags::Z)); // A & M == 0
 }
 
 #[test]
@@ -1470,13 +1474,17 @@ fn count_to_five() {
     let mut bus = make_bus();
     let mut cpu = cpu_6502(0x0200);
     // Program: LDX #$00; loop: INX; CPX #$05; BNE loop; NOP
-    poke(&mut bus, 0x0200, &[
-        0xA2, 0x00, // LDX #$00
-        0xE8,       // INX
-        0xE0, 0x05, // CPX #$05
-        0xD0, 0xFB, // BNE -5 (back to INX)
-        0xEA,       // NOP (exit)
-    ]);
+    poke(
+        &mut bus,
+        0x0200,
+        &[
+            0xA2, 0x00, // LDX #$00
+            0xE8, // INX
+            0xE0, 0x05, // CPX #$05
+            0xD0, 0xFB, // BNE -5 (back to INX)
+            0xEA, // NOP (exit)
+        ],
+    );
     // LDX + 5*(INX+CPX+BNE) but last BNE not taken
     // Execute until we hit the NOP
     let mut count = 0;
@@ -1493,12 +1501,16 @@ fn simple_add_program() {
     let mut bus = make_bus();
     let mut cpu = cpu_6502(0x0200);
     // CLC; LDA #$28; ADC #$14; STA $50
-    poke(&mut bus, 0x0200, &[
-        0x18,       // CLC
-        0xA9, 0x28, // LDA #$28
-        0x69, 0x14, // ADC #$14
-        0x85, 0x50, // STA $50
-    ]);
+    poke(
+        &mut bus,
+        0x0200,
+        &[
+            0x18, // CLC
+            0xA9, 0x28, // LDA #$28
+            0x69, 0x14, // ADC #$14
+            0x85, 0x50, // STA $50
+        ],
+    );
     step_n(&mut cpu, &mut bus, 4);
     assert_eq!(peek(&bus, 0x50), 0x3C); // 0x28 + 0x14
     assert_eq!(cpu.a, 0x3C);

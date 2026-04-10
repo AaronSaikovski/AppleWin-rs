@@ -32,21 +32,21 @@ pub enum BreakpointKind {
 /// A single breakpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Breakpoint {
-    pub kind:    BreakpointKind,
+    pub kind: BreakpointKind,
     pub address: u16,
-    pub length:  u16,  // address range length (1 = single address)
+    pub length: u16, // address range length (1 = single address)
     pub enabled: bool,
-    pub label:   Option<String>,
+    pub label: Option<String>,
 }
 
 impl Breakpoint {
     pub fn at(addr: u16) -> Self {
         Self {
-            kind:    BreakpointKind::Opcode,
+            kind: BreakpointKind::Opcode,
             address: addr,
-            length:  1,
+            length: 1,
             enabled: true,
-            label:   None,
+            label: None,
         }
     }
 }

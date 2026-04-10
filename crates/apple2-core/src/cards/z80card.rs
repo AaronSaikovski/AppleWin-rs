@@ -11,9 +11,9 @@
 //!
 //! Reference: source/z80softcard.cpp, source/Z80VICE/
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 // ── Z80 clock speed relative to Apple II ──────────────────────────────────────
 
@@ -43,62 +43,112 @@ fn parity(v: u8) -> bool {
 #[derive(Clone)]
 struct Regs {
     // Main registers
-    a: u8, f: u8,
-    b: u8, c: u8,
-    d: u8, e: u8,
-    h: u8, l: u8,
+    a: u8,
+    f: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+    e: u8,
+    h: u8,
+    l: u8,
     // Alternate registers
-    a2: u8, f2: u8,
-    b2: u8, c2: u8,
-    d2: u8, e2: u8,
-    h2: u8, l2: u8,
+    a2: u8,
+    f2: u8,
+    b2: u8,
+    c2: u8,
+    d2: u8,
+    e2: u8,
+    h2: u8,
+    l2: u8,
     // Index registers
     ix: u16,
     iy: u16,
     // Special registers
     sp: u16,
     pc: u16,
-    i:  u8,
-    r:  u8,
+    i: u8,
+    r: u8,
     // Interrupt mode & flip-flops
     iff1: bool,
     iff2: bool,
-    im:   u8,   // interrupt mode 0/1/2
+    im: u8, // interrupt mode 0/1/2
     halted: bool,
 }
 
 impl Regs {
     fn new() -> Self {
         Self {
-            a: 0xFF, f: 0xFF,
-            b: 0xFF, c: 0xFF,
-            d: 0xFF, e: 0xFF,
-            h: 0xFF, l: 0xFF,
-            a2: 0xFF, f2: 0xFF,
-            b2: 0xFF, c2: 0xFF,
-            d2: 0xFF, e2: 0xFF,
-            h2: 0xFF, l2: 0xFF,
-            ix: 0xFFFF, iy: 0xFFFF,
-            sp: 0xFFFF, pc: 0x0000,
-            i: 0, r: 0,
-            iff1: false, iff2: false,
+            a: 0xFF,
+            f: 0xFF,
+            b: 0xFF,
+            c: 0xFF,
+            d: 0xFF,
+            e: 0xFF,
+            h: 0xFF,
+            l: 0xFF,
+            a2: 0xFF,
+            f2: 0xFF,
+            b2: 0xFF,
+            c2: 0xFF,
+            d2: 0xFF,
+            e2: 0xFF,
+            h2: 0xFF,
+            l2: 0xFF,
+            ix: 0xFFFF,
+            iy: 0xFFFF,
+            sp: 0xFFFF,
+            pc: 0x0000,
+            i: 0,
+            r: 0,
+            iff1: false,
+            iff2: false,
             im: 0,
             halted: false,
         }
     }
 
-    fn af(&self) -> u16 { u16::from_be_bytes([self.a, self.f]) }
-    fn bc(&self) -> u16 { u16::from_be_bytes([self.b, self.c]) }
-    fn de(&self) -> u16 { u16::from_be_bytes([self.d, self.e]) }
-    fn hl(&self) -> u16 { u16::from_be_bytes([self.h, self.l]) }
+    fn af(&self) -> u16 {
+        u16::from_be_bytes([self.a, self.f])
+    }
+    fn bc(&self) -> u16 {
+        u16::from_be_bytes([self.b, self.c])
+    }
+    fn de(&self) -> u16 {
+        u16::from_be_bytes([self.d, self.e])
+    }
+    fn hl(&self) -> u16 {
+        u16::from_be_bytes([self.h, self.l])
+    }
 
-    fn set_bc(&mut self, v: u16) { let [b,c] = v.to_be_bytes(); self.b=b; self.c=c; }
-    fn set_de(&mut self, v: u16) { let [d,e] = v.to_be_bytes(); self.d=d; self.e=e; }
-    fn set_hl(&mut self, v: u16) { let [h,l] = v.to_be_bytes(); self.h=h; self.l=l; }
-    fn set_af(&mut self, v: u16) { let [a,f] = v.to_be_bytes(); self.a=a; self.f=f; }
-    fn flag(&self, mask: u8) -> bool { self.f & mask != 0 }
+    fn set_bc(&mut self, v: u16) {
+        let [b, c] = v.to_be_bytes();
+        self.b = b;
+        self.c = c;
+    }
+    fn set_de(&mut self, v: u16) {
+        let [d, e] = v.to_be_bytes();
+        self.d = d;
+        self.e = e;
+    }
+    fn set_hl(&mut self, v: u16) {
+        let [h, l] = v.to_be_bytes();
+        self.h = h;
+        self.l = l;
+    }
+    fn set_af(&mut self, v: u16) {
+        let [a, f] = v.to_be_bytes();
+        self.a = a;
+        self.f = f;
+    }
+    fn flag(&self, mask: u8) -> bool {
+        self.f & mask != 0
+    }
     fn set_flag(&mut self, mask: u8, val: bool) {
-        if val { self.f |= mask; } else { self.f &= !mask; }
+        if val {
+            self.f |= mask;
+        } else {
+            self.f &= !mask;
+        }
     }
 }
 
@@ -106,14 +156,34 @@ impl Regs {
 
 fn write_regs(r: &Regs, out: &mut dyn Write) -> std::io::Result<()> {
     let data: [u8; 30] = [
-        r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l,
-        r.a2, r.f2, r.b2, r.c2, r.d2, r.e2, r.h2, r.l2,
-        (r.ix >> 8) as u8, r.ix as u8,
-        (r.iy >> 8) as u8, r.iy as u8,
-        (r.sp >> 8) as u8, r.sp as u8,
-        (r.pc >> 8) as u8, r.pc as u8,
-        r.i, r.r,
-        r.iff1 as u8, r.iff2 as u8,
+        r.a,
+        r.f,
+        r.b,
+        r.c,
+        r.d,
+        r.e,
+        r.h,
+        r.l,
+        r.a2,
+        r.f2,
+        r.b2,
+        r.c2,
+        r.d2,
+        r.e2,
+        r.h2,
+        r.l2,
+        (r.ix >> 8) as u8,
+        r.ix as u8,
+        (r.iy >> 8) as u8,
+        r.iy as u8,
+        (r.sp >> 8) as u8,
+        r.sp as u8,
+        (r.pc >> 8) as u8,
+        r.pc as u8,
+        r.i,
+        r.r,
+        r.iff1 as u8,
+        r.iff2 as u8,
         r.im,
         r.halted as u8,
     ];
@@ -123,16 +193,30 @@ fn write_regs(r: &Regs, out: &mut dyn Write) -> std::io::Result<()> {
 fn read_regs(r: &mut Regs, src: &mut dyn Read) -> std::io::Result<()> {
     let mut data = [0u8; 30];
     src.read_exact(&mut data)?;
-    r.a=data[0]; r.f=data[1]; r.b=data[2]; r.c=data[3];
-    r.d=data[4]; r.e=data[5]; r.h=data[6]; r.l=data[7];
-    r.a2=data[8]; r.f2=data[9]; r.b2=data[10]; r.c2=data[11];
-    r.d2=data[12]; r.e2=data[13]; r.h2=data[14]; r.l2=data[15];
+    r.a = data[0];
+    r.f = data[1];
+    r.b = data[2];
+    r.c = data[3];
+    r.d = data[4];
+    r.e = data[5];
+    r.h = data[6];
+    r.l = data[7];
+    r.a2 = data[8];
+    r.f2 = data[9];
+    r.b2 = data[10];
+    r.c2 = data[11];
+    r.d2 = data[12];
+    r.e2 = data[13];
+    r.h2 = data[14];
+    r.l2 = data[15];
     r.ix = u16::from_be_bytes([data[16], data[17]]);
     r.iy = u16::from_be_bytes([data[18], data[19]]);
     r.sp = u16::from_be_bytes([data[20], data[21]]);
     r.pc = u16::from_be_bytes([data[22], data[23]]);
-    r.i=data[24]; r.r=data[25];
-    r.iff1 = data[26] != 0; r.iff2 = data[27] != 0;
+    r.i = data[24];
+    r.r = data[25];
+    r.iff1 = data[26] != 0;
+    r.iff2 = data[27] != 0;
     r.im = data[28];
     r.halted = data[29] != 0;
     Ok(())
@@ -148,11 +232,19 @@ struct Ports {
 }
 
 impl Ports {
-    fn new() -> Self { Self { yield_to_6502: false } }
-    fn out(&mut self, port: u16, _val: u8) {
-        if port & 0xFF == 0 { self.yield_to_6502 = true; }
+    fn new() -> Self {
+        Self {
+            yield_to_6502: false,
+        }
     }
-    fn inp(&self, _port: u16) -> u8 { 0xFF }
+    fn out(&mut self, port: u16, _val: u8) {
+        if port & 0xFF == 0 {
+            self.yield_to_6502 = true;
+        }
+    }
+    fn inp(&self, _port: u16) -> u8 {
+        0xFF
+    }
 }
 
 // ── CPU execution core ────────────────────────────────────────────────────────
@@ -217,8 +309,12 @@ fn stack_pop(r: &mut Regs, mem: &[u8; 65536]) -> u16 {
 
 fn get_r(r: &Regs, mem: &[u8; 65536], idx: u8) -> u8 {
     match idx {
-        0 => r.b, 1 => r.c, 2 => r.d, 3 => r.e,
-        4 => r.h, 5 => r.l,
+        0 => r.b,
+        1 => r.c,
+        2 => r.d,
+        3 => r.e,
+        4 => r.h,
+        5 => r.l,
         6 => mem_read(mem, r.hl()),
         7 => r.a,
         _ => unreachable!(),
@@ -227,9 +323,12 @@ fn get_r(r: &Regs, mem: &[u8; 65536], idx: u8) -> u8 {
 
 fn get_r_ix(r: &Regs, mem: &[u8; 65536], idx: u8, disp: i8) -> u8 {
     match idx {
-        0 => r.b, 1 => r.c, 2 => r.d, 3 => r.e,
-        4 => (r.ix >> 8) as u8,   // IXH
-        5 => r.ix as u8,           // IXL
+        0 => r.b,
+        1 => r.c,
+        2 => r.d,
+        3 => r.e,
+        4 => (r.ix >> 8) as u8, // IXH
+        5 => r.ix as u8,        // IXL
         6 => mem_read(mem, r.ix.wrapping_add(disp as i16 as u16)),
         7 => r.a,
         _ => unreachable!(),
@@ -238,7 +337,10 @@ fn get_r_ix(r: &Regs, mem: &[u8; 65536], idx: u8, disp: i8) -> u8 {
 
 fn get_r_iy(r: &Regs, mem: &[u8; 65536], idx: u8, disp: i8) -> u8 {
     match idx {
-        0 => r.b, 1 => r.c, 2 => r.d, 3 => r.e,
+        0 => r.b,
+        1 => r.c,
+        2 => r.d,
+        3 => r.e,
         4 => (r.iy >> 8) as u8,
         5 => r.iy as u8,
         6 => mem_read(mem, r.iy.wrapping_add(disp as i16 as u16)),
@@ -249,9 +351,16 @@ fn get_r_iy(r: &Regs, mem: &[u8; 65536], idx: u8, disp: i8) -> u8 {
 
 fn set_r(r: &mut Regs, mem: &mut [u8; 65536], idx: u8, val: u8) {
     match idx {
-        0 => r.b = val, 1 => r.c = val, 2 => r.d = val, 3 => r.e = val,
-        4 => r.h = val, 5 => r.l = val,
-        6 => { let addr = r.hl(); mem_write(mem, addr, val); }
+        0 => r.b = val,
+        1 => r.c = val,
+        2 => r.d = val,
+        3 => r.e = val,
+        4 => r.h = val,
+        5 => r.l = val,
+        6 => {
+            let addr = r.hl();
+            mem_write(mem, addr, val);
+        }
         7 => r.a = val,
         _ => unreachable!(),
     }
@@ -262,16 +371,40 @@ fn set_r(r: &mut Regs, mem: &mut [u8; 65536], idx: u8, val: u8) {
 // qq = 0:BC 1:DE 2:HL 3:AF
 
 fn get_dd(r: &Regs, idx: u8) -> u16 {
-    match idx { 0 => r.bc(), 1 => r.de(), 2 => r.hl(), 3 => r.sp, _ => unreachable!() }
+    match idx {
+        0 => r.bc(),
+        1 => r.de(),
+        2 => r.hl(),
+        3 => r.sp,
+        _ => unreachable!(),
+    }
 }
 fn set_dd(r: &mut Regs, idx: u8, val: u16) {
-    match idx { 0 => r.set_bc(val), 1 => r.set_de(val), 2 => r.set_hl(val), 3 => r.sp = val, _ => unreachable!() }
+    match idx {
+        0 => r.set_bc(val),
+        1 => r.set_de(val),
+        2 => r.set_hl(val),
+        3 => r.sp = val,
+        _ => unreachable!(),
+    }
 }
 fn get_qq(r: &Regs, idx: u8) -> u16 {
-    match idx { 0 => r.bc(), 1 => r.de(), 2 => r.hl(), 3 => r.af(), _ => unreachable!() }
+    match idx {
+        0 => r.bc(),
+        1 => r.de(),
+        2 => r.hl(),
+        3 => r.af(),
+        _ => unreachable!(),
+    }
 }
 fn set_qq(r: &mut Regs, idx: u8, val: u16) {
-    match idx { 0 => r.set_bc(val), 1 => r.set_de(val), 2 => r.set_hl(val), 3 => r.set_af(val), _ => unreachable!() }
+    match idx {
+        0 => r.set_bc(val),
+        1 => r.set_de(val),
+        2 => r.set_hl(val),
+        3 => r.set_af(val),
+        _ => unreachable!(),
+    }
 }
 
 // ── Condition codes ───────────────────────────────────────────────────────────
@@ -280,13 +413,13 @@ fn set_qq(r: &mut Regs, idx: u8, val: u16) {
 fn check_cc(r: &Regs, cc: u8) -> bool {
     match cc {
         0 => !r.flag(FLAG_Z),  // NZ
-        1 =>  r.flag(FLAG_Z),  // Z
+        1 => r.flag(FLAG_Z),   // Z
         2 => !r.flag(FLAG_C),  // NC
-        3 =>  r.flag(FLAG_C),  // C
+        3 => r.flag(FLAG_C),   // C
         4 => !r.flag(FLAG_PV), // PO
-        5 =>  r.flag(FLAG_PV), // PE
+        5 => r.flag(FLAG_PV),  // PE
         6 => !r.flag(FLAG_S),  // P (positive)
-        7 =>  r.flag(FLAG_S),  // M (minus)
+        7 => r.flag(FLAG_S),   // M (minus)
         _ => unreachable!(),
     }
 }
@@ -410,59 +543,84 @@ fn alu_add16(r: &mut Regs, hl: u16, val: u16) -> u16 {
 fn rlc(r: &mut Regs, val: u8) -> u8 {
     let c = val >> 7;
     let result = (val << 1) | c;
-    r.set_flag(FLAG_C, c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 fn rrc(r: &mut Regs, val: u8) -> u8 {
     let c = val & 1;
     let result = (val >> 1) | (c << 7);
-    r.set_flag(FLAG_C, c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 fn rl(r: &mut Regs, val: u8) -> u8 {
     let old_c = r.flag(FLAG_C) as u8;
     let new_c = val >> 7;
     let result = (val << 1) | old_c;
-    r.set_flag(FLAG_C, new_c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, new_c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 fn rr(r: &mut Regs, val: u8) -> u8 {
     let old_c = r.flag(FLAG_C) as u8;
     let new_c = val & 1;
     let result = (val >> 1) | (old_c << 7);
-    r.set_flag(FLAG_C, new_c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, new_c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 fn sla(r: &mut Regs, val: u8) -> u8 {
     let c = val >> 7;
     let result = val << 1;
-    r.set_flag(FLAG_C, c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 fn sra(r: &mut Regs, val: u8) -> u8 {
     let c = val & 1;
     let result = ((val as i8) >> 1) as u8;
-    r.set_flag(FLAG_C, c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
-fn sll(r: &mut Regs, val: u8) -> u8 { // undocumented SLS/SL1
+fn sll(r: &mut Regs, val: u8) -> u8 {
+    // undocumented SLS/SL1
     let c = val >> 7;
     let result = (val << 1) | 1;
-    r.set_flag(FLAG_C, c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 fn srl(r: &mut Regs, val: u8) -> u8 {
     let c = val & 1;
     let result = val >> 1;
-    r.set_flag(FLAG_C, c != 0); r.set_flag(FLAG_N, false); r.set_flag(FLAG_H, false);
-    r.set_flag(FLAG_X, result & 0x08 != 0); r.set_flag(FLAG_Y, result & 0x20 != 0);
+    r.set_flag(FLAG_C, c != 0);
+    r.set_flag(FLAG_N, false);
+    r.set_flag(FLAG_H, false);
+    r.set_flag(FLAG_X, result & 0x08 != 0);
+    r.set_flag(FLAG_Y, result & 0x20 != 0);
     result
 }
 
@@ -548,19 +706,17 @@ fn decode_xycb(r: &mut Regs, mem: &mut [u8; 65536], base: u16) -> u32 {
     let reg_idx = op & 0x07;
 
     let result = match op >> 6 {
-        0 => {
-            match (op >> 3) & 0x07 {
-                0 => rlc(r, val),
-                1 => rrc(r, val),
-                2 => rl(r, val),
-                3 => rr(r, val),
-                4 => sla(r, val),
-                5 => sra(r, val),
-                6 => sll(r, val),
-                7 => srl(r, val),
-                _ => unreachable!(),
-            }
-        }
+        0 => match (op >> 3) & 0x07 {
+            0 => rlc(r, val),
+            1 => rrc(r, val),
+            2 => rl(r, val),
+            3 => rr(r, val),
+            4 => sla(r, val),
+            5 => sra(r, val),
+            6 => sll(r, val),
+            7 => srl(r, val),
+            _ => unreachable!(),
+        },
         1 => {
             let bit = (op >> 3) & 0x07;
             r.set_flag(FLAG_Z, val & (1 << bit) == 0);
@@ -583,10 +739,14 @@ fn decode_xycb(r: &mut Regs, mem: &mut [u8; 65536], base: u16) -> u32 {
         _ => unreachable!(),
     };
 
-    if op >> 6 == 0 { set_szp_rot(r, result); }
+    if op >> 6 == 0 {
+        set_szp_rot(r, result);
+    }
     mem_write(mem, addr, result);
     // Also store to reg if reg_idx != 6
-    if reg_idx != 6 { set_r(r, mem, reg_idx, result); }
+    if reg_idx != 6 {
+        set_r(r, mem, reg_idx, result);
+    }
     23
 }
 
@@ -608,7 +768,8 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             r.set_flag(FLAG_N, false);
             12
         }
-        0x70 => { // IN (C) — result discarded
+        0x70 => {
+            // IN (C) — result discarded
             let val = ports.inp(r.c as u16);
             r.set_flag(FLAG_S, val & 0x80 != 0);
             r.set_flag(FLAG_Z, val == 0);
@@ -625,7 +786,8 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             ports.out(port, val);
             12
         }
-        0x71 => { // OUT (C), 0
+        0x71 => {
+            // OUT (C), 0
             let port = u16::from_be_bytes([r.b, r.c]);
             ports.out(port, 0);
             12
@@ -700,13 +862,28 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             14
         }
         // IM 0 / IM 1 / IM 2
-        0x46 | 0x4E | 0x66 | 0x6E => { r.im = 0; 8 }
-        0x56 | 0x76 => { r.im = 1; 8 }
-        0x5E | 0x7E => { r.im = 2; 8 }
+        0x46 | 0x4E | 0x66 | 0x6E => {
+            r.im = 0;
+            8
+        }
+        0x56 | 0x76 => {
+            r.im = 1;
+            8
+        }
+        0x5E | 0x7E => {
+            r.im = 2;
+            8
+        }
         // LD I, A
-        0x47 => { r.i = r.a; 9 }
+        0x47 => {
+            r.i = r.a;
+            9
+        }
         // LD R, A
-        0x4F => { r.r = r.a; 9 }
+        0x4F => {
+            r.r = r.a;
+            9
+        }
         // LD A, I
         0x57 => {
             let v = r.i;
@@ -761,9 +938,12 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
         0xA0 => {
             let v = mem_read(mem, r.de());
             mem_write(mem, r.hl(), v);
-            let hl = r.hl().wrapping_add(1); r.set_hl(hl);
-            let de = r.de().wrapping_add(1); r.set_de(de);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_add(1);
+            r.set_hl(hl);
+            let de = r.de().wrapping_add(1);
+            r.set_de(de);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_H, false);
             r.set_flag(FLAG_N, false);
             r.set_flag(FLAG_PV, bc != 0);
@@ -776,8 +956,10 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
         0xA1 => {
             let v = mem_read(mem, r.hl());
             let result = r.a.wrapping_sub(v);
-            let hl = r.hl().wrapping_add(1); r.set_hl(hl);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_add(1);
+            r.set_hl(hl);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_S, result & 0x80 != 0);
             r.set_flag(FLAG_Z, result == 0);
             r.set_flag(FLAG_H, (r.a & 0x0F) < (v & 0x0F));
@@ -794,7 +976,8 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             let v = ports.inp(port);
             let hl = r.hl();
             mem_write(mem, hl, v);
-            let hl = hl.wrapping_add(1); r.set_hl(hl);
+            let hl = hl.wrapping_add(1);
+            r.set_hl(hl);
             r.b = r.b.wrapping_sub(1);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
@@ -806,7 +989,8 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             r.b = r.b.wrapping_sub(1);
             let port = u16::from_be_bytes([r.b, r.c]);
             ports.out(port, v);
-            let hl = r.hl().wrapping_add(1); r.set_hl(hl);
+            let hl = r.hl().wrapping_add(1);
+            r.set_hl(hl);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
             16
@@ -815,9 +999,12 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
         0xA8 => {
             let v = mem_read(mem, r.de());
             mem_write(mem, r.hl(), v);
-            let hl = r.hl().wrapping_sub(1); r.set_hl(hl);
-            let de = r.de().wrapping_sub(1); r.set_de(de);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_sub(1);
+            r.set_hl(hl);
+            let de = r.de().wrapping_sub(1);
+            r.set_de(de);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_H, false);
             r.set_flag(FLAG_N, false);
             r.set_flag(FLAG_PV, bc != 0);
@@ -827,8 +1014,10 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
         0xA9 => {
             let v = mem_read(mem, r.hl());
             let result = r.a.wrapping_sub(v);
-            let hl = r.hl().wrapping_sub(1); r.set_hl(hl);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_sub(1);
+            r.set_hl(hl);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_S, result & 0x80 != 0);
             r.set_flag(FLAG_Z, result == 0);
             r.set_flag(FLAG_H, (r.a & 0x0F) < (v & 0x0F));
@@ -842,7 +1031,8 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             let v = ports.inp(port);
             let hl = r.hl();
             mem_write(mem, hl, v);
-            let hl = hl.wrapping_sub(1); r.set_hl(hl);
+            let hl = hl.wrapping_sub(1);
+            r.set_hl(hl);
             r.b = r.b.wrapping_sub(1);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
@@ -854,7 +1044,8 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             r.b = r.b.wrapping_sub(1);
             let port = u16::from_be_bytes([r.b, r.c]);
             ports.out(port, v);
-            let hl = r.hl().wrapping_sub(1); r.set_hl(hl);
+            let hl = r.hl().wrapping_sub(1);
+            r.set_hl(hl);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
             16
@@ -863,9 +1054,12 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
         0xB0 => {
             let v = mem_read(mem, r.de());
             mem_write(mem, r.hl(), v);
-            let hl = r.hl().wrapping_add(1); r.set_hl(hl);
-            let de = r.de().wrapping_add(1); r.set_de(de);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_add(1);
+            r.set_hl(hl);
+            let de = r.de().wrapping_add(1);
+            r.set_de(de);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_H, false);
             r.set_flag(FLAG_N, false);
             r.set_flag(FLAG_PV, false);
@@ -880,8 +1074,10 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
         0xB1 => {
             let v = mem_read(mem, r.hl());
             let result = r.a.wrapping_sub(v);
-            let hl = r.hl().wrapping_add(1); r.set_hl(hl);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_add(1);
+            r.set_hl(hl);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_S, result & 0x80 != 0);
             r.set_flag(FLAG_Z, result == 0);
             r.set_flag(FLAG_H, (r.a & 0x0F) < (v & 0x0F));
@@ -900,11 +1096,17 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             let v = ports.inp(port);
             let hl = r.hl();
             mem_write(mem, hl, v);
-            let hl = hl.wrapping_add(1); r.set_hl(hl);
+            let hl = hl.wrapping_add(1);
+            r.set_hl(hl);
             r.b = r.b.wrapping_sub(1);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
-            if r.b != 0 { r.pc = r.pc.wrapping_sub(2); 21 } else { 16 }
+            if r.b != 0 {
+                r.pc = r.pc.wrapping_sub(2);
+                21
+            } else {
+                16
+            }
         }
         // OTIR
         0xB3 => {
@@ -912,35 +1114,56 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             r.b = r.b.wrapping_sub(1);
             let port = u16::from_be_bytes([r.b, r.c]);
             ports.out(port, v);
-            let hl = r.hl().wrapping_add(1); r.set_hl(hl);
+            let hl = r.hl().wrapping_add(1);
+            r.set_hl(hl);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
-            if r.b != 0 { r.pc = r.pc.wrapping_sub(2); 21 } else { 16 }
+            if r.b != 0 {
+                r.pc = r.pc.wrapping_sub(2);
+                21
+            } else {
+                16
+            }
         }
         // LDDR
         0xB8 => {
             let v = mem_read(mem, r.de());
             mem_write(mem, r.hl(), v);
-            let hl = r.hl().wrapping_sub(1); r.set_hl(hl);
-            let de = r.de().wrapping_sub(1); r.set_de(de);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_sub(1);
+            r.set_hl(hl);
+            let de = r.de().wrapping_sub(1);
+            r.set_de(de);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_H, false);
             r.set_flag(FLAG_N, false);
             r.set_flag(FLAG_PV, false);
-            if bc != 0 { r.pc = r.pc.wrapping_sub(2); 21 } else { 16 }
+            if bc != 0 {
+                r.pc = r.pc.wrapping_sub(2);
+                21
+            } else {
+                16
+            }
         }
         // CPDR
         0xB9 => {
             let v = mem_read(mem, r.hl());
             let result = r.a.wrapping_sub(v);
-            let hl = r.hl().wrapping_sub(1); r.set_hl(hl);
-            let bc = r.bc().wrapping_sub(1); r.set_bc(bc);
+            let hl = r.hl().wrapping_sub(1);
+            r.set_hl(hl);
+            let bc = r.bc().wrapping_sub(1);
+            r.set_bc(bc);
             r.set_flag(FLAG_S, result & 0x80 != 0);
             r.set_flag(FLAG_Z, result == 0);
             r.set_flag(FLAG_H, (r.a & 0x0F) < (v & 0x0F));
             r.set_flag(FLAG_N, true);
             r.set_flag(FLAG_PV, bc != 0);
-            if bc != 0 && result != 0 { r.pc = r.pc.wrapping_sub(2); 21 } else { 16 }
+            if bc != 0 && result != 0 {
+                r.pc = r.pc.wrapping_sub(2);
+                21
+            } else {
+                16
+            }
         }
         // INDR
         0xBA => {
@@ -948,11 +1171,17 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             let v = ports.inp(port);
             let hl = r.hl();
             mem_write(mem, hl, v);
-            let hl = hl.wrapping_sub(1); r.set_hl(hl);
+            let hl = hl.wrapping_sub(1);
+            r.set_hl(hl);
             r.b = r.b.wrapping_sub(1);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
-            if r.b != 0 { r.pc = r.pc.wrapping_sub(2); 21 } else { 16 }
+            if r.b != 0 {
+                r.pc = r.pc.wrapping_sub(2);
+                21
+            } else {
+                16
+            }
         }
         // OTDR
         0xBB => {
@@ -960,10 +1189,16 @@ fn decode_ed(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -> u32 {
             r.b = r.b.wrapping_sub(1);
             let port = u16::from_be_bytes([r.b, r.c]);
             ports.out(port, v);
-            let hl = r.hl().wrapping_sub(1); r.set_hl(hl);
+            let hl = r.hl().wrapping_sub(1);
+            r.set_hl(hl);
             r.set_flag(FLAG_Z, r.b == 0);
             r.set_flag(FLAG_N, true);
-            if r.b != 0 { r.pc = r.pc.wrapping_sub(2); 21 } else { 16 }
+            if r.b != 0 {
+                r.pc = r.pc.wrapping_sub(2);
+                21
+            } else {
+                16
+            }
         }
         _ => 8, // undefined ED opcodes: NOP-like
     }
@@ -976,12 +1211,30 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
     let op = fetch_byte(r, mem);
     let xy = if use_ix { r.ix } else { r.iy };
 
-    macro_rules! get_xy_h { () => { (xy >> 8) as u8 } }
-    macro_rules! get_xy_l { () => { xy as u8 } }
-    macro_rules! set_xy { ($val:expr) => {
-        if use_ix { r.ix = $val; } else { r.iy = $val; }
-    } }
-    macro_rules! get_d { () => { fetch_byte(r, mem) as i8 } }
+    macro_rules! get_xy_h {
+        () => {
+            (xy >> 8) as u8
+        };
+    }
+    macro_rules! get_xy_l {
+        () => {
+            xy as u8
+        };
+    }
+    macro_rules! set_xy {
+        ($val:expr) => {
+            if use_ix {
+                r.ix = $val;
+            } else {
+                r.iy = $val;
+            }
+        };
+    }
+    macro_rules! get_d {
+        () => {
+            fetch_byte(r, mem) as i8
+        };
+    }
 
     match op {
         // ADD IX/IY, rr
@@ -993,35 +1246,69 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
             15
         }
         // LD IX/IY, nn
-        0x21 => { let nn = fetch_word(r, mem); set_xy!(nn); 14 }
+        0x21 => {
+            let nn = fetch_word(r, mem);
+            set_xy!(nn);
+            14
+        }
         // LD (nn), IX/IY
-        0x22 => { let addr = fetch_word(r, mem); mem_write16(mem, addr, xy); 20 }
+        0x22 => {
+            let addr = fetch_word(r, mem);
+            mem_write16(mem, addr, xy);
+            20
+        }
         // INC IX/IY
-        0x23 => { set_xy!(xy.wrapping_add(1)); 10 }
+        0x23 => {
+            set_xy!(xy.wrapping_add(1));
+            10
+        }
         // INC IXH/IYH
         0x24 => {
-            let v = alu_inc(r, get_xy_h!()); set_xy!((xy & 0x00FF) | ((v as u16) << 8)); 8
+            let v = alu_inc(r, get_xy_h!());
+            set_xy!((xy & 0x00FF) | ((v as u16) << 8));
+            8
         }
         // DEC IXH/IYH
         0x25 => {
-            let v = alu_dec(r, get_xy_h!()); set_xy!((xy & 0x00FF) | ((v as u16) << 8)); 8
+            let v = alu_dec(r, get_xy_h!());
+            set_xy!((xy & 0x00FF) | ((v as u16) << 8));
+            8
         }
         // LD IXH/IYH, n
-        0x26 => { let n = fetch_byte(r, mem); set_xy!((xy & 0x00FF) | ((n as u16) << 8)); 11 }
+        0x26 => {
+            let n = fetch_byte(r, mem);
+            set_xy!((xy & 0x00FF) | ((n as u16) << 8));
+            11
+        }
         // LD IX/IY, (nn)
-        0x2A => { let addr = fetch_word(r, mem); set_xy!(mem_read16(mem, addr)); 20 }
+        0x2A => {
+            let addr = fetch_word(r, mem);
+            set_xy!(mem_read16(mem, addr));
+            20
+        }
         // DEC IX/IY
-        0x2B => { set_xy!(xy.wrapping_sub(1)); 10 }
+        0x2B => {
+            set_xy!(xy.wrapping_sub(1));
+            10
+        }
         // INC IXL/IYL
         0x2C => {
-            let v = alu_inc(r, get_xy_l!()); set_xy!((xy & 0xFF00) | v as u16); 8
+            let v = alu_inc(r, get_xy_l!());
+            set_xy!((xy & 0xFF00) | v as u16);
+            8
         }
         // DEC IXL/IYL
         0x2D => {
-            let v = alu_dec(r, get_xy_l!()); set_xy!((xy & 0xFF00) | v as u16); 8
+            let v = alu_dec(r, get_xy_l!());
+            set_xy!((xy & 0xFF00) | v as u16);
+            8
         }
         // LD IXL/IYL, n
-        0x2E => { let n = fetch_byte(r, mem); set_xy!((xy & 0xFF00) | n as u16); 11 }
+        0x2E => {
+            let n = fetch_byte(r, mem);
+            set_xy!((xy & 0xFF00) | n as u16);
+            11
+        }
         // INC (IX+d)
         0x34 => {
             let d = get_d!();
@@ -1051,7 +1338,8 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
             let d = get_d!();
             let addr = xy.wrapping_add(d as i16 as u16);
             let reg = (op >> 3) & 0x07;
-            if reg == 6 { // LD H/L with (IX+d) doesn't exist in this form, treat as LD (IX+d)
+            if reg == 6 {
+                // LD H/L with (IX+d) doesn't exist in this form, treat as LD (IX+d)
                 // Actually LD (IX+d) is a store; 0x76 is HALT, skip
                 return 4;
             }
@@ -1071,14 +1359,22 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
         // LD IXH/IYH, r (undocumented) — 0x60..0x67
         op if (0x60..=0x67).contains(&op) => {
             let src = op & 0x07;
-            let val = if use_ix { get_r_ix(r, mem, src, 0) } else { get_r_iy(r, mem, src, 0) };
+            let val = if use_ix {
+                get_r_ix(r, mem, src, 0)
+            } else {
+                get_r_iy(r, mem, src, 0)
+            };
             set_xy!((xy & 0x00FF) | ((val as u16) << 8));
             8
         }
         // LD IXL/IYL, r (undocumented) — 0x68..0x6F
         op if (0x68..=0x6F).contains(&op) => {
             let src = op & 0x07;
-            let val = if use_ix { get_r_ix(r, mem, src, 0) } else { get_r_iy(r, mem, src, 0) };
+            let val = if use_ix {
+                get_r_ix(r, mem, src, 0)
+            } else {
+                get_r_iy(r, mem, src, 0)
+            };
             set_xy!((xy & 0xFF00) | val as u16);
             8
         }
@@ -1086,8 +1382,16 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
         // and r=6 means (IX+d)
         op if (0x80..=0xBF).contains(&op) => {
             let src = op & 0x07;
-            let disp = if src == 6 { fetch_byte(r, mem) as i8 } else { 0 };
-            let val = if use_ix { get_r_ix(r, mem, src, disp) } else { get_r_iy(r, mem, src, disp) };
+            let disp = if src == 6 {
+                fetch_byte(r, mem) as i8
+            } else {
+                0
+            };
+            let val = if use_ix {
+                get_r_ix(r, mem, src, disp)
+            } else {
+                get_r_iy(r, mem, src, disp)
+            };
             let cycles = if src == 6 { 19 } else { 8 };
             match (op >> 3) & 0x07 {
                 0 => alu_add(r, val, false),
@@ -1103,9 +1407,16 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
             cycles
         }
         // PUSH IX/IY
-        0xE5 => { stack_push(r, mem, xy); 15 }
+        0xE5 => {
+            stack_push(r, mem, xy);
+            15
+        }
         // POP IX/IY
-        0xE1 => { let v = stack_pop(r, mem); set_xy!(v); 14 }
+        0xE1 => {
+            let v = stack_pop(r, mem);
+            set_xy!(v);
+            14
+        }
         // EX (SP), IX/IY
         0xE3 => {
             let old = mem_read16(mem, r.sp);
@@ -1114,9 +1425,15 @@ fn decode_dd_fd(r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports, use_ix: 
             23
         }
         // JP (IX/IY)
-        0xE9 => { r.pc = xy; 8 }
+        0xE9 => {
+            r.pc = xy;
+            8
+        }
         // LD SP, IX/IY
-        0xF9 => { r.sp = xy; 10 }
+        0xF9 => {
+            r.sp = xy;
+            10
+        }
         // DDCB / FDCB
         0xCB => decode_xycb(r, mem, xy),
         // Anything else: treat the prefix as a NOP and re-decode the opcode
@@ -1141,11 +1458,17 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             10
         }
         // LD (BC), A
-        0x02 => { let a = r.a; mem_write(mem, r.bc(), a); 7 }
+        0x02 => {
+            let a = r.a;
+            mem_write(mem, r.bc(), a);
+            7
+        }
         // INC rr
         0x03 | 0x13 | 0x23 | 0x33 => {
             let dd = (op >> 4) & 0x03;
-            let v = get_dd(r, dd).wrapping_add(1); set_dd(r, dd, v); 6
+            let v = get_dd(r, dd).wrapping_add(1);
+            set_dd(r, dd, v);
+            6
         }
         // INC r (0x04, 0x0C, 0x14, 0x1C, 0x24, 0x2C, 0x34, 0x3C)
         op if op & 0xC7 == 0x04 => {
@@ -1197,11 +1520,16 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             11
         }
         // LD A, (BC)
-        0x0A => { r.a = mem_read(mem, r.bc()); 7 }
+        0x0A => {
+            r.a = mem_read(mem, r.bc());
+            7
+        }
         // DEC rr
         0x0B | 0x1B | 0x2B | 0x3B => {
             let dd = (op >> 4) & 0x03;
-            let v = get_dd(r, dd).wrapping_sub(1); set_dd(r, dd, v); 6
+            let v = get_dd(r, dd).wrapping_sub(1);
+            set_dd(r, dd, v);
+            6
         }
         // RRCA
         0x0F => {
@@ -1226,7 +1554,11 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             }
         }
         // LD (DE), A
-        0x12 => { let a = r.a; mem_write(mem, r.de(), a); 7 }
+        0x12 => {
+            let a = r.a;
+            mem_write(mem, r.de(), a);
+            7
+        }
         // RLA
         0x17 => {
             let old_c = r.flag(FLAG_C) as u8;
@@ -1246,7 +1578,10 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             12
         }
         // LD A, (DE)
-        0x1A => { r.a = mem_read(mem, r.de()); 7 }
+        0x1A => {
+            r.a = mem_read(mem, r.de());
+            7
+        }
         // RRA
         0x1F => {
             let old_c = r.flag(FLAG_C) as u8;
@@ -1264,7 +1599,12 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             let e = fetch_byte(r, mem) as i8;
             let cc = (op >> 3) & 0x03; // 0:NZ 1:Z 2:NC 3:C
             let taken = check_cc(r, cc);
-            if taken { r.pc = r.pc.wrapping_add(e as i16 as u16); 12 } else { 7 }
+            if taken {
+                r.pc = r.pc.wrapping_add(e as i16 as u16);
+                12
+            } else {
+                7
+            }
         }
         // LD (nn), HL
         0x22 => {
@@ -1282,12 +1622,22 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             let mut adj = 0u8;
             let mut new_c = false;
             if !n {
-                if h || (a & 0x0F) > 9 { adj |= 0x06; }
-                if c || a > 0x99 { adj |= 0x60; new_c = true; }
+                if h || (a & 0x0F) > 9 {
+                    adj |= 0x06;
+                }
+                if c || a > 0x99 {
+                    adj |= 0x60;
+                    new_c = true;
+                }
                 a = a.wrapping_add(adj);
             } else {
-                if h { adj |= 0x06; }
-                if c { adj |= 0x60; new_c = true; }
+                if h {
+                    adj |= 0x06;
+                }
+                if c {
+                    adj |= 0x60;
+                    new_c = true;
+                }
                 a = a.wrapping_sub(adj);
             }
             r.a = a;
@@ -1349,7 +1699,10 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             4
         }
         // HALT
-        0x76 => { r.halted = true; 4 }
+        0x76 => {
+            r.halted = true;
+            4
+        }
         // LD r, r' (0x40–0x7F excluding 0x76)
         op if (0x40..=0x7F).contains(&op) => {
             let dst = (op >> 3) & 0x07;
@@ -1379,7 +1732,12 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
         // RET cc (0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8)
         op if op & 0xC7 == 0xC0 => {
             let cc = (op >> 3) & 0x07;
-            if check_cc(r, cc) { r.pc = stack_pop(r, mem); 11 } else { 5 }
+            if check_cc(r, cc) {
+                r.pc = stack_pop(r, mem);
+                11
+            } else {
+                5
+            }
         }
         // POP rr (0xC1, 0xD1, 0xE1, 0xF1)
         op if op & 0xCF == 0xC1 => {
@@ -1392,11 +1750,17 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
         op if op & 0xC7 == 0xC2 => {
             let cc = (op >> 3) & 0x07;
             let nn = fetch_word(r, mem);
-            if check_cc(r, cc) { r.pc = nn; }
+            if check_cc(r, cc) {
+                r.pc = nn;
+            }
             10
         }
         // JP nn
-        0xC3 => { let nn = fetch_word(r, mem); r.pc = nn; 10 }
+        0xC3 => {
+            let nn = fetch_word(r, mem);
+            r.pc = nn;
+            10
+        }
         // CB prefix
         0xCB => decode_cb(r, mem),
         // CALL cc, nn (0xC4, 0xCC, 0xD4, 0xDC, 0xE4, 0xEC, 0xF4, 0xFC)
@@ -1444,7 +1808,10 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             11
         }
         // RET
-        0xC9 => { r.pc = stack_pop(r, mem); 10 }
+        0xC9 => {
+            r.pc = stack_pop(r, mem);
+            10
+        }
         // DD prefix (IX)
         0xDD => decode_dd_fd(r, mem, ports, true),
         // ED prefix
@@ -1475,7 +1842,10 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             19
         }
         // JP (HL)
-        0xE9 => { r.pc = r.hl(); 4 }
+        0xE9 => {
+            r.pc = r.hl();
+            4
+        }
         // EX DE, HL
         0xEB => {
             let de = r.de();
@@ -1495,11 +1865,22 @@ fn decode_main(op: u8, r: &mut Regs, mem: &mut [u8; 65536], ports: &mut Ports) -
             4
         }
         // DI
-        0xF3 => { r.iff1 = false; r.iff2 = false; 4 }
+        0xF3 => {
+            r.iff1 = false;
+            r.iff2 = false;
+            4
+        }
         // EI
-        0xFB => { r.iff1 = true; r.iff2 = true; 4 }
+        0xFB => {
+            r.iff1 = true;
+            r.iff2 = true;
+            4
+        }
         // LD SP, HL
-        0xF9 => { r.sp = r.hl(); 6 }
+        0xF9 => {
+            r.sp = r.hl();
+            6
+        }
         // CALL nn
         0xCD => {
             let nn = fetch_word(r, mem);
@@ -1542,7 +1923,9 @@ impl Z80Card {
     }
 
     /// True if the Z80 is currently active (6502 halted).
-    pub fn z80_active(&self) -> bool { self.z80_active }
+    pub fn z80_active(&self) -> bool {
+        self.z80_active
+    }
 
     /// Copy a slice of Apple II main RAM into the Z80 address space.
     ///
@@ -1568,7 +1951,9 @@ impl Z80Card {
     /// Returns the number of T-states actually consumed. Sets `z80_active` to
     /// false (yielding to 6502) if the Z80 executes `OUT (0), A`.
     pub fn execute_z80(&mut self, z80_cycles: u64) -> u64 {
-        if !self.z80_active { return 0; }
+        if !self.z80_active {
+            return 0;
+        }
         let mut consumed: u64 = 0;
         let mut ports = Ports::new();
         while consumed < z80_cycles {
@@ -1583,38 +1968,56 @@ impl Z80Card {
     }
 
     /// Direct access to Z80 memory (for testing / BIOS setup).
-    pub fn z80_mem(&self) -> &[u8; 65536] { &self.mem }
+    pub fn z80_mem(&self) -> &[u8; 65536] {
+        &self.mem
+    }
 
     /// Mutable access to Z80 memory.
-    pub fn z80_mem_mut(&mut self) -> &mut [u8; 65536] { &mut self.mem }
+    pub fn z80_mem_mut(&mut self) -> &mut [u8; 65536] {
+        &mut self.mem
+    }
 
     /// Current Z80 program counter.
-    pub fn pc(&self) -> u16 { self.regs.pc }
+    pub fn pc(&self) -> u16 {
+        self.regs.pc
+    }
 
     /// Set Z80 program counter (e.g. to start execution at a specific address).
-    pub fn set_pc(&mut self, pc: u16) { self.regs.pc = pc; }
+    pub fn set_pc(&mut self, pc: u16) {
+        self.regs.pc = pc;
+    }
 }
 
 // ── Card trait ────────────────────────────────────────────────────────────────
 
 impl Card for Z80Card {
-    fn card_type(&self) -> CardType { CardType::Z80 }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::Z80
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
+    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
     /// Reading $C0x4 (where x = slot + 8) activates the Z80 (halts 6502).
     /// This matches the real SoftCard's ROM-select/Z80-activate strobe.
     fn slot_io_read(&mut self, reg: u8, _cycles: u64) -> u8 {
-        if reg == 0x04 { self.z80_active = true; }
+        if reg == 0x04 {
+            self.z80_active = true;
+        }
         0xFF
     }
 
     /// Writing any value to reg 0 of the slot I/O space allows the host to
     /// force-clear the Z80 active flag (soft reset path).
     fn slot_io_write(&mut self, reg: u8, _val: u8, _cycles: u64) {
-        if reg == 0x00 { self.z80_active = false; }
+        if reg == 0x00 {
+            self.z80_active = false;
+        }
     }
 
     fn reset(&mut self, power_cycle: bool) {
@@ -1628,7 +2031,9 @@ impl Card for Z80Card {
     /// Called once per Apple II execution quantum (~17 030 cycles at 1 MHz).
     /// Drives Z80 execution at 2× clock ratio when active.
     fn update(&mut self, cycles: u64) {
-        if !self.z80_active { return; }
+        if !self.z80_active {
+            return;
+        }
         let z80_cycles = cycles.saturating_mul(Z80_CLOCK_RATIO);
         self.execute_z80(z80_cycles);
     }
@@ -1655,5 +2060,7 @@ impl Card for Z80Card {
         Ok(())
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

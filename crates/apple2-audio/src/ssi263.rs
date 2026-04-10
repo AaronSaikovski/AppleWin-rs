@@ -10,20 +10,20 @@ pub const NUM_PHONEMES: usize = 64;
 #[derive(Debug, Default, Clone)]
 pub struct Ssi263 {
     /// Phoneme / amplitude / rate register (reg 0).
-    pub phoneme:   u8,
+    pub phoneme: u8,
     /// Inflection register (reg 1).
     pub inflection: u8,
     /// Rate / speaking mode register (reg 2).
-    pub rate:      u8,
+    pub rate: u8,
     /// Control / articulation register (reg 3).
-    pub control:   u8,
+    pub control: u8,
     /// Filter frequency register (reg 4).
-    pub filter:    u8,
+    pub filter: u8,
 
     /// True while a phoneme is being spoken.
-    pub speaking:  bool,
+    pub speaking: bool,
     /// Pending IRQ flag.
-    pub irq:       bool,
+    pub irq: bool,
 }
 
 impl Ssi263 {

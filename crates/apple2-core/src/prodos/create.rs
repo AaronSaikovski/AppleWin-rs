@@ -2,34 +2,31 @@
 // Ported from New_DOSProDOS_Disk, New_Blank_Disk, Format_ProDOS_Disk,
 // Format_DOS33_Disk in AppleWin/source/ProDOS_Utils.cpp
 
-use std::path::Path;
 use std::io::Write as _;
+use std::path::Path;
 
-use super::types::{
-    Access, ProDosError,
-    pack_date, pack_time,
-};
-use super::file::{add_file, FileMeta};
+use super::file::{FileMeta, add_file};
 use super::format::{
-    format_filesystem, format_dos33_filesystem,
-    forward_sector_interleave, reverse_sector_interleave,
+    format_dos33_filesystem, format_filesystem, forward_sector_interleave,
+    reverse_sector_interleave,
 };
+use super::types::{Access, ProDosError, pack_date, pack_time};
 
 // ── Embedded firmware binaries ────────────────────────────────────────────────
 
-const PRODOS_BIN:     &[u8] = include_bytes!("../../roms/firmware/prodos243.bin");
-const BOOT_BIN:       &[u8] = include_bytes!("../../roms/firmware/bootsector_prodos243.bin");
-const BASIC_BIN:      &[u8] = include_bytes!("../../roms/firmware/basic17.system.bin");
+const PRODOS_BIN: &[u8] = include_bytes!("../../roms/firmware/prodos243.bin");
+const BOOT_BIN: &[u8] = include_bytes!("../../roms/firmware/bootsector_prodos243.bin");
+const BASIC_BIN: &[u8] = include_bytes!("../../roms/firmware/basic17.system.bin");
 const BITSY_BOOT_BIN: &[u8] = include_bytes!("../../roms/firmware/bitsy.boot.bin");
-const QUIT_BIN:       &[u8] = include_bytes!("../../roms/firmware/quit.system.bin");
-const DOS33_BIN:      &[u8] = include_bytes!("../../roms/firmware/dos33c.bin");
+const QUIT_BIN: &[u8] = include_bytes!("../../roms/firmware/quit.system.bin");
+const DOS33_BIN: &[u8] = include_bytes!("../../roms/firmware/dos33c.bin");
 
 // ── DOS 3.3 disk size constraints ─────────────────────────────────────────────
 
 const TRACK_DENIBBLIZED_SIZE: usize = 16 * 256;
-const MIN_DOS33_SIZE: usize = 34 * TRACK_DENIBBLIZED_SIZE;     // ~34 tracks minimum
-const MAX_DOS33_SIZE: usize = 40 * TRACK_DENIBBLIZED_SIZE;     // 40 tracks maximum
-const MAX_PRODOS_SIZE: usize = 512 * 65536;                    // 32 MB
+const MIN_DOS33_SIZE: usize = 34 * TRACK_DENIBBLIZED_SIZE; // ~34 tracks minimum
+const MAX_DOS33_SIZE: usize = 40 * TRACK_DENIBBLIZED_SIZE; // 40 tracks maximum
+const MAX_PRODOS_SIZE: usize = 512 * 65536; // 32 MB
 
 // ── Options struct ────────────────────────────────────────────────────────────
 
@@ -51,11 +48,11 @@ pub struct ProDosCreateOptions {
 impl Default for ProDosCreateOptions {
     fn default() -> Self {
         Self {
-            volume_name:   "BLANK".to_string(),
+            volume_name: "BLANK".to_string(),
             copy_bitsy_boot: false,
-            copy_bitsy_bye:  false,
-            copy_basic:      false,
-            copy_prodos:     false,
+            copy_bitsy_bye: false,
+            copy_basic: false,
+            copy_prodos: false,
         }
     }
 }
@@ -63,17 +60,25 @@ impl Default for ProDosCreateOptions {
 // ── File-metadata helpers ─────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn sys_meta(name: &str, aux: u16, cur_ver: u8, min_ver: u8,
-            cdate: u16, ctime: u16, mdate: u16, mtime: u16) -> FileMeta {
+fn sys_meta(
+    name: &str,
+    aux: u16,
+    cur_ver: u8,
+    min_ver: u8,
+    cdate: u16,
+    ctime: u16,
+    mdate: u16,
+    mtime: u16,
+) -> FileMeta {
     let access = (Access::B | Access::R).bits();
     FileMeta {
-        name:      name.to_string(),
+        name: name.to_string(),
         file_type: 0xFF, // SYS
         aux,
-        date:      cdate,
-        time:      ctime,
-        mod_date:  mdate,
-        mod_time:  mtime,
+        date: cdate,
+        time: ctime,
+        mod_date: mdate,
+        mod_time: mtime,
         access,
         cur_ver,
         min_ver,
@@ -106,10 +111,18 @@ pub fn create_prodos_disk(
     image[..boot_size].copy_from_slice(&BOOT_BIN[..boot_size]);
 
     // Embed system files in the order the C++ does it
-    if opts.copy_bitsy_boot { copy_bitsy_boot(&mut image, size)?; }
-    if opts.copy_bitsy_bye  { copy_bitsy_bye (&mut image, size)?; }
-    if opts.copy_basic      { copy_basic      (&mut image, size)?; }
-    if opts.copy_prodos     { copy_prodos     (&mut image, size)?; }
+    if opts.copy_bitsy_boot {
+        copy_bitsy_boot(&mut image, size)?;
+    }
+    if opts.copy_bitsy_bye {
+        copy_bitsy_bye(&mut image, size)?;
+    }
+    if opts.copy_basic {
+        copy_basic(&mut image, size)?;
+    }
+    if opts.copy_prodos {
+        copy_prodos(&mut image, size)?;
+    }
 
     write_image(path, &image)
 }
@@ -118,8 +131,12 @@ pub fn create_prodos_disk(
 ///
 /// Mirrors `New_DOSProDOS_Disk` (DOS 3.3 path).
 pub fn create_dos33_disk(path: &Path, size: usize) -> Result<(), ProDosError> {
-    if size < MIN_DOS33_SIZE { return Err(ProDosError::ImageTooSmall); }
-    if size > MAX_DOS33_SIZE { return Err(ProDosError::ImageTooLarge); }
+    if size < MIN_DOS33_SIZE {
+        return Err(ProDosError::ImageTooSmall);
+    }
+    if size > MAX_DOS33_SIZE {
+        return Err(ProDosError::ImageTooLarge);
+    }
 
     let mut image = vec![0u8; size];
 
@@ -153,12 +170,18 @@ pub fn format_prodos_disk(path: &Path) -> Result<(), ProDosError> {
     let mut image = std::fs::read(path)?;
     let size = image.len();
 
-    if size > MAX_PRODOS_SIZE { return Err(ProDosError::ImageTooLarge); }
+    if size > MAX_PRODOS_SIZE {
+        return Err(ProDosError::ImageTooLarge);
+    }
 
     let use_interleave = needs_interleave(path);
-    if use_interleave { forward_sector_interleave(&mut image, size); }
+    if use_interleave {
+        forward_sector_interleave(&mut image, size);
+    }
     format_filesystem(&mut image, size, "BLANK");
-    if use_interleave { reverse_sector_interleave(&mut image, size); }
+    if use_interleave {
+        reverse_sector_interleave(&mut image, size);
+    }
 
     write_image(path, &image)
 }
@@ -170,8 +193,12 @@ pub fn format_dos33_disk(path: &Path) -> Result<(), ProDosError> {
     let mut image = std::fs::read(path)?;
     let size = image.len();
 
-    if size < MIN_DOS33_SIZE { return Err(ProDosError::ImageTooSmall); }
-    if size > MAX_DOS33_SIZE { return Err(ProDosError::ImageTooLarge); }
+    if size < MIN_DOS33_SIZE {
+        return Err(ProDosError::ImageTooSmall);
+    }
+    if size > MAX_DOS33_SIZE {
+        return Err(ProDosError::ImageTooLarge);
+    }
 
     const VTOC_TRACK: usize = 0x11;
     format_dos33_filesystem(&mut image, size, VTOC_TRACK);
@@ -201,7 +228,7 @@ fn mark_dos33_tracks_used(image: &mut [u8], vtoc_track: usize, tracks: &[usize])
     let vtoc_off = vtoc_track * DSK;
     for &t in tracks {
         let off = vtoc_off + 0x38 + t * 4;
-        image[off]     = 0x00;
+        image[off] = 0x00;
         image[off + 1] = 0x00;
     }
 }
@@ -211,43 +238,58 @@ fn mark_dos33_tracks_used(image: &mut [u8], vtoc_track: usize, tracks: &[usize])
 fn copy_prodos(image: &mut [u8], disk_size: usize) -> Result<(), ProDosError> {
     // PRODOS: 17,128 bytes, SAPLING, cur_ver=0, min_ver=0x80 (ProDOS 2.4.x magic)
     let meta = FileMeta {
-        name:      "PRODOS".to_string(),
+        name: "PRODOS".to_string(),
         file_type: 0xFF,
-        aux:       0x0000,
-        date:      pack_date(23, 12, 30),
-        time:      pack_time(2, 43),
-        mod_date:  pack_date(23, 12, 30),
-        mod_time:  pack_time(2, 43),
-        access:    (Access::D | Access::N | Access::B | Access::W | Access::R).bits(),
-        cur_ver:   0x00,
-        min_ver:   0x80,
+        aux: 0x0000,
+        date: pack_date(23, 12, 30),
+        time: pack_time(2, 43),
+        mod_date: pack_date(23, 12, 30),
+        mod_time: pack_time(2, 43),
+        access: (Access::D | Access::N | Access::B | Access::W | Access::R).bits(),
+        cur_ver: 0x00,
+        min_ver: 0x80,
     };
     add_file(image, disk_size, PRODOS_BIN, &meta, true)
 }
 
 fn copy_bitsy_boot(image: &mut [u8], disk_size: usize) -> Result<(), ProDosError> {
     let meta = sys_meta(
-        "BITSY.BOOT", 0x2000, 0x24, 0x00,
-        pack_date(18, 1, 13), pack_time(9, 9),
-        pack_date(16, 9, 15), pack_time(9, 49),
+        "BITSY.BOOT",
+        0x2000,
+        0x24,
+        0x00,
+        pack_date(18, 1, 13),
+        pack_time(9, 9),
+        pack_date(16, 9, 15),
+        pack_time(9, 49),
     );
     add_file(image, disk_size, BITSY_BOOT_BIN, &meta, false)
 }
 
 fn copy_bitsy_bye(image: &mut [u8], disk_size: usize) -> Result<(), ProDosError> {
     let meta = sys_meta(
-        "QUIT.SYSTEM", 0x2000, 0x24, 0x00,
-        pack_date(18, 1, 13), pack_time(9, 9),
-        pack_date(16, 9, 15), pack_time(9, 41),
+        "QUIT.SYSTEM",
+        0x2000,
+        0x24,
+        0x00,
+        pack_date(18, 1, 13),
+        pack_time(9, 9),
+        pack_date(16, 9, 15),
+        pack_time(9, 41),
     );
     add_file(image, disk_size, QUIT_BIN, &meta, false)
 }
 
 fn copy_basic(image: &mut [u8], disk_size: usize) -> Result<(), ProDosError> {
     let meta = sys_meta(
-        "BASIC.SYSTEM", 0x2000, 0x24, 0x00,
-        pack_date(18, 1, 13), pack_time(9, 9),
-        pack_date(16, 8, 30), pack_time(7, 56),
+        "BASIC.SYSTEM",
+        0x2000,
+        0x24,
+        0x00,
+        pack_date(18, 1, 13),
+        pack_time(9, 9),
+        pack_date(16, 8, 30),
+        pack_time(7, 56),
     );
     add_file(image, disk_size, BASIC_BIN, &meta, true)
 }
@@ -285,7 +327,7 @@ mod tests {
         let base = 2 * 512 + 4;
         let kind_byte = image[base];
         assert_eq!((kind_byte >> 4) & 0xF, 0xF, "Root kind byte expected");
-        assert_eq!(kind_byte & 0xF, 8,   "Name length = 8 (TESTDISK)");
+        assert_eq!(kind_byte & 0xF, 8, "Name length = 8 (TESTDISK)");
 
         // Volume name bytes 1..9 should be "TESTDISK"
         let name = &image[base + 1..base + 9];
@@ -311,7 +353,10 @@ mod tests {
         let kind_byte = image[entry];
         // Must be SAPLING (0x2) or SEED (0x1), not DEL (0x0)
         let kind = (kind_byte >> 4) & 0xF;
-        assert!(kind == 0x1 || kind == 0x2, "Expected SEED or SAPLING file, got kind={kind}");
+        assert!(
+            kind == 0x1 || kind == 0x2,
+            "Expected SEED or SAPLING file, got kind={kind}"
+        );
     }
 
     #[test]
@@ -324,7 +369,11 @@ mod tests {
         let image = std::fs::read(f.path()).unwrap();
         let base = 2 * 512 + 4;
         let kind_byte = image[base];
-        assert_eq!((kind_byte >> 4) & 0xF, 0xF, "Root kind expected after format");
+        assert_eq!(
+            (kind_byte >> 4) & 0xF,
+            0xF,
+            "Root kind expected after format"
+        );
     }
 
     #[test]
@@ -337,7 +386,11 @@ mod tests {
 
         // VTOC at track 17, sector 0 (offset = 17 * 4096)
         let vtoc_off = 17 * 16 * 256;
-        assert_eq!(image[vtoc_off + 0x03], 0x03, "DOS 3.3 version byte at VTOC+3");
-        assert_eq!(image[vtoc_off + 0x35], 16,   "16 sectors/track");
+        assert_eq!(
+            image[vtoc_off + 0x03],
+            0x03,
+            "DOS 3.3 version byte at VTOC+3"
+        );
+        assert_eq!(image[vtoc_off + 0x35], 16, "16 sectors/track");
     }
 }

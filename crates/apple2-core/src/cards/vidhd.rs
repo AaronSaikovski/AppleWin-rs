@@ -8,9 +8,9 @@
 //!
 //! Reference: source/Video.cpp
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 // ── VidHD identification bytes ───────────────────────────────────────────────
 // The VidHD ROM contains specific identification bytes that software uses
@@ -93,8 +93,12 @@ impl VidHdCard {
 }
 
 impl Card for VidHdCard {
-    fn card_type(&self) -> CardType { CardType::VidHD }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::VidHD
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
     fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
         self.rom[offset as usize]
@@ -177,7 +181,9 @@ impl Card for VidHdCard {
         Ok(())
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

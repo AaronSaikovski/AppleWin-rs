@@ -10,18 +10,23 @@ use std::io::Read;
 /// original bytes and extension are returned unchanged.
 pub fn decompress(data: &[u8], ext: &str) -> (Vec<u8>, String) {
     // gzip: magic 0x1F 0x8B
-    if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B
-        && let Ok(decompressed) = decompress_gz(data) {
-            let inner = strip_gz_ext(ext);
-            return (decompressed, inner);
+    if data.len() >= 2
+        && data[0] == 0x1F
+        && data[1] == 0x8B
+        && let Ok(decompressed) = decompress_gz(data)
+    {
+        let inner = strip_gz_ext(ext);
+        return (decompressed, inner);
     }
 
     // zip: magic PK (0x50 0x4B)
-    if data.len() >= 4 && data[0] == 0x50 && data[1] == 0x4B
-        && let Ok((decompressed, inner_name)) = decompress_zip(data) {
-            let inner = ext_from_filename(&inner_name)
-                .unwrap_or_else(|| strip_gz_ext(ext));
-            return (decompressed, inner);
+    if data.len() >= 4
+        && data[0] == 0x50
+        && data[1] == 0x4B
+        && let Ok((decompressed, inner_name)) = decompress_zip(data)
+    {
+        let inner = ext_from_filename(&inner_name).unwrap_or_else(|| strip_gz_ext(ext));
+        return (decompressed, inner);
     }
 
     (data.to_vec(), ext.to_string())
@@ -39,7 +44,8 @@ fn decompress_zip(data: &[u8]) -> std::io::Result<(Vec<u8>, String)> {
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // Extract the first file in the archive.
-    let mut file = archive.by_index(0)
+    let mut file = archive
+        .by_index(0)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let name = file.name().to_string();
     let mut out = Vec::new();
@@ -73,9 +79,9 @@ fn ext_from_filename(name: &str) -> Option<String> {
 const MAGIC_2IMG: [u8; 4] = [0x32, 0x49, 0x4D, 0x47];
 
 /// Image format values in the 2IMG header at offset 0x0C.
-const IMG_FORMAT_DOS33:  u32 = 0;
+const IMG_FORMAT_DOS33: u32 = 0;
 const IMG_FORMAT_PRODOS: u32 = 1;
-const IMG_FORMAT_NIB:    u32 = 2;
+const IMG_FORMAT_NIB: u32 = 2;
 
 /// Attempt to parse a 2IMG wrapper header.
 ///
@@ -83,24 +89,32 @@ const IMG_FORMAT_NIB:    u32 = 2;
 /// or "nib" depending on the format field.  Returns `None` if the data does
 /// not have a valid 2IMG header.
 pub fn unwrap_2img(data: &[u8]) -> Option<(Vec<u8>, &'static str)> {
-    if data.len() < 64 { return None; }
-    if data[0..4] != MAGIC_2IMG { return None; }
+    if data.len() < 64 {
+        return None;
+    }
+    if data[0..4] != MAGIC_2IMG {
+        return None;
+    }
 
     // Header size at offset 0x08 (little-endian u16).
     let header_size = u16::from_le_bytes([data[8], data[9]]) as usize;
-    if header_size < 64 || header_size > data.len() { return None; }
+    if header_size < 64 || header_size > data.len() {
+        return None;
+    }
 
     // Image data length at offset 0x1C (little-endian u32).
     let data_len = u32::from_le_bytes([data[0x1C], data[0x1D], data[0x1E], data[0x1F]]) as usize;
-    if header_size + data_len > data.len() { return None; }
+    if header_size + data_len > data.len() {
+        return None;
+    }
 
     // Image format at offset 0x0C (little-endian u32).
     let format = u32::from_le_bytes([data[0x0C], data[0x0D], data[0x0E], data[0x0F]]);
 
     let ext = match format {
-        IMG_FORMAT_DOS33  => "dsk",
+        IMG_FORMAT_DOS33 => "dsk",
         IMG_FORMAT_PRODOS => "po",
-        IMG_FORMAT_NIB    => "nib",
+        IMG_FORMAT_NIB => "nib",
         _ => return None,
     };
 
@@ -124,8 +138,8 @@ mod tests {
 
     #[test]
     fn decompress_gz() {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         use std::io::Write;
 
         let original = b"Hello Apple II disk image data!";

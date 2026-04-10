@@ -10,9 +10,9 @@
 //! - Hi-res is rendered per-pixel without NTSC colour fringing.
 //! - Double hi-res maps each 4-bit nibble directly to one of 16 colours.
 
-use apple2_core::bus::MemMode;
 use crate::framebuffer::Framebuffer;
 use crate::ntsc::CharRom;
+use apple2_core::bus::MemMode;
 
 // ── 16-colour ABGR palette (same order as NTSC lo-res) ──────────────────────
 
@@ -62,25 +62,25 @@ impl RgbRenderer {
     pub fn render(
         &self,
         main_ram: &[u8; 65536],
-        aux_ram:  &[u8; 65536],
+        aux_ram: &[u8; 65536],
         mode: MemMode,
         frame_no: u32,
         fb: &mut Framebuffer,
     ) {
         let flash_on = (frame_no / 16).is_multiple_of(2);
 
-        let page2    = mode.contains(MemMode::MF_PAGE2);
+        let page2 = mode.contains(MemMode::MF_PAGE2);
         let graphics = mode.contains(MemMode::MF_GRAPHICS);
-        let hires    = mode.contains(MemMode::MF_HIRES);
-        let mixed    = mode.contains(MemMode::MF_MIXED);
-        let vid80    = mode.contains(MemMode::MF_VID80);
-        let dhires   = mode.contains(MemMode::MF_DHIRES);
+        let hires = mode.contains(MemMode::MF_HIRES);
+        let mixed = mode.contains(MemMode::MF_MIXED);
+        let vid80 = mode.contains(MemMode::MF_VID80);
+        let dhires = mode.contains(MemMode::MF_DHIRES);
         let _store80 = mode.contains(MemMode::MF_80STORE);
 
         // Display page selection — same logic as NTSC renderer.
         let display_page2 = page2 && !_store80;
         let text_base: usize = if display_page2 { 0x0800 } else { 0x0400 };
-        let hgr_base:  usize = if display_page2 { 0x4000 } else { 0x2000 };
+        let hgr_base: usize = if display_page2 { 0x4000 } else { 0x2000 };
         let text_page = &main_ram[text_base..text_base + 0x400];
 
         if !graphics {
@@ -129,8 +129,12 @@ impl RgbRenderer {
     // ── Text rendering ───────────────────────────────────────────────────────
 
     fn render_text40_rows(
-        &self, text_page: &[u8], row_start: usize, row_end: usize,
-        flash_on: bool, fb: &mut Framebuffer,
+        &self,
+        text_page: &[u8],
+        row_start: usize,
+        row_end: usize,
+        flash_on: bool,
+        fb: &mut Framebuffer,
     ) {
         let fg = 0xFFFFFFFF_u32; // white
         let bg = 0xFF000000_u32; // black
@@ -160,9 +164,14 @@ impl RgbRenderer {
 
     #[allow(clippy::too_many_arguments)]
     fn render_text80_rows(
-        &self, main_ram: &[u8; 65536], aux_ram: &[u8; 65536],
-        text_base: usize, row_start: usize, row_end: usize,
-        flash_on: bool, fb: &mut Framebuffer,
+        &self,
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
+        text_base: usize,
+        row_start: usize,
+        row_end: usize,
+        flash_on: bool,
+        fb: &mut Framebuffer,
     ) {
         let fg = 0xFFFFFFFF_u32;
         let bg = 0xFF000000_u32;
@@ -214,20 +223,23 @@ impl RgbRenderer {
     }
 
     fn render_dlores(
-        &self, main_ram: &[u8; 65536], aux_ram: &[u8; 65536],
-        text_base: usize, fb: &mut Framebuffer,
+        &self,
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
+        text_base: usize,
+        fb: &mut Framebuffer,
     ) {
         for row in 0..24 {
             let base = crate::ntsc::text_row_offset(row);
             for col in 0..40 {
-                let aux_byte  = aux_ram[text_base + base + col];
+                let aux_byte = aux_ram[text_base + base + col];
                 let main_byte = main_ram[text_base + base + col];
                 // Double lo-res: each column produces two 7-pixel-wide colour blocks.
                 // Aux provides the left column, main the right.
                 let fb_x_base = col * 14;
                 let fb_y_base = row * 16;
                 for y in 0..8 {
-                    let aux_color  = if y < 4 {
+                    let aux_color = if y < 4 {
                         RGB_PALETTE[(aux_byte & 0x0F) as usize]
                     } else {
                         RGB_PALETTE[((aux_byte >> 4) & 0x0F) as usize]
@@ -250,7 +262,13 @@ impl RgbRenderer {
 
     // ── Hi-res rendering ─────────────────────────────────────────────────────
 
-    fn render_hires(&self, main_ram: &[u8; 65536], hgr_base: usize, scan_lines: usize, fb: &mut Framebuffer) {
+    fn render_hires(
+        &self,
+        main_ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
+    ) {
         for y in 0..scan_lines {
             let addr = hgr_base + crate::ntsc::hgr_row_offset(y);
             for col in 0..40 {
@@ -260,7 +278,11 @@ impl RgbRenderer {
                 let fb_x_base = col * 14;
                 let fb_y = y * 2;
                 for bit in 0..7 {
-                    let color = if (byte >> bit) & 1 != 0 { HGR_WHITE } else { HGR_BLACK };
+                    let color = if (byte >> bit) & 1 != 0 {
+                        HGR_WHITE
+                    } else {
+                        HGR_BLACK
+                    };
                     fb.set_pixel(fb_x_base + bit * 2, fb_y, color);
                     fb.set_pixel(fb_x_base + bit * 2 + 1, fb_y, color);
                     fb.set_pixel(fb_x_base + bit * 2, fb_y + 1, color);
@@ -271,8 +293,12 @@ impl RgbRenderer {
     }
 
     fn render_dhires(
-        &self, main_ram: &[u8; 65536], aux_ram: &[u8; 65536],
-        hgr_base: usize, scan_lines: usize, fb: &mut Framebuffer,
+        &self,
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
+        hgr_base: usize,
+        scan_lines: usize,
+        fb: &mut Framebuffer,
     ) {
         // Double hi-res: 4 bits per pixel, 16 colours, 140 pixels per line.
         // Each group of 7 aux bits + 7 main bits = 14 bits = 3.5 4-bit pixels.
@@ -288,10 +314,8 @@ impl RgbRenderer {
                 let m1 = main_ram[addr + col_pair * 2 + 1] as u32;
 
                 // Combine into a 28-bit value: a0[6:0] + m0[6:0] + a1[6:0] + m1[6:0]
-                let bits = (a0 & 0x7F)
-                    | ((m0 & 0x7F) << 7)
-                    | ((a1 & 0x7F) << 14)
-                    | ((m1 & 0x7F) << 21);
+                let bits =
+                    (a0 & 0x7F) | ((m0 & 0x7F) << 7) | ((a1 & 0x7F) << 14) | ((m1 & 0x7F) << 21);
 
                 let fb_x_base = col_pair * 28;
                 for pixel in 0..7 {

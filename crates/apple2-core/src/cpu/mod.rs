@@ -1,6 +1,6 @@
-pub mod flags;
 pub mod cpu6502;
 pub mod dispatch;
+pub mod flags;
 
 #[cfg(test)]
 mod tests;

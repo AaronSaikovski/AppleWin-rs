@@ -37,23 +37,23 @@ const DISASM_LINES: usize = 34;
 // ── AppleWin debugger color palette ─────────────────────────────────────────
 // Format: 0xFFBBGGRR (ABGR8888, little-endian → in-memory [R,G,B,A])
 
-const BLACK:     u32 = 0xFF000000;
-const RED:       u32 = 0xFF2020FF;
-const GREEN:     u32 = 0xFF00FF00;
-const YELLOW:    u32 = 0xFF00FFFF;
+const BLACK: u32 = 0xFF000000;
+const RED: u32 = 0xFF2020FF;
+const GREEN: u32 = 0xFF00FF00;
+const YELLOW: u32 = 0xFF00FFFF;
 #[allow(dead_code)]
-const BLUE:      u32 = 0xFFFF4040;
+const BLUE: u32 = 0xFFFF4040;
 #[allow(dead_code)]
-const MAGENTA:   u32 = 0xFFFF00FF;
-const CYAN:      u32 = 0xFFFFFF00;
-const WHITE:     u32 = 0xFFFFFFFF;
-const ORANGE:    u32 = 0xFF0080FF;
-const GREY:      u32 = 0xFF808080;
-const LT_BLUE:   u32 = 0xFFFFC050;
+const MAGENTA: u32 = 0xFFFF00FF;
+const CYAN: u32 = 0xFFFFFF00;
+const WHITE: u32 = 0xFFFFFFFF;
+const ORANGE: u32 = 0xFF0080FF;
+const GREY: u32 = 0xFF808080;
+const LT_BLUE: u32 = 0xFFFFC050;
 
-const BG_DEFAULT:     u32 = BLACK;
-const BG_PC_LINE:     u32 = 0xFF008080; // dark yellow/olive background for PC
-const BG_BP_LINE:     u32 = 0xFF000060; // dark red background for breakpoints
+const BG_DEFAULT: u32 = BLACK;
+const BG_PC_LINE: u32 = 0xFF008080; // dark yellow/olive background for PC
+const BG_BP_LINE: u32 = 0xFF000060; // dark red background for breakpoints
 const BG_CURSOR_LINE: u32 = 0xFF402020; // dark blue background for cursor
 
 // ── Built-in 7×8 debug font ────────────────────────────────────────────────
@@ -197,7 +197,9 @@ fn draw_char(fb: &mut [u32], col: usize, row: usize, ch: u8, fg: u32, bg: u32) {
 fn draw_str(fb: &mut [u32], col: usize, row: usize, s: &str, fg: u32, bg: u32) -> usize {
     let mut c = col;
     for &b in s.as_bytes() {
-        if c >= COLS { break; }
+        if c >= COLS {
+            break;
+        }
         draw_char(fb, c, row, b, fg, bg);
         c += 1;
     }
@@ -260,8 +262,7 @@ pub fn render<F>(
     mode_bits: u32,
     cmd_input: &str,
     mut read_mem: F,
-)
-where
+) where
     F: FnMut(u16) -> u8,
 {
     fill_all(fb, BG_DEFAULT);
@@ -284,8 +285,10 @@ where
             let row = i + 1;
             let instr = disassemble_one(addr, &mut read_mem);
             let is_pc = addr == cpu.pc;
-            let has_bp = state.breakpoints.breakpoints.iter()
-                .any(|bp| bp.enabled && bp.kind == BreakpointKind::Opcode && bp.address == addr);
+            let has_bp =
+                state.breakpoints.breakpoints.iter().any(|bp| {
+                    bp.enabled && bp.kind == BreakpointKind::Opcode && bp.address == addr
+                });
             let is_cursor = addr == state.cursor && !is_pc;
 
             // Choose line background
@@ -303,8 +306,20 @@ where
             fill_row(fb, row, 0, INFO_COL, line_bg);
 
             // Marker column
-            let marker = if is_pc { '>' } else if has_bp { '*' } else { ' ' };
-            let marker_color = if is_pc { WHITE } else if has_bp { RED } else { GREY };
+            let marker = if is_pc {
+                '>'
+            } else if has_bp {
+                '*'
+            } else {
+                ' '
+            };
+            let marker_color = if is_pc {
+                WHITE
+            } else if has_bp {
+                RED
+            } else {
+                GREY
+            };
             draw_char(fb, 0, row, marker as u8, marker_color, line_bg);
 
             // Address
@@ -321,7 +336,9 @@ where
                 col += 1;
             }
             // Pad to fixed column for mnemonic
-            while col < 16 { col += 1; }
+            while col < 16 {
+                col += 1;
+            }
 
             // Mnemonic
             col = draw_str(fb, col, row, instr.mnemonic, WHITE, line_bg);
@@ -342,9 +359,10 @@ where
 
             // Symbol annotation
             if let Some(name) = state.symbols.name_at(addr)
-                && col < 40 {
-                    col = draw_str(fb, col + 1, row, ";", GREY, line_bg);
-                    draw_str(fb, col, row, name, GREEN, line_bg);
+                && col < 40
+            {
+                col = draw_str(fb, col + 1, row, ";", GREY, line_bg);
+                draw_str(fb, col, row, name, GREEN, line_bg);
             }
             let _ = col; // suppress unused
 
@@ -375,7 +393,14 @@ where
 
         // SP, X
         c = draw_str(fb, INFO_COL, rrow, "SP ", GREY, BG_DEFAULT);
-        c = draw_str(fb, c, rrow, &format!("  {:02X}", cpu.sp), ORANGE, BG_DEFAULT);
+        c = draw_str(
+            fb,
+            c,
+            rrow,
+            &format!("  {:02X}", cpu.sp),
+            ORANGE,
+            BG_DEFAULT,
+        );
         c += 1;
         c = draw_str(fb, c, rrow, "X ", GREY, BG_DEFAULT);
         draw_str(fb, c, rrow, &format!("{:02X}", cpu.x), ORANGE, BG_DEFAULT);
@@ -383,7 +408,14 @@ where
 
         // P, Y
         c = draw_str(fb, INFO_COL, rrow, "P  ", GREY, BG_DEFAULT);
-        c = draw_str(fb, c, rrow, &format!("  {:02X}", cpu.flags), ORANGE, BG_DEFAULT);
+        c = draw_str(
+            fb,
+            c,
+            rrow,
+            &format!("  {:02X}", cpu.flags),
+            ORANGE,
+            BG_DEFAULT,
+        );
         c += 1;
         c = draw_str(fb, c, rrow, "Y ", GREY, BG_DEFAULT);
         draw_str(fb, c, rrow, &format!("{:02X}", cpu.y), ORANGE, BG_DEFAULT);
@@ -391,8 +423,16 @@ where
 
         // Flags with set/clear visual
         c = draw_str(fb, INFO_COL, rrow, "  ", GREY, BG_DEFAULT);
-        for &(bit, name) in &[(0x80u8, "N"), (0x40, "V"), (0x20, "-"), (0x10, "B"),
-                               (0x08, "D"), (0x04, "I"), (0x02, "Z"), (0x01, "C")] {
+        for &(bit, name) in &[
+            (0x80u8, "N"),
+            (0x40, "V"),
+            (0x20, "-"),
+            (0x10, "B"),
+            (0x08, "D"),
+            (0x04, "I"),
+            (0x02, "Z"),
+            (0x01, "C"),
+        ] {
             let set = cpu.flags & bit != 0;
             let (fg, bg) = if name == "-" {
                 (GREY, BG_DEFAULT)
@@ -401,13 +441,24 @@ where
             } else {
                 (GREY, BG_DEFAULT)
             };
-            let label = if set { name.to_uppercase() } else { name.to_lowercase() };
+            let label = if set {
+                name.to_uppercase()
+            } else {
+                name.to_lowercase()
+            };
             c = draw_str(fb, c, rrow, &label, fg, bg);
         }
         rrow += 1;
 
         // Cycles
-        draw_str(fb, INFO_COL, rrow, &format!("Cyc {}", cpu.cycles), GREY, BG_DEFAULT);
+        draw_str(
+            fb,
+            INFO_COL,
+            rrow,
+            &format!("Cyc {}", cpu.cycles),
+            GREY,
+            BG_DEFAULT,
+        );
         rrow += 1;
     }
 
@@ -423,9 +474,14 @@ where
         while saddr <= 0x01FF && count < 8 {
             let b = read_mem(saddr);
             let marker = if count == 0 { ">" } else { " " };
-            draw_str(fb, INFO_COL, rrow, &format!(
-                "{marker}{:04X}:{:02X}", saddr, b
-            ), LT_BLUE, BG_DEFAULT);
+            draw_str(
+                fb,
+                INFO_COL,
+                rrow,
+                &format!("{marker}{:04X}:{:02X}", saddr, b),
+                LT_BLUE,
+                BG_DEFAULT,
+            );
             saddr += 1;
             count += 1;
             rrow += 1;
@@ -447,18 +503,25 @@ where
             rrow += 1;
         } else {
             for (idx, bp) in state.breakpoints.breakpoints.iter().enumerate() {
-                if rrow >= DATA_ROW - 2 { break; } // don't overflow into data window
+                if rrow >= DATA_ROW - 2 {
+                    break;
+                } // don't overflow into data window
                 let kind = match bp.kind {
-                    BreakpointKind::Opcode   => "PC",
-                    BreakpointKind::MemRead  => "MR",
+                    BreakpointKind::Opcode => "PC",
+                    BreakpointKind::MemRead => "MR",
                     BreakpointKind::MemWrite => "MW",
                     _ => "??",
                 };
                 let en = if bp.enabled { " " } else { "D" };
                 let color = if bp.enabled { RED } else { GREY };
-                draw_str(fb, INFO_COL, rrow, &format!(
-                    " {:X}:{en}${:04X} {kind}", idx, bp.address
-                ), color, BG_DEFAULT);
+                draw_str(
+                    fb,
+                    INFO_COL,
+                    rrow,
+                    &format!(" {:X}:{en}${:04X} {kind}", idx, bp.address),
+                    color,
+                    BG_DEFAULT,
+                );
                 rrow += 1;
             }
         }
@@ -470,11 +533,18 @@ where
         draw_str(fb, INFO_COL, rrow, " Watches", GREEN, BG_DEFAULT);
         rrow += 1;
         for (idx, w) in state.watches.items.iter().enumerate() {
-            if rrow >= DATA_ROW - 1 { break; }
+            if rrow >= DATA_ROW - 1 {
+                break;
+            }
             let b = read_mem(w.address);
-            draw_str(fb, INFO_COL, rrow, &format!(
-                " {:X}:${:04X}={:02X}", idx, w.address, b
-            ), CYAN, BG_DEFAULT);
+            draw_str(
+                fb,
+                INFO_COL,
+                rrow,
+                &format!(" {:X}:${:04X}={:02X}", idx, w.address, b),
+                CYAN,
+                BG_DEFAULT,
+            );
             rrow += 1;
         }
     }
@@ -492,13 +562,27 @@ where
             let sw1 = &items[i];
             let c1 = if sw1.active { GREEN } else { GREY };
             let s1 = if sw1.active { "+" } else { "-" };
-            let c = draw_str(fb, INFO_COL, rrow, &format!("{s1}{:<9}", sw1.name), c1, BG_DEFAULT);
+            let c = draw_str(
+                fb,
+                INFO_COL,
+                rrow,
+                &format!("{s1}{:<9}", sw1.name),
+                c1,
+                BG_DEFAULT,
+            );
             i += 1;
             if i < items.len() {
                 let sw2 = &items[i];
                 let c2 = if sw2.active { GREEN } else { GREY };
                 let s2 = if sw2.active { "+" } else { "-" };
-                draw_str(fb, c + 1, rrow, &format!("{s2}{:<9}", sw2.name), c2, BG_DEFAULT);
+                draw_str(
+                    fb,
+                    c + 1,
+                    rrow,
+                    &format!("{s2}{:<9}", sw2.name),
+                    c2,
+                    BG_DEFAULT,
+                );
                 i += 1;
             }
             rrow += 1;
@@ -511,7 +595,14 @@ where
     draw_separator(fb, DATA_ROW, 0, COLS);
     {
         let c = draw_str(fb, 0, DATA_ROW, " Data ", GREEN, BG_DEFAULT);
-        draw_str(fb, c, DATA_ROW, &format!("${:04X}", state.mem_view_addr), YELLOW, BG_DEFAULT);
+        draw_str(
+            fb,
+            c,
+            DATA_ROW,
+            &format!("${:04X}", state.mem_view_addr),
+            YELLOW,
+            BG_DEFAULT,
+        );
 
         let mut addr = state.mem_view_addr;
         for i in 0..(CONSOLE_ROW - DATA_ROW - 1) {
@@ -551,7 +642,9 @@ where
         let start = output.len().saturating_sub(console_lines);
         for (i, line) in output[start..].iter().enumerate() {
             let row = CONSOLE_ROW + 1 + i;
-            if row >= ROWS - 1 { break; }
+            if row >= ROWS - 1 {
+                break;
+            }
             // Truncate to screen width
             let display: String = line.chars().take(COLS).collect();
             draw_str(fb, 0, row, &display, WHITE, BG_DEFAULT);

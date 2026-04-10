@@ -11,10 +11,10 @@
 //!
 //! Reference: source/SerialComms.cpp
 
-use std::collections::VecDeque;
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::collections::VecDeque;
+use std::io::{Read, Write};
 
 // ── ROM ────────────────────────────────────────────────────────────────────────
 
@@ -36,13 +36,13 @@ fn make_ssc_rom() -> Box<[u8; 256]> {
 
 // ── Status register bit masks ──────────────────────────────────────────────────
 
-const STATUS_IRQ:     u8 = 0x80; // bit 7 — interrupt occurred
+const STATUS_IRQ: u8 = 0x80; // bit 7 — interrupt occurred
 #[allow(dead_code)]
-const STATUS_DSR:     u8 = 0x40; // bit 6 — Data Set Ready
+const STATUS_DSR: u8 = 0x40; // bit 6 — Data Set Ready
 #[allow(dead_code)]
-const STATUS_DCD:     u8 = 0x20; // bit 5 — Data Carrier Detect
-const STATUS_TDRE:    u8 = 0x10; // bit 4 — Tx Data Register Empty
-const STATUS_RDRF:    u8 = 0x08; // bit 3 — Rx Data Register Full
+const STATUS_DCD: u8 = 0x20; // bit 5 — Data Carrier Detect
+const STATUS_TDRE: u8 = 0x10; // bit 4 — Tx Data Register Empty
+const STATUS_RDRF: u8 = 0x08; // bit 3 — Rx Data Register Full
 const STATUS_OVERRUN: u8 = 0x04; // bit 2 — Overrun error
 
 // ── Struct ─────────────────────────────────────────────────────────────────────
@@ -51,11 +51,11 @@ pub struct SscCard {
     slot: usize,
 
     // 6551 ACIA registers
-    rx_data: u8,   // RS0 read  — last received byte
-    tx_data: u8,   // RS0 write — last transmitted byte
-    status:  u8,   // RS1 read  — status register
-    command: u8,   // RS2 r/w   — command register
-    control: u8,   // RS3 r/w   — control register
+    rx_data: u8, // RS0 read  — last received byte
+    tx_data: u8, // RS0 write — last transmitted byte
+    status: u8,  // RS1 read  — status register
+    command: u8, // RS2 r/w   — command register
+    control: u8, // RS3 r/w   — control register
 
     // Rx FIFO — bytes waiting to be consumed by the Apple II
     rx_buf: VecDeque<u8>,
@@ -76,13 +76,13 @@ impl SscCard {
             slot,
             rx_data: 0,
             tx_data: 0,
-            status:  STATUS_TDRE, // TDRE always set initially; DSR/DCD inactive
-            command: 0x02,        // DTR=0, Tx IRQ disabled
+            status: STATUS_TDRE, // TDRE always set initially; DSR/DCD inactive
+            command: 0x02,       // DTR=0, Tx IRQ disabled
             control: 0x00,
-            rx_buf:  VecDeque::new(),
+            rx_buf: VecDeque::new(),
             tx_buffer: VecDeque::new(),
-            rom:     make_ssc_rom(),
-            irq:     false,
+            rom: make_ssc_rom(),
+            irq: false,
         }
     }
 
@@ -118,8 +118,12 @@ impl SscCard {
 // ── Card trait ─────────────────────────────────────────────────────────────────
 
 impl Card for SscCard {
-    fn card_type(&self) -> CardType { CardType::Ssc }
-    fn slot(&self) -> usize { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::Ssc
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
     // ── $Cnxx ROM reads ──────────────────────────────────────────────────────
 
@@ -220,7 +224,7 @@ impl Card for SscCard {
     fn reset(&mut self, _power_cycle: bool) {
         self.rx_data = 0;
         self.tx_data = 0;
-        self.status  = STATUS_TDRE;
+        self.status = STATUS_TDRE;
         self.command = 0x02;
         self.control = 0x00;
         self.rx_buf.clear();
@@ -237,7 +241,7 @@ impl Card for SscCard {
     fn save_state(&self, out: &mut dyn Write) -> Result<()> {
         // Version byte, then registers and IRQ flag.
         out.write_all(&[
-            1u8,            // version
+            1u8, // version
             self.rx_data,
             self.tx_data,
             self.status,
@@ -254,14 +258,16 @@ impl Card for SscCard {
         // buf[0] is the inner version byte written by save_state.
         self.rx_data = buf[1];
         self.tx_data = buf[2];
-        self.status  = buf[3];
+        self.status = buf[3];
         self.command = buf[4];
         self.control = buf[5];
-        self.irq     = buf[6] != 0;
+        self.irq = buf[6] != 0;
         Ok(())
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -290,13 +296,21 @@ mod tests {
         card.push_rx_byte(0x55);
         // Status should have RDRF set
         let status = card.slot_io_read(0x09, 0);
-        assert_ne!(status & STATUS_RDRF, 0, "RDRF should be set after push_rx_byte");
+        assert_ne!(
+            status & STATUS_RDRF,
+            0,
+            "RDRF should be set after push_rx_byte"
+        );
         // Read data register — should return 0x55 and clear RDRF
         let data = card.slot_io_read(0x08, 0);
         assert_eq!(data, 0x55);
         // Now status should have RDRF cleared (no more bytes)
         let status2 = card.slot_io_read(0x09, 0);
-        assert_eq!(status2 & STATUS_RDRF, 0, "RDRF should be cleared after reading data");
+        assert_eq!(
+            status2 & STATUS_RDRF,
+            0,
+            "RDRF should be cleared after reading data"
+        );
     }
 
     #[test]
@@ -316,7 +330,10 @@ mod tests {
         // Command: DTR=1, Rx IRQ enabled (bit1=0)
         card.command = 0x01;
         card.push_rx_byte(0x42);
-        assert!(card.irq_active(), "IRQ should fire when Rx IRQ enabled and data arrives");
+        assert!(
+            card.irq_active(),
+            "IRQ should fire when Rx IRQ enabled and data arrives"
+        );
     }
 
     #[test]
@@ -325,7 +342,10 @@ mod tests {
         // Command: DTR=1, Rx IRQ disabled (bit1=1)
         card.command = 0x03;
         card.push_rx_byte(0x42);
-        assert!(!card.irq_active(), "IRQ should not fire when Rx IRQ disabled");
+        assert!(
+            !card.irq_active(),
+            "IRQ should not fire when Rx IRQ disabled"
+        );
     }
 
     #[test]
@@ -334,7 +354,10 @@ mod tests {
         card.push_rx_byte(0xAA);
         card.push_rx_byte(0xBB); // overrun
         card.slot_io_write(0x09, 0x00, 0); // programmed reset
-        assert_eq!(card.status, STATUS_TDRE, "Status should be reset to TDRE only");
+        assert_eq!(
+            card.status, STATUS_TDRE,
+            "Status should be reset to TDRE only"
+        );
         assert!(!card.irq, "IRQ should be cleared");
     }
 

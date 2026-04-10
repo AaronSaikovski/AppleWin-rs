@@ -9,61 +9,59 @@
 //! - Weak/flux bit randomization for copy-protected disks
 //! - Quarter-track positioning via TMAP
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType, DriveActivity};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const NUM_TRACKS:           usize = 35;
-const SECTORS_PER_TRACK:    usize = 16;
-const SECTOR_SIZE:          usize = 256;
-const DSK_SIZE:             usize = NUM_TRACKS * SECTORS_PER_TRACK * SECTOR_SIZE; // 143 360
-const NIB_TRACK_SIZE:       usize = 6656;
-const NIB_SIZE:             usize = NUM_TRACKS * NIB_TRACK_SIZE;                  // 232 960
-const NB2_TRACK_SIZE:       usize = 6384;
-const NB2_SIZE:             usize = NUM_TRACKS * NB2_TRACK_SIZE;                  // 223 440
+const NUM_TRACKS: usize = 35;
+const SECTORS_PER_TRACK: usize = 16;
+const SECTOR_SIZE: usize = 256;
+const DSK_SIZE: usize = NUM_TRACKS * SECTORS_PER_TRACK * SECTOR_SIZE; // 143 360
+const NIB_TRACK_SIZE: usize = 6656;
+const NIB_SIZE: usize = NUM_TRACKS * NIB_TRACK_SIZE; // 232 960
+const NB2_TRACK_SIZE: usize = 6384;
+const NB2_SIZE: usize = NUM_TRACKS * NB2_TRACK_SIZE; // 223 440
 
 // 13-sector (DOS 3.2) constants
 const SECTORS_PER_TRACK_13: usize = 13;
-const D13_SIZE:             usize = NUM_TRACKS * SECTORS_PER_TRACK_13 * SECTOR_SIZE; // 116 480
+const D13_SIZE: usize = NUM_TRACKS * SECTORS_PER_TRACK_13 * SECTOR_SIZE; // 116 480
 
 /// DOS 3.3 physical→logical sector skew (ms_SectorNumber[1] from DiskImageHelper.cpp).
 const DOS33_SKEW: [u8; 16] = [
-    0x00, 0x07, 0x0E, 0x06, 0x0D, 0x05, 0x0C, 0x04,
-    0x0B, 0x03, 0x0A, 0x02, 0x09, 0x01, 0x08, 0x0F,
+    0x00, 0x07, 0x0E, 0x06, 0x0D, 0x05, 0x0C, 0x04, 0x0B, 0x03, 0x0A, 0x02, 0x09, 0x01, 0x08, 0x0F,
 ];
 
 /// ProDOS physical→logical sector skew (ms_SectorNumber[0] from DiskImageHelper.cpp).
 const PRODOS_SKEW: [u8; 16] = [
-    0x00, 0x08, 0x01, 0x09, 0x02, 0x0A, 0x03, 0x0B,
-    0x04, 0x0C, 0x05, 0x0D, 0x06, 0x0E, 0x07, 0x0F,
+    0x00, 0x08, 0x01, 0x09, 0x02, 0x0A, 0x03, 0x0B, 0x04, 0x0C, 0x05, 0x0D, 0x06, 0x0E, 0x07, 0x0F,
 ];
 
 /// 6+2 GCR translation table: 6-bit index → valid disk byte (ms_DiskByte[] in DiskImageHelper.cpp).
 const DISK_BYTE: [u8; 64] = [
-    0x96, 0x97, 0x9A, 0x9B, 0x9D, 0x9E, 0x9F, 0xA6,
-    0xA7, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB2, 0xB3,
-    0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBA, 0xBB, 0xBC,
-    0xBD, 0xBE, 0xBF, 0xCB, 0xCD, 0xCE, 0xCF, 0xD3,
-    0xD6, 0xD7, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE,
-    0xDF, 0xE5, 0xE6, 0xE7, 0xE9, 0xEA, 0xEB, 0xEC,
-    0xED, 0xEE, 0xEF, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6,
-    0xF7, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+    0x96, 0x97, 0x9A, 0x9B, 0x9D, 0x9E, 0x9F, 0xA6, 0xA7, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB2, 0xB3,
+    0xB4, 0xB5, 0xB6, 0xB7, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xCB, 0xCD, 0xCE, 0xCF, 0xD3,
+    0xD6, 0xD7, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xE5, 0xE6, 0xE7, 0xE9, 0xEA, 0xEB, 0xEC,
+    0xED, 0xEE, 0xEF, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
 ];
 
 /// 5+3 GCR translation table: 5-bit index (0–31) → valid disk byte for 13-sector format.
 const TRANS_5_3: [u8; 32] = [
-    0xAB, 0xAD, 0xAE, 0xAF, 0xB5, 0xB6, 0xB7, 0xBA,
-    0xBB, 0xBD, 0xBE, 0xBF, 0xD6, 0xD7, 0xDA, 0xDB,
-    0xDD, 0xDE, 0xDF, 0xEA, 0xEB, 0xED, 0xEE, 0xEF,
-    0xF5, 0xF6, 0xF7, 0xFA, 0xFB, 0xFD, 0xFE, 0xFF,
+    0xAB, 0xAD, 0xAE, 0xAF, 0xB5, 0xB6, 0xB7, 0xBA, 0xBB, 0xBD, 0xBE, 0xBF, 0xD6, 0xD7, 0xDA, 0xDB,
+    0xDD, 0xDE, 0xDF, 0xEA, 0xEB, 0xED, 0xEE, 0xEF, 0xF5, 0xF6, 0xF7, 0xFA, 0xFB, 0xFD, 0xFE, 0xFF,
 ];
 
 // ── DiskFormat ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DiskFormat { Dos33, ProDos, Nib, Woz, Dos32 }
+enum DiskFormat {
+    Dos33,
+    ProDos,
+    Nib,
+    Woz,
+    Dos32,
+}
 
 // ── WOZ bit-level structures ─────────────────────────────────────────────────
 
@@ -85,13 +83,17 @@ impl WozTrack {
     /// Read a single bit at position `pos`.  If it's a weak bit, randomize it.
     #[inline]
     fn read_bit(&self, pos: u32, rng: &mut SimpleRng) -> u8 {
-        if pos >= self.bit_count { return 0; }
+        if pos >= self.bit_count {
+            return 0;
+        }
         let byte_idx = (pos / 8) as usize;
         let bit_idx = 7 - (pos % 8);
 
         // Check if this is a weak bit
-        if self.has_weak_bits && byte_idx < self.weak_mask.len()
-            && (self.weak_mask[byte_idx] >> bit_idx) & 1 != 0 {
+        if self.has_weak_bits
+            && byte_idx < self.weak_mask.len()
+            && (self.weak_mask[byte_idx] >> bit_idx) & 1 != 0
+        {
             return rng.next_bit();
         }
 
@@ -101,7 +103,9 @@ impl WozTrack {
     /// Write a single bit at position `pos`.
     #[inline]
     fn write_bit(&mut self, pos: u32, val: u8) {
-        if pos >= self.bit_count { return; }
+        if pos >= self.bit_count {
+            return;
+        }
         let byte_idx = (pos / 8) as usize;
         let bit_idx = 7 - (pos % 8);
         if val != 0 {
@@ -138,17 +142,25 @@ struct WozImage {
 impl WozImage {
     /// Look up the WozTrack for a given quarter-track index (0–159).
     fn track_for_quarter(&self, qt: usize) -> Option<&WozTrack> {
-        if qt >= 160 { return None; }
+        if qt >= 160 {
+            return None;
+        }
         let idx = self.tmap[qt];
-        if idx == 0xFF { return None; }
+        if idx == 0xFF {
+            return None;
+        }
         self.tracks.get(idx as usize)?.as_ref()
     }
 
     /// Mutable track lookup for a given quarter-track.
     fn track_for_quarter_mut(&mut self, qt: usize) -> Option<&mut WozTrack> {
-        if qt >= 160 { return None; }
+        if qt >= 160 {
+            return None;
+        }
         let idx = self.tmap[qt];
-        if idx == 0xFF { return None; }
+        if idx == 0xFF {
+            return None;
+        }
         self.tracks.get_mut(idx as usize)?.as_mut()
     }
 }
@@ -162,7 +174,9 @@ struct SimpleRng {
 
 impl SimpleRng {
     fn new(seed: u32) -> Self {
-        Self { state: if seed == 0 { 0xDEAD_BEEF } else { seed } }
+        Self {
+            state: if seed == 0 { 0xDEAD_BEEF } else { seed },
+        }
     }
 
     #[inline]
@@ -208,29 +222,28 @@ const CYCLES_PER_BIT: u64 = 4;
 struct Drive {
     /// Pre-nibblized track data: 35 entries, each a GCR byte stream.
     /// Used for non-WOZ formats (DSK, PO, NIB, D13).
-    tracks:          Vec<Vec<u8>>,
+    tracks: Vec<Vec<u8>>,
     /// Head position in quarter-tracks (0–159 for WOZ, 0–79 for nibble formats).
-    phase:           i32,
+    phase: i32,
     /// Cached integer track index (= phase / 2, clamped to 0..NUM_TRACKS-1).
     /// Used only for non-WOZ formats.
     current_track_idx: usize,
     /// Current byte offset within the current track buffer (nibble mode).
-    byte_pos:        usize,
+    byte_pos: usize,
     /// Whether a disk image is loaded.
-    loaded:          bool,
+    loaded: bool,
     /// Original raw image data (for write-back flush).
-    raw:             Vec<u8>,
+    raw: Vec<u8>,
     /// Whether any write has been made to this drive since last flush.
-    dirty:           bool,
+    dirty: bool,
     /// The disk image format (for write-back and WOZ).
-    format:          DiskFormat,
+    format: DiskFormat,
     /// Path to the image file on disk (for write-back).
-    path:            Option<std::path::PathBuf>,
+    path: Option<std::path::PathBuf>,
     /// Whether this drive is write-protected.
     write_protected: bool,
 
     // ── WOZ bit-level fields ──────────────────────────────────────────────
-
     /// Parsed WOZ image data (None for non-WOZ formats).
     woz: Option<WozImage>,
     /// Current bit position within the current WOZ track.
@@ -248,22 +261,22 @@ struct Drive {
 impl Drive {
     fn new() -> Self {
         Drive {
-            tracks:            Vec::new(),
-            phase:             0,
+            tracks: Vec::new(),
+            phase: 0,
             current_track_idx: 0,
-            byte_pos:          0,
-            loaded:            false,
-            raw:             Vec::new(),
-            dirty:           false,
-            format:          DiskFormat::Dos33,
-            path:            None,
+            byte_pos: 0,
+            loaded: false,
+            raw: Vec::new(),
+            dirty: false,
+            format: DiskFormat::Dos33,
+            path: None,
             write_protected: false,
-            woz:             None,
-            bit_pos:         0,
-            shift_reg:       0,
-            zero_count:      0,
-            last_cycle:      0,
-            rng:             SimpleRng::new(0xCAFE_BABE),
+            woz: None,
+            bit_pos: 0,
+            shift_reg: 0,
+            zero_count: 0,
+            last_cycle: 0,
+            rng: SimpleRng::new(0xCAFE_BABE),
         }
     }
 
@@ -289,20 +302,30 @@ impl Drive {
 
     /// Return the next nibble and advance the byte pointer (nibble mode).
     fn read_nibble_legacy(&mut self) -> u8 {
-        if !self.loaded { return 0xFF; }
+        if !self.loaded {
+            return 0xFF;
+        }
         let buf = &self.tracks[self.current_track_idx];
-        if buf.is_empty() { return 0xFF; }
+        if buf.is_empty() {
+            return 0xFF;
+        }
         let n = buf[self.byte_pos];
         self.byte_pos = (self.byte_pos + 1) % buf.len();
         n
     }
 
     fn write_nibble_legacy(&mut self, byte: u8) {
-        if self.write_protected || !self.loaded { return; }
+        if self.write_protected || !self.loaded {
+            return;
+        }
         let t = self.current_track_idx;
-        if t >= self.tracks.len() { return; }
+        if t >= self.tracks.len() {
+            return;
+        }
         let buf = &mut self.tracks[t];
-        if buf.is_empty() { return; }
+        if buf.is_empty() {
+            return;
+        }
         if self.byte_pos < buf.len() {
             buf[self.byte_pos] = byte;
         }
@@ -315,7 +338,9 @@ impl Drive {
     /// Advance the bit position by the number of bits that have elapsed since
     /// `last_cycle`, based on CPU cycle count.  Returns number of bits advanced.
     fn advance_bits(&mut self, cycles: u64) -> u32 {
-        if cycles <= self.last_cycle { return 0; }
+        if cycles <= self.last_cycle {
+            return 0;
+        }
         let elapsed = cycles - self.last_cycle;
         let bits = (elapsed / CYCLES_PER_BIT) as u32;
         self.last_cycle = cycles;
@@ -328,7 +353,9 @@ impl Drive {
         let woz = self.woz.as_ref().unwrap();
         if let Some(track) = woz.track_for_quarter(qt) {
             let bit_count = track.bit_count;
-            if bit_count == 0 { return 0; }
+            if bit_count == 0 {
+                return 0;
+            }
             let pos = self.bit_pos % bit_count;
             let bit = track.read_bit(pos, &mut self.rng);
             self.bit_pos = (pos + 1) % bit_count;
@@ -374,7 +401,9 @@ impl Drive {
         let woz = self.woz.as_mut().unwrap();
         if let Some(track) = woz.track_for_quarter_mut(qt) {
             let bit_count = track.bit_count;
-            if bit_count == 0 { return; }
+            if bit_count == 0 {
+                return;
+            }
             let pos = self.bit_pos % bit_count;
             track.write_bit(pos, val);
             self.bit_pos = (pos + 1) % bit_count;
@@ -384,7 +413,9 @@ impl Drive {
 
     /// Write a full nibble (8 bits, MSB first) to the current WOZ track.
     fn woz_write_nibble(&mut self, byte: u8, cycles: u64) {
-        if self.write_protected { return; }
+        if self.write_protected {
+            return;
+        }
 
         // Advance position based on elapsed cycles
         let bits_elapsed = self.advance_bits(cycles);
@@ -428,9 +459,13 @@ impl Drive {
     }
 
     fn flush(&mut self) {
-        if !self.dirty { return; }
+        if !self.dirty {
+            return;
+        }
         self.dirty = false;
-        let Some(ref path) = self.path else { return; };
+        let Some(ref path) = self.path else {
+            return;
+        };
         match self.format {
             DiskFormat::Nib => {
                 // For NIB: reassemble the flat nibble image from tracks
@@ -445,9 +480,16 @@ impl Drive {
             DiskFormat::Dos33 => {
                 let skew = &DOS33_SKEW;
                 let mut raw = std::mem::take(&mut self.raw);
-                if raw.len() < DSK_SIZE { raw.resize(DSK_SIZE, 0); }
+                if raw.len() < DSK_SIZE {
+                    raw.resize(DSK_SIZE, 0);
+                }
                 for t in 0..NUM_TRACKS {
-                    denibblize_track(&self.tracks[t], t as u8, skew, &mut raw[t * SECTORS_PER_TRACK * SECTOR_SIZE..]);
+                    denibblize_track(
+                        &self.tracks[t],
+                        t as u8,
+                        skew,
+                        &mut raw[t * SECTORS_PER_TRACK * SECTOR_SIZE..],
+                    );
                 }
                 let _ = std::fs::write(path, &raw);
                 self.raw = raw;
@@ -455,9 +497,16 @@ impl Drive {
             DiskFormat::ProDos => {
                 let skew = &PRODOS_SKEW;
                 let mut raw = std::mem::take(&mut self.raw);
-                if raw.len() < DSK_SIZE { raw.resize(DSK_SIZE, 0); }
+                if raw.len() < DSK_SIZE {
+                    raw.resize(DSK_SIZE, 0);
+                }
                 for t in 0..NUM_TRACKS {
-                    denibblize_track(&self.tracks[t], t as u8, skew, &mut raw[t * SECTORS_PER_TRACK * SECTOR_SIZE..]);
+                    denibblize_track(
+                        &self.tracks[t],
+                        t as u8,
+                        skew,
+                        &mut raw[t * SECTORS_PER_TRACK * SECTOR_SIZE..],
+                    );
                 }
                 let _ = std::fs::write(path, &raw);
                 self.raw = raw;
@@ -476,26 +525,26 @@ impl Drive {
 // ── Disk2Card ─────────────────────────────────────────────────────────────────
 
 pub struct Disk2Card {
-    slot:         usize,
-    drives:       [Drive; 2],
+    slot: usize,
+    drives: [Drive; 2],
     active_drive: usize,
-    motor_on:     bool,
-    write_mode:   bool,
-    latch:        u8,
+    motor_on: bool,
+    write_mode: bool,
+    latch: u8,
     /// Stepper magnet states, bits 0–3 = phases 0–3.
-    phases:       u8,
+    phases: u8,
 }
 
 impl Disk2Card {
     pub fn new(slot: usize) -> Self {
         Self {
             slot,
-            drives:       [Drive::new(), Drive::new()],
+            drives: [Drive::new(), Drive::new()],
             active_drive: 0,
-            motor_on:     false,
-            write_mode:   false,
-            latch:        0xFF,
-            phases:       0,
+            motor_on: false,
+            write_mode: false,
+            latch: 0xFF,
+            phases: 0,
         }
     }
 
@@ -514,38 +563,44 @@ impl Disk2Card {
     /// position and shift register, and the controller reads one bit per
     /// ~4 CPU cycles.  Non-WOZ images continue to use nibble-level mode.
     pub fn load_drive(&mut self, drive: usize, data: &[u8], ext: &str) -> bool {
-        if drive >= 2 { return false; }
+        if drive >= 2 {
+            return false;
+        }
 
         // Auto-detect WOZ by magic bytes, regardless of extension
         let is_woz_magic = data.len() >= 8
             && (data.starts_with(b"WOZ1\xff\x0a\x0d\x0a")
-             || data.starts_with(b"WOZ2\xff\x0a\x0d\x0a"));
+                || data.starts_with(b"WOZ2\xff\x0a\x0d\x0a"));
 
         if ext == "woz" || is_woz_magic {
             // Load as WOZ bit-level image
             if let Some(woz) = parse_woz(data) {
                 let wp = woz.write_protected;
                 let d = &mut self.drives[drive];
-                d.woz               = Some(woz);
-                d.tracks            = Vec::new(); // not used in WOZ mode
-                d.loaded            = true;
-                d.byte_pos          = 0;
-                d.bit_pos           = 0;
-                d.shift_reg         = 0;
-                d.zero_count        = 0;
-                d.phase             = 0;
+                d.woz = Some(woz);
+                d.tracks = Vec::new(); // not used in WOZ mode
+                d.loaded = true;
+                d.byte_pos = 0;
+                d.bit_pos = 0;
+                d.shift_reg = 0;
+                d.zero_count = 0;
+                d.phase = 0;
                 d.current_track_idx = 0;
-                d.dirty             = false;
-                d.format            = DiskFormat::Woz;
-                d.raw               = data.to_vec();
-                d.write_protected   = wp;
+                d.dirty = false;
+                d.format = DiskFormat::Woz;
+                d.raw = data.to_vec();
+                d.write_protected = wp;
                 return true;
             }
             return false;
         }
 
         let (format, tracks, write_protected) = match ext {
-            "po" => (DiskFormat::ProDos, nibblize_image(data, &PRODOS_SKEW), false),
+            "po" => (
+                DiskFormat::ProDos,
+                nibblize_image(data, &PRODOS_SKEW),
+                false,
+            ),
             "nib" => (DiskFormat::Nib, load_nib(data), false),
             "nb2" => (DiskFormat::Nib, load_nib_sized(data, NB2_TRACK_SIZE), false),
             "d13" => (DiskFormat::Dos32, nibblize_image_13(data), false),
@@ -563,16 +618,16 @@ impl Disk2Card {
         };
         if let Some(t) = tracks {
             let d = &mut self.drives[drive];
-            d.woz               = None; // ensure not in WOZ mode
-            d.tracks            = t;
-            d.loaded            = true;
-            d.byte_pos          = 0;
-            d.phase             = 0;
+            d.woz = None; // ensure not in WOZ mode
+            d.tracks = t;
+            d.loaded = true;
+            d.byte_pos = 0;
+            d.phase = 0;
             d.current_track_idx = 0;
-            d.dirty             = false;
-            d.format            = format;
-            d.raw               = data.to_vec();
-            d.write_protected   = write_protected;
+            d.dirty = false;
+            d.format = format;
+            d.raw = data.to_vec();
+            d.write_protected = write_protected;
             true
         } else {
             false
@@ -598,7 +653,7 @@ impl Disk2Card {
 
     /// Update the stepper motor phases and move the head if needed.
     fn step_phase(&mut self, reg: u8) {
-        let phase     = (reg >> 1) & 3;
+        let phase = (reg >> 1) & 3;
         let phase_bit = 1u8 << phase;
 
         if reg & 1 != 0 {
@@ -608,20 +663,32 @@ impl Disk2Card {
         }
 
         let drive = &mut self.drives[self.active_drive];
-        let cur   = drive.phase;
+        let cur = drive.phase;
         // Mirror C++ ControlStepperDeferred: additive, same as C++.
         // When both adjacent phases are active, +1 and -1 cancel → no movement.
         // This matches the Apple II hardware and avoids overshooting during RWTS seeks.
-        let fwd = if self.phases & (1 << ((cur + 1) & 3)) != 0 {  1i32 } else { 0 };
-        let bwd = if self.phases & (1 << ((cur + 3) & 3)) != 0 { -1i32 } else { 0 };
+        let fwd = if self.phases & (1 << ((cur + 1) & 3)) != 0 {
+            1i32
+        } else {
+            0
+        };
+        let bwd = if self.phases & (1 << ((cur + 3) & 3)) != 0 {
+            -1i32
+        } else {
+            0
+        };
         drive.phase = (cur + fwd + bwd).clamp(0, 79);
         drive.update_track_idx();
     }
 }
 
 impl Card for Disk2Card {
-    fn card_type(&self) -> CardType { CardType::Disk2 }
-    fn slot(&self)       -> usize   { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::Disk2
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
     fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
         DISK2_FW[offset as usize]
@@ -629,11 +696,16 @@ impl Card for Disk2Card {
 
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
-    fn cx_rom(&self) -> Option<&[u8; 256]> { Some(DISK2_FW) }
+    fn cx_rom(&self) -> Option<&[u8; 256]> {
+        Some(DISK2_FW)
+    }
 
     fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
         match reg {
-            0x00..=0x07 => { self.step_phase(reg); self.latch }
+            0x00..=0x07 => {
+                self.step_phase(reg);
+                self.latch
+            }
             0x08 => {
                 if self.motor_on {
                     self.drives[self.active_drive].flush();
@@ -641,9 +713,18 @@ impl Card for Disk2Card {
                 self.motor_on = false;
                 self.latch
             }
-            0x09 => { self.motor_on = true;  self.latch }
-            0x0A => { self.active_drive = 0; self.latch }
-            0x0B => { self.active_drive = 1; self.latch }
+            0x09 => {
+                self.motor_on = true;
+                self.latch
+            }
+            0x0A => {
+                self.active_drive = 0;
+                self.latch
+            }
+            0x0B => {
+                self.active_drive = 1;
+                self.latch
+            }
             0x0C => {
                 if self.write_mode && self.motor_on {
                     self.drives[self.active_drive].write_nibble(self.latch, cycles);
@@ -658,11 +739,21 @@ impl Card for Disk2Card {
                 self.latch
             }
             0x0D => {
-                if self.drives[self.active_drive].write_protected { 0x80 } else { 0x00 }
+                if self.drives[self.active_drive].write_protected {
+                    0x80
+                } else {
+                    0x00
+                }
             }
-            0x0E => { self.write_mode = false; self.latch }
-            0x0F => { self.write_mode = true;  self.latch }
-            _    => self.latch,
+            0x0E => {
+                self.write_mode = false;
+                self.latch
+            }
+            0x0F => {
+                self.write_mode = true;
+                self.latch
+            }
+            _ => self.latch,
         }
     }
 
@@ -675,9 +766,15 @@ impl Card for Disk2Card {
                 }
                 self.motor_on = false;
             }
-            0x09 => { self.motor_on = true; }
-            0x0A => { self.active_drive = 0; }
-            0x0B => { self.active_drive = 1; }
+            0x09 => {
+                self.motor_on = true;
+            }
+            0x0A => {
+                self.active_drive = 0;
+            }
+            0x0B => {
+                self.active_drive = 1;
+            }
             0x0C => {
                 // Q6L write: load latch (data to write on next strobe)
                 if self.write_mode && self.motor_on {
@@ -685,38 +782,67 @@ impl Card for Disk2Card {
                     self.drives[self.active_drive].write_nibble(value, cycles);
                 }
             }
-            0x0D => { self.latch = value; }        // Q6H: load data register
-            0x0E => { self.write_mode = false; }   // Q7L: read mode
-            0x0F => { self.write_mode = true; }    // Q7H: write mode
-            _    => {}
+            0x0D => {
+                self.latch = value;
+            } // Q6H: load data register
+            0x0E => {
+                self.write_mode = false;
+            } // Q7L: read mode
+            0x0F => {
+                self.write_mode = true;
+            } // Q7H: write mode
+            _ => {}
         }
     }
 
     fn reset(&mut self, _power_cycle: bool) {
-        self.motor_on     = false;
-        self.write_mode   = false;
-        self.latch        = 0xFF;
-        self.phases       = 0;
+        self.motor_on = false;
+        self.write_mode = false;
+        self.latch = 0xFF;
+        self.phases = 0;
         self.active_drive = 0;
-        for d in &mut self.drives { d.byte_pos = 0; }
+        for d in &mut self.drives {
+            d.byte_pos = 0;
+        }
     }
 
     fn update(&mut self, _cycles: u64) {}
 
-    fn save_state(&self, _out: &mut dyn Write) -> Result<()> { Ok(()) }
-    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
+    fn save_state(&self, _out: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> {
+        Ok(())
+    }
 
-    fn disk_motor_on(&self) -> bool { self.motor_on }
+    fn disk_motor_on(&self) -> bool {
+        self.motor_on
+    }
 
     fn disk_drive_activity(&self, drive: usize) -> DriveActivity {
-        if drive < 2 && self.motor_on && self.active_drive == drive {
-            DriveActivity { motor_on: true, writing: self.write_mode }
+        if drive < 2 {
+            let track = self.drives[drive].phase / 2;
+            if self.motor_on && self.active_drive == drive {
+                DriveActivity {
+                    motor_on: true,
+                    writing: self.write_mode,
+                    track,
+                }
+            } else {
+                DriveActivity {
+                    motor_on: false,
+                    writing: false,
+                    track,
+                }
+            }
         } else {
             DriveActivity::default()
         }
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ── GCR Nibblization ──────────────────────────────────────────────────────────
@@ -728,7 +854,9 @@ fn load_nib(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// Load a nibble image with a configurable track size (6656 for .nib, 6384 for .nb2).
 fn load_nib_sized(data: &[u8], track_size: usize) -> Option<Vec<Vec<u8>>> {
     let expected = NUM_TRACKS * track_size;
-    if data.len() < expected { return None; }
+    if data.len() < expected {
+        return None;
+    }
     let mut tracks = Vec::with_capacity(NUM_TRACKS);
     for t in 0..NUM_TRACKS {
         let start = t * track_size;
@@ -738,7 +866,9 @@ fn load_nib_sized(data: &[u8], track_size: usize) -> Option<Vec<Vec<u8>>> {
 }
 
 fn nibblize_image(data: &[u8], skew: &[u8; 16]) -> Option<Vec<Vec<u8>>> {
-    if data.len() < DSK_SIZE { return None; }
+    if data.len() < DSK_SIZE {
+        return None;
+    }
     let mut tracks = Vec::with_capacity(NUM_TRACKS);
     for t in 0..NUM_TRACKS {
         let base = t * SECTORS_PER_TRACK * SECTOR_SIZE;
@@ -753,8 +883,8 @@ fn nibblize_track(track_data: &[u8], track_num: u8, skew: &[u8; 16]) -> Vec<u8> 
     nibs.resize(48, 0xFF);
 
     for phys in 0u8..16 {
-        let log     = skew[phys as usize] as usize;
-        let off     = log * SECTOR_SIZE;
+        let log = skew[phys as usize] as usize;
+        let off = log * SECTOR_SIZE;
         let sector: [u8; 256] = track_data[off..off + SECTOR_SIZE]
             .try_into()
             .unwrap_or([0u8; 256]);
@@ -782,11 +912,16 @@ fn nibblize_track(track_data: &[u8], track_num: u8, skew: &[u8; 16]) -> Vec<u8> 
 }
 
 fn nibblize_image_13(data: &[u8]) -> Option<Vec<Vec<u8>>> {
-    if data.len() < D13_SIZE { return None; }
+    if data.len() < D13_SIZE {
+        return None;
+    }
     let mut tracks = Vec::with_capacity(NUM_TRACKS);
     for t in 0..NUM_TRACKS {
         let base = t * SECTORS_PER_TRACK_13 * SECTOR_SIZE;
-        tracks.push(nibblize_track_13(&data[base..base + SECTORS_PER_TRACK_13 * SECTOR_SIZE], t as u8));
+        tracks.push(nibblize_track_13(
+            &data[base..base + SECTORS_PER_TRACK_13 * SECTOR_SIZE],
+            t as u8,
+        ));
     }
     Some(tracks)
 }
@@ -812,10 +947,10 @@ fn nibblize_track_13(track_data: &[u8], track_num: u8) -> Vec<u8> {
 
         // Address field: prologue D5 AA B5
         nibs.extend_from_slice(&[0xD5, 0xAA, 0xB5]);
-        nibs.extend_from_slice(&[code44a(vol),       code44b(vol)]);
+        nibs.extend_from_slice(&[code44a(vol), code44b(vol)]);
         nibs.extend_from_slice(&[code44a(track_num), code44b(track_num)]);
-        nibs.extend_from_slice(&[code44a(phys),      code44b(phys)]);
-        nibs.extend_from_slice(&[code44a(chk),       code44b(chk)]);
+        nibs.extend_from_slice(&[code44a(phys), code44b(phys)]);
+        nibs.extend_from_slice(&[code44a(chk), code44b(chk)]);
         nibs.extend_from_slice(&[0xDE, 0xAA, 0xEB]);
 
         // Self-sync gap between address and data fields
@@ -872,8 +1007,14 @@ fn code53(sector: &[u8; 256]) -> ([u8; 342], u8) {
     (out, checksum)
 }
 
-#[inline] fn code44a(a: u8) -> u8 { ((a >> 1) & 0x55) | 0xAA }
-#[inline] fn code44b(a: u8) -> u8 { (a & 0x55) | 0xAA }
+#[inline]
+fn code44a(a: u8) -> u8 {
+    ((a >> 1) & 0x55) | 0xAA
+}
+#[inline]
+fn code44b(a: u8) -> u8 {
+    (a & 0x55) | 0xAA
+}
 
 fn code62(sector: &[u8; 256]) -> [u8; 343] {
     let mut raw = [0u8; 342];
@@ -881,9 +1022,12 @@ fn code62(sector: &[u8; 256]) -> [u8; 343] {
     let mut ri = 0usize;
 
     while offset != 0x02 {
-        let a = sector[offset as usize]; offset = offset.wrapping_sub(0x56);
-        let b = sector[offset as usize]; offset = offset.wrapping_sub(0x56);
-        let c = sector[offset as usize]; offset = offset.wrapping_sub(0x53);
+        let a = sector[offset as usize];
+        offset = offset.wrapping_sub(0x56);
+        let b = sector[offset as usize];
+        offset = offset.wrapping_sub(0x56);
+        let c = sector[offset as usize];
+        offset = offset.wrapping_sub(0x53);
 
         let ra = (a & 1) << 1 | (a & 2) >> 1;
         let rb = (b & 1) << 1 | (b & 2) >> 1;
@@ -935,7 +1079,9 @@ fn decode62(gcr: &[u8; 343], inv: &[u8; 256]) -> Option<[u8; 256]> {
     let mut vals = [0u8; 343];
     for i in 0..343 {
         let v = inv[gcr[i] as usize];
-        if v == 0xFF { return None; }
+        if v == 0xFF {
+            return None;
+        }
         vals[i] = v << 2;
     }
 
@@ -946,7 +1092,9 @@ fn decode62(gcr: &[u8; 343], inv: &[u8; 256]) -> Option<[u8; 256]> {
         raw[i] = vals[i] ^ raw[i - 1];
     }
     // vals[342] is the checksum = raw[341]
-    if vals[342] != raw[341] { return None; }
+    if vals[342] != raw[341] {
+        return None;
+    }
 
     // Step 3: primary bytes are raw[86..342] (top 6 bits of each sector byte, in bits 7:2)
     let mut sector = [0u8; 256];
@@ -971,13 +1119,22 @@ fn decode62(gcr: &[u8; 343], inv: &[u8; 256]) -> Option<[u8; 256]> {
         let b_bits = ((rb & 1) << 1) | ((rb >> 1) & 1);
         let c_bits = ((rc & 1) << 1) | ((rc >> 1) & 1);
 
-        let oa = offset as usize; offset = offset.wrapping_sub(0x56);
-        let ob = offset as usize; offset = offset.wrapping_sub(0x56);
-        let oc = offset as usize; offset = offset.wrapping_sub(0x53);
+        let oa = offset as usize;
+        offset = offset.wrapping_sub(0x56);
+        let ob = offset as usize;
+        offset = offset.wrapping_sub(0x56);
+        let oc = offset as usize;
+        offset = offset.wrapping_sub(0x53);
 
-        if oa < 256 { sector[oa] |= a_bits; }
-        if ob < 256 { sector[ob] |= b_bits; }
-        if oc < 256 { sector[oc] |= c_bits; }
+        if oa < 256 {
+            sector[oa] |= a_bits;
+        }
+        if ob < 256 {
+            sector[ob] |= b_bits;
+        }
+        if oc < 256 {
+            sector[oc] |= c_bits;
+        }
     }
 
     Some(sector)
@@ -988,7 +1145,9 @@ fn decode62(gcr: &[u8; 343], inv: &[u8; 256]) -> Option<[u8; 256]> {
 fn denibblize_track(nibs: &[u8], track_num: u8, skew: &[u8; 16], out: &mut [u8]) {
     let inv = disk_byte_inv();
     let n = nibs.len();
-    if n < 10 { return; }
+    if n < 10 {
+        return;
+    }
 
     // Build a doubled buffer so we can scan across the wrap-around
     let mut buf = nibs.to_vec();
@@ -1002,14 +1161,22 @@ fn denibblize_track(nibs: &[u8], track_num: u8, skew: &[u8; 16], out: &mut [u8])
         // Scan for address prologue D5 AA 96
         if buf[i] == 0xD5 && buf[i + 1] == 0xAA && buf[i + 2] == 0x96 {
             i += 3;
-            if i + 8 > buf_len { break; }
+            if i + 8 > buf_len {
+                break;
+            }
             // Decode 4+4 encoded volume, track, sector, checksum
-            let _vol = decode44(buf[i], buf[i + 1]); i += 2;
-            let trk  = decode44(buf[i], buf[i + 1]); i += 2;
-            let sec  = decode44(buf[i], buf[i + 1]); i += 2;
-            let _chk = decode44(buf[i], buf[i + 1]); i += 2;
+            let _vol = decode44(buf[i], buf[i + 1]);
+            i += 2;
+            let trk = decode44(buf[i], buf[i + 1]);
+            i += 2;
+            let sec = decode44(buf[i], buf[i + 1]);
+            i += 2;
+            let _chk = decode44(buf[i], buf[i + 1]);
+            i += 2;
 
-            if trk != track_num || sec >= 16 { continue; }
+            if trk != track_num || sec >= 16 {
+                continue;
+            }
 
             // Scan for data prologue D5 AA AD (within next 100 bytes)
             let search_end = (i + 100).min(buf_len - 344);
@@ -1022,10 +1189,14 @@ fn denibblize_track(nibs: &[u8], track_num: u8, skew: &[u8; 16], out: &mut [u8])
                 }
                 i += 1;
             }
-            if !found_data { continue; }
+            if !found_data {
+                continue;
+            }
 
             // Read 343 GCR bytes
-            if i + 343 > buf_len { break; }
+            if i + 343 > buf_len {
+                break;
+            }
             let gcr: [u8; 343] = buf[i..i + 343].try_into().unwrap();
             i += 343;
 
@@ -1058,11 +1229,15 @@ fn denibblize_track(nibs: &[u8], track_num: u8, skew: &[u8; 16], out: &mut [u8])
 /// bytes in the bitstream) which is the standard WOZ convention for marking
 /// unreadable flux areas.
 fn parse_woz(data: &[u8]) -> Option<WozImage> {
-    if data.len() < 12 { return None; }
+    if data.len() < 12 {
+        return None;
+    }
 
     let is_woz1 = data.starts_with(b"WOZ1\xff\x0a\x0d\x0a");
     let is_woz2 = data.starts_with(b"WOZ2\xff\x0a\x0d\x0a");
-    if !is_woz1 && !is_woz2 { return None; }
+    if !is_woz1 && !is_woz2 {
+        return None;
+    }
 
     let version = if is_woz1 { 1u8 } else { 2u8 };
 
@@ -1070,7 +1245,9 @@ fn parse_woz(data: &[u8]) -> Option<WozImage> {
     let stored_crc = u32::from_le_bytes(data[8..12].try_into().ok()?);
     if stored_crc != 0 {
         let computed = crc32(&data[12..]);
-        if computed != stored_crc { return None; }
+        if computed != stored_crc {
+            return None;
+        }
     }
 
     // Parse chunks
@@ -1085,7 +1262,9 @@ fn parse_woz(data: &[u8]) -> Option<WozImage> {
         let id = &data[pos..pos + 4];
         let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().ok()?) as usize;
         pos += 8;
-        if pos + size > data.len() { break; }
+        if pos + size > data.len() {
+            break;
+        }
         let chunk = &data[pos..pos + size];
 
         match id {
@@ -1113,7 +1292,12 @@ fn parse_woz(data: &[u8]) -> Option<WozImage> {
     let tmap = tmap?;
 
     // Determine the maximum track index referenced by TMAP
-    let max_trks_idx = tmap.iter().copied().filter(|&v| v != 0xFF).max().unwrap_or(0) as usize;
+    let max_trks_idx = tmap
+        .iter()
+        .copied()
+        .filter(|&v| v != 0xFF)
+        .max()
+        .unwrap_or(0) as usize;
 
     let mut tracks: Vec<Option<WozTrack>> = Vec::new();
 
@@ -1132,11 +1316,13 @@ fn parse_woz(data: &[u8]) -> Option<WozImage> {
             // Bytes used is at offset 6646 (2 bytes LE), bit count at 6648 (2 bytes LE)
             let bytes_used = u16::from_le_bytes(
                 trks_data[entry_off + WOZ1_DATA_SIZE..entry_off + WOZ1_DATA_SIZE + 2]
-                    .try_into().ok()?,
+                    .try_into()
+                    .ok()?,
             ) as usize;
             let bit_count = u16::from_le_bytes(
                 trks_data[entry_off + WOZ1_DATA_SIZE + 2..entry_off + WOZ1_DATA_SIZE + 4]
-                    .try_into().ok()?,
+                    .try_into()
+                    .ok()?,
             ) as u32;
 
             let byte_count = bytes_used.min(WOZ1_DATA_SIZE);
@@ -1161,15 +1347,12 @@ fn parse_woz(data: &[u8]) -> Option<WozImage> {
                 tracks.push(None);
                 continue;
             }
-            let starting_block = u16::from_le_bytes(
-                trks_data[desc_off..desc_off + 2].try_into().ok()?,
-            ) as usize;
-            let block_count = u16::from_le_bytes(
-                trks_data[desc_off + 2..desc_off + 4].try_into().ok()?,
-            ) as usize;
-            let bit_count = u32::from_le_bytes(
-                trks_data[desc_off + 4..desc_off + 8].try_into().ok()?,
-            );
+            let starting_block =
+                u16::from_le_bytes(trks_data[desc_off..desc_off + 2].try_into().ok()?) as usize;
+            let block_count =
+                u16::from_le_bytes(trks_data[desc_off + 2..desc_off + 4].try_into().ok()?) as usize;
+            let bit_count =
+                u32::from_le_bytes(trks_data[desc_off + 4..desc_off + 8].try_into().ok()?);
 
             if starting_block == 0 && block_count == 0 {
                 tracks.push(None);
@@ -1261,38 +1444,22 @@ fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
 // ── Embedded 16-sector Disk II firmware (256 bytes) ──────────────────────────
 
 static DISK2_FW: &[u8; 256] = &[
-    0xA2, 0x20, 0xA0, 0x00, 0xA2, 0x03, 0x86, 0x3C,
-    0x8A, 0x0A, 0x24, 0x3C, 0xF0, 0x10, 0x05, 0x3C,
-    0x49, 0xFF, 0x29, 0x7E, 0xB0, 0x08, 0x4A, 0xD0,
-    0xFB, 0x98, 0x9D, 0x56, 0x03, 0xC8, 0xE8, 0x10,
-    0xE5, 0x20, 0x58, 0xFF, 0xBA, 0xBD, 0x00, 0x01,
-    0x0A, 0x0A, 0x0A, 0x0A, 0x85, 0x2B, 0xAA, 0xBD,
-    0x8E, 0xC0, 0xBD, 0x8C, 0xC0, 0xBD, 0x8A, 0xC0,
-    0xBD, 0x89, 0xC0, 0xA0, 0x50, 0xBD, 0x80, 0xC0,
-    0x98, 0x29, 0x03, 0x0A, 0x05, 0x2B, 0xAA, 0xBD,
-    0x81, 0xC0, 0xA9, 0x56, 0x20, 0xA8, 0xFC, 0x88,
-    0x10, 0xEB, 0x85, 0x26, 0x85, 0x3D, 0x85, 0x41,
-    0xA9, 0x08, 0x85, 0x27, 0x18, 0x08, 0xBD, 0x8C,
-    0xC0, 0x10, 0xFB, 0x49, 0xD5, 0xD0, 0xF7, 0xBD,
-    0x8C, 0xC0, 0x10, 0xFB, 0xC9, 0xAA, 0xD0, 0xF3,
-    0xEA, 0xBD, 0x8C, 0xC0, 0x10, 0xFB, 0xC9, 0x96,
-    0xF0, 0x09, 0x28, 0x90, 0xDF, 0x49, 0xAD, 0xF0,
-    0x25, 0xD0, 0xD9, 0xA0, 0x03, 0x85, 0x40, 0xBD,
-    0x8C, 0xC0, 0x10, 0xFB, 0x2A, 0x85, 0x3C, 0xBD,
-    0x8C, 0xC0, 0x10, 0xFB, 0x25, 0x3C, 0x88, 0xD0,
-    0xEC, 0x28, 0xC5, 0x3D, 0xD0, 0xBE, 0xA5, 0x40,
-    0xC5, 0x41, 0xD0, 0xB8, 0xB0, 0xB7, 0xA0, 0x56,
-    0x84, 0x3C, 0xBC, 0x8C, 0xC0, 0x10, 0xFB, 0x59,
-    0xD6, 0x02, 0xA4, 0x3C, 0x88, 0x99, 0x00, 0x03,
-    0xD0, 0xEE, 0x84, 0x3C, 0xBC, 0x8C, 0xC0, 0x10,
-    0xFB, 0x59, 0xD6, 0x02, 0xA4, 0x3C, 0x91, 0x26,
-    0xC8, 0xD0, 0xEF, 0xBC, 0x8C, 0xC0, 0x10, 0xFB,
-    0x59, 0xD6, 0x02, 0xD0, 0x87, 0xA0, 0x00, 0xA2,
-    0x56, 0xCA, 0x30, 0xFB, 0xB1, 0x26, 0x5E, 0x00,
-    0x03, 0x2A, 0x5E, 0x00, 0x03, 0x2A, 0x91, 0x26,
-    0xC8, 0xD0, 0xEE, 0xE6, 0x27, 0xE6, 0x3D, 0xA5,
-    0x3D, 0xCD, 0x00, 0x08, 0xA6, 0x2B, 0x90, 0xDB,
-    0x4C, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xA2, 0x20, 0xA0, 0x00, 0xA2, 0x03, 0x86, 0x3C, 0x8A, 0x0A, 0x24, 0x3C, 0xF0, 0x10, 0x05, 0x3C,
+    0x49, 0xFF, 0x29, 0x7E, 0xB0, 0x08, 0x4A, 0xD0, 0xFB, 0x98, 0x9D, 0x56, 0x03, 0xC8, 0xE8, 0x10,
+    0xE5, 0x20, 0x58, 0xFF, 0xBA, 0xBD, 0x00, 0x01, 0x0A, 0x0A, 0x0A, 0x0A, 0x85, 0x2B, 0xAA, 0xBD,
+    0x8E, 0xC0, 0xBD, 0x8C, 0xC0, 0xBD, 0x8A, 0xC0, 0xBD, 0x89, 0xC0, 0xA0, 0x50, 0xBD, 0x80, 0xC0,
+    0x98, 0x29, 0x03, 0x0A, 0x05, 0x2B, 0xAA, 0xBD, 0x81, 0xC0, 0xA9, 0x56, 0x20, 0xA8, 0xFC, 0x88,
+    0x10, 0xEB, 0x85, 0x26, 0x85, 0x3D, 0x85, 0x41, 0xA9, 0x08, 0x85, 0x27, 0x18, 0x08, 0xBD, 0x8C,
+    0xC0, 0x10, 0xFB, 0x49, 0xD5, 0xD0, 0xF7, 0xBD, 0x8C, 0xC0, 0x10, 0xFB, 0xC9, 0xAA, 0xD0, 0xF3,
+    0xEA, 0xBD, 0x8C, 0xC0, 0x10, 0xFB, 0xC9, 0x96, 0xF0, 0x09, 0x28, 0x90, 0xDF, 0x49, 0xAD, 0xF0,
+    0x25, 0xD0, 0xD9, 0xA0, 0x03, 0x85, 0x40, 0xBD, 0x8C, 0xC0, 0x10, 0xFB, 0x2A, 0x85, 0x3C, 0xBD,
+    0x8C, 0xC0, 0x10, 0xFB, 0x25, 0x3C, 0x88, 0xD0, 0xEC, 0x28, 0xC5, 0x3D, 0xD0, 0xBE, 0xA5, 0x40,
+    0xC5, 0x41, 0xD0, 0xB8, 0xB0, 0xB7, 0xA0, 0x56, 0x84, 0x3C, 0xBC, 0x8C, 0xC0, 0x10, 0xFB, 0x59,
+    0xD6, 0x02, 0xA4, 0x3C, 0x88, 0x99, 0x00, 0x03, 0xD0, 0xEE, 0x84, 0x3C, 0xBC, 0x8C, 0xC0, 0x10,
+    0xFB, 0x59, 0xD6, 0x02, 0xA4, 0x3C, 0x91, 0x26, 0xC8, 0xD0, 0xEF, 0xBC, 0x8C, 0xC0, 0x10, 0xFB,
+    0x59, 0xD6, 0x02, 0xD0, 0x87, 0xA0, 0x00, 0xA2, 0x56, 0xCA, 0x30, 0xFB, 0xB1, 0x26, 0x5E, 0x00,
+    0x03, 0x2A, 0x5E, 0x00, 0x03, 0x2A, 0x91, 0x26, 0xC8, 0xD0, 0xEE, 0xE6, 0x27, 0xE6, 0x3D, 0xA5,
+    0x3D, 0xCD, 0x00, 0x08, 0xA6, 0x2B, 0x90, 0xDB, 0x4C, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1316,11 +1483,11 @@ mod tests {
         img.extend_from_slice(b"INFO");
         img.extend_from_slice(&60u32.to_le_bytes());
         let mut info = [0u8; 60];
-        info[0] = 1;  // version
-        info[1] = 1;  // disk type = 5.25"
-        info[2] = 0;  // not write protected
-        info[3] = 0;  // not synchronized
-        info[4] = 0;  // not cleaned
+        info[0] = 1; // version
+        info[1] = 1; // disk type = 5.25"
+        info[2] = 0; // not write protected
+        info[3] = 0; // not synchronized
+        info[4] = 0; // not cleaned
         // creator (32 bytes at offset 5)
         info[5..5 + 4].copy_from_slice(b"TEST");
         img.extend_from_slice(&info);
@@ -1370,20 +1537,20 @@ mod tests {
         img.extend_from_slice(b"INFO");
         img.extend_from_slice(&60u32.to_le_bytes());
         let mut info = [0u8; 60];
-        info[0] = 2;  // version
-        info[1] = 1;  // disk type = 5.25"
-        info[2] = 1;  // write protected
-        info[3] = 0;  // not synchronized
-        info[4] = 0;  // not cleaned
+        info[0] = 2; // version
+        info[1] = 1; // disk type = 5.25"
+        info[2] = 1; // write protected
+        info[3] = 0; // not synchronized
+        info[4] = 0; // not cleaned
         img.extend_from_slice(&info);
 
         // TMAP chunk (160 bytes)
         img.extend_from_slice(b"TMAP");
         img.extend_from_slice(&160u32.to_le_bytes());
         let mut tmap = [0xFFu8; 160];
-        tmap[0] = 0;  // quarter-track 0 -> TRKS index 0
-        tmap[4] = 0;  // quarter-track 4 also -> TRKS index 0 (shared)
-        tmap[1] = 0;  // quarter-track 1 also -> TRKS index 0
+        tmap[0] = 0; // quarter-track 0 -> TRKS index 0
+        tmap[4] = 0; // quarter-track 4 also -> TRKS index 0 (shared)
+        tmap[1] = 0; // quarter-track 1 also -> TRKS index 0
         img.extend_from_slice(&tmap);
 
         // TRKS chunk: 160 track descriptors (8 bytes each = 1280),
@@ -1671,11 +1838,20 @@ mod tests {
         let mut seen_one = false;
         for _ in 0..100 {
             let bit = track.read_bit(0, &mut rng);
-            if bit == 0 { seen_zero = true; }
-            if bit == 1 { seen_one = true; }
-            if seen_zero && seen_one { break; }
+            if bit == 0 {
+                seen_zero = true;
+            }
+            if bit == 1 {
+                seen_one = true;
+            }
+            if seen_zero && seen_one {
+                break;
+            }
         }
-        assert!(seen_zero && seen_one, "weak bits should produce both 0 and 1");
+        assert!(
+            seen_zero && seen_one,
+            "weak bits should produce both 0 and 1"
+        );
     }
 
     #[test]
@@ -1701,7 +1877,9 @@ mod tests {
         let mut seen = [false; 2];
         for _ in 0..100 {
             seen[rng.next_bit() as usize] = true;
-            if seen[0] && seen[1] { break; }
+            if seen[0] && seen[1] {
+                break;
+            }
         }
         assert!(seen[0] && seen[1]);
     }

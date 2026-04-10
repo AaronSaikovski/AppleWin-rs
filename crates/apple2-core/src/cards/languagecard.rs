@@ -11,44 +11,52 @@
 //!
 //! Reference: source/LanguageCard.cpp (LanguageCardUnit class)
 
-use std::io::{Read, Write};
 use crate::card::{Card, CardType};
 use crate::error::Result;
+use std::io::{Read, Write};
 
 const LC_SIZE: usize = 16384; // $D000–$FFFF (actually $C000–$FFFF for bus swap)
 
 pub struct LanguageCardCard {
-    slot:         usize,
+    slot: usize,
     /// The Language Card RAM (16K).  When the bus activates the LC the contents
     /// are swapped into `aux_ram[$C000..]` and the displaced ROM/RAM is stored
     /// back here via `store_lc_bank()`.
-    bank:         Box<[u8; LC_SIZE]>,
+    bank: Box<[u8; LC_SIZE]>,
     /// Pending swap data ready for the bus to pick up.
     pending_swap: Option<Box<[u8; LC_SIZE]>>,
     /// Set to true after first write through `slot_io_write` to trigger the
     /// initial bank swap.
-    initialised:  bool,
+    initialised: bool,
 }
 
 impl LanguageCardCard {
     pub fn new(slot: usize) -> Self {
         Self {
             slot,
-            bank:         Box::new([0u8; LC_SIZE]),
+            bank: Box::new([0u8; LC_SIZE]),
             pending_swap: None,
-            initialised:  false,
+            initialised: false,
         }
     }
 }
 
 impl Card for LanguageCardCard {
-    fn card_type(&self) -> CardType { CardType::LanguageCard }
-    fn slot(&self)       -> usize   { self.slot }
+    fn card_type(&self) -> CardType {
+        CardType::LanguageCard
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
 
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
+    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
 
-    fn slot_io_read(&mut self, _reg: u8, _cycles: u64) -> u8 { 0xFF }
+    fn slot_io_read(&mut self, _reg: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn slot_io_write(&mut self, _reg: u8, _value: u8, _cycles: u64) {
         // Language Card control ($C080–$C08F) is handled by the bus directly
         // via the standard `lc_switch()` mechanism, not by the card.
@@ -66,7 +74,7 @@ impl Card for LanguageCardCard {
     fn reset(&mut self, _power_cycle: bool) {
         self.bank.fill(0);
         self.pending_swap = None;
-        self.initialised  = false;
+        self.initialised = false;
     }
 
     fn update(&mut self, _cycles: u64) {}
@@ -85,5 +93,7 @@ impl Card for LanguageCardCard {
         Ok(())
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

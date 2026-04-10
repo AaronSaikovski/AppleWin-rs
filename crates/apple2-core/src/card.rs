@@ -3,9 +3,9 @@
 //! Replaces the `Card` base class + `CardManager` from `source/Card.h` and
 //! `source/CardManager.h`.
 
-use std::io::{Read, Write};
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 
 // ── Card type enum ─────────────────────────────────────────────────────────────
 
@@ -14,32 +14,32 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum CardType {
-    Empty           = 0,
-    Disk2           = 1,
-    Ssc             = 2,   // Super Serial Card
-    Mockingboard    = 3,
-    GenericPrinter  = 4,
-    GenericHdd      = 5,
-    GenericClock    = 6,
-    MouseInterface  = 7,
-    Z80             = 8,
-    Phasor          = 9,
-    Echo            = 10,
-    Sam             = 11,  // Software Automated Mouth
-    Col80           = 12,
-    Extended80Col   = 13,
-    RamWorksIII     = 14,
-    Uthernet        = 15,
-    LanguageCard    = 16,
+    Empty = 0,
+    Disk2 = 1,
+    Ssc = 2, // Super Serial Card
+    Mockingboard = 3,
+    GenericPrinter = 4,
+    GenericHdd = 5,
+    GenericClock = 6,
+    MouseInterface = 7,
+    Z80 = 8,
+    Phasor = 9,
+    Echo = 10,
+    Sam = 11, // Software Automated Mouth
+    Col80 = 12,
+    Extended80Col = 13,
+    RamWorksIII = 14,
+    Uthernet = 15,
+    LanguageCard = 16,
     LanguageCardIIe = 17,
-    Saturn128K      = 18,
-    FourPlay        = 19,
-    SnesMax         = 20,
-    VidHD           = 21,
-    Uthernet2       = 22,
-    MegaAudio       = 23,
-    SdMusic         = 24,
-    BreakpointCard  = 25,
+    Saturn128K = 18,
+    FourPlay = 19,
+    SnesMax = 20,
+    VidHD = 21,
+    Uthernet2 = 22,
+    MegaAudio = 23,
+    SdMusic = 24,
+    BreakpointCard = 25,
 }
 
 // ── Slot indices ──────────────────────────────────────────────────────────────
@@ -112,19 +112,27 @@ pub trait Card: Send + 'static {
 
     /// Returns true if this card currently has a disk motor spinning.
     /// Only meaningful for Disk II cards; all others return false.
-    fn disk_motor_on(&self) -> bool { false }
+    fn disk_motor_on(&self) -> bool {
+        false
+    }
 
     /// Returns the activity state for the given drive (0 or 1).
     /// Only meaningful for Disk II cards; all others return the default (inactive).
-    fn disk_drive_activity(&self, _drive: usize) -> DriveActivity { DriveActivity::default() }
+    fn disk_drive_activity(&self, _drive: usize) -> DriveActivity {
+        DriveActivity::default()
+    }
 
     /// Optional DMA write to Apple II main RAM, triggered by a card I/O access.
     /// The Bus drains this after each slot_io_read or slot_io_write call.
-    fn take_dma_write(&mut self) -> Option<DmaWrite> { None }
+    fn take_dma_write(&mut self) -> Option<DmaWrite> {
+        None
+    }
 
     /// Optional DMA read: card requests a slice of main RAM (e.g. for HD write).
     /// Returns `Some((src_addr, len))` if the card needs the bus to provide RAM data.
-    fn take_dma_read_request(&mut self) -> Option<(u16, u16)> { None }
+    fn take_dma_read_request(&mut self) -> Option<(u16, u16)> {
+        None
+    }
 
     /// Called by the Bus after fulfilling a DMA read request with the RAM slice.
     fn dma_read_complete(&mut self, _data: &[u8]) {}
@@ -143,7 +151,9 @@ pub trait Card: Send + 'static {
     /// Returns `Some(new 16K bank data)` if this card wants to swap the LC area
     /// ($C000–$FFFF, 16384 bytes) in aux_ram.  The bus writes the new data into
     /// aux_ram and then calls `store_lc_bank` with the displaced old data.
-    fn take_lc_bank_swap(&mut self) -> Option<Box<[u8; 16384]>> { None }
+    fn take_lc_bank_swap(&mut self) -> Option<Box<[u8; 16384]>> {
+        None
+    }
 
     /// Called by the bus to deliver the displaced LC bank data back to the card.
     /// The card should copy what it needs — the buffer belongs to the bus.
@@ -151,7 +161,9 @@ pub trait Card: Send + 'static {
 
     /// Returns true if this card is currently asserting an IRQ.
     /// Cards that generate interrupts (SSC, Uthernet, etc.) should override this.
-    fn irq_active(&self) -> bool { false }
+    fn irq_active(&self) -> bool {
+        false
+    }
 
     /// Downcast support — return `self` as `&mut dyn Any`.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
@@ -171,15 +183,27 @@ impl EmptyCard {
 }
 
 impl Card for EmptyCard {
-    fn card_type(&self) -> CardType { CardType::Empty }
-    fn slot(&self) -> usize { self.slot }
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 { 0xFF }
+    fn card_type(&self) -> CardType {
+        CardType::Empty
+    }
+    fn slot(&self) -> usize {
+        self.slot
+    }
+    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
+        0xFF
+    }
     fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
     fn reset(&mut self, _power_cycle: bool) {}
     fn update(&mut self, _cycles: u64) {}
-    fn save_state(&self, _out: &mut dyn Write) -> Result<()> { Ok(()) }
-    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> { Ok(()) }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn save_state(&self, _out: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn load_state(&mut self, _src: &mut dyn Read, _version: u32) -> Result<()> {
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ── DriveActivity ─────────────────────────────────────────────────────────────
@@ -189,6 +213,8 @@ impl Card for EmptyCard {
 pub struct DriveActivity {
     pub motor_on: bool,
     pub writing: bool,
+    /// Current track number (0-34 for floppy, block-based for HDD).
+    pub track: i32,
 }
 
 // ── CardManager ───────────────────────────────────────────────────────────────
@@ -198,14 +224,14 @@ pub struct DriveActivity {
 /// Replaces `CardManager` from `source/CardManager.h`.
 pub struct CardManager {
     slots: [Option<Box<dyn Card>>; NUM_SLOTS],
-    aux:   Option<Box<dyn Card>>,
+    aux: Option<Box<dyn Card>>,
 }
 
 impl CardManager {
     pub fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| None),
-            aux:   None,
+            aux: None,
         }
     }
 
@@ -254,7 +280,8 @@ impl CardManager {
 
     /// Returns true if any card (slot 0–7 or aux) currently asserts an IRQ.
     pub fn any_irq_active(&self) -> bool {
-        self.slots.iter()
+        self.slots
+            .iter()
             .filter_map(|s| s.as_deref())
             .any(|c| c.irq_active())
             || self.aux.as_deref().is_some_and(|c| c.irq_active())

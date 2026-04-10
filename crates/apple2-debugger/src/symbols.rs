@@ -84,6 +84,8 @@ impl SymbolTable {
 
     /// Iterate over all symbols as (address, name) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (u16, &str)> {
-        self.addr_to_name.iter().map(|(&addr, name)| (addr, name.as_str()))
+        self.addr_to_name
+            .iter()
+            .map(|(&addr, name)| (addr, name.as_str()))
     }
 }

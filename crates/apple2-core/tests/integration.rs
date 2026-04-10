@@ -74,12 +74,12 @@ fn execute_inline_ram_program() {
     // Place a program in RAM at $0200:
     // CLC; LDA #$10; ADC #$20; STA $50; NOP; NOP; JMP $020A (loop on NOPs)
     let program: &[u8] = &[
-        0x18,             // $0200: CLC
-        0xA9, 0x10,       // $0201: LDA #$10
-        0x69, 0x20,       // $0203: ADC #$20
-        0x85, 0x50,       // $0205: STA $50
-        0xEA,             // $0207: NOP
-        0xEA,             // $0208: NOP
+        0x18, // $0200: CLC
+        0xA9, 0x10, // $0201: LDA #$10
+        0x69, 0x20, // $0203: ADC #$20
+        0x85, 0x50, // $0205: STA $50
+        0xEA, // $0207: NOP
+        0xEA, // $0208: NOP
         0x4C, 0x07, 0x02, // $0209: JMP $0207
     ];
     for (i, &b) in program.iter().enumerate() {
@@ -102,11 +102,11 @@ fn execute_loop_counting() {
 
     // Count from 0 to 10 in a loop
     let program: &[u8] = &[
-        0xA2, 0x00,       // $0200: LDX #$00
-        0xE8,             // $0202: INX
-        0xE0, 0x0A,       // $0203: CPX #$0A
-        0xD0, 0xFB,       // $0205: BNE $0202
-        0x86, 0x50,       // $0207: STX $50
+        0xA2, 0x00, // $0200: LDX #$00
+        0xE8, // $0202: INX
+        0xE0, 0x0A, // $0203: CPX #$0A
+        0xD0, 0xFB, // $0205: BNE $0202
+        0x86, 0x50, // $0207: STX $50
         0x4C, 0x09, 0x02, // $0209: JMP $0209 (halt)
     ];
     for (i, &b) in program.iter().enumerate() {
@@ -133,12 +133,12 @@ fn execute_subroutine_call() {
     // Sub at $0300: LDA #$42; RTS
     let main_code: &[u8] = &[
         0x20, 0x00, 0x03, // $0200: JSR $0300
-        0x85, 0x50,       // $0203: STA $50
+        0x85, 0x50, // $0203: STA $50
         0x4C, 0x05, 0x02, // $0205: JMP $0205 (halt)
     ];
     let sub_code: &[u8] = &[
-        0xA9, 0x42,       // $0300: LDA #$42
-        0x60,             // $0302: RTS
+        0xA9, 0x42, // $0300: LDA #$42
+        0x60, // $0302: RTS
     ];
     for (i, &b) in main_code.iter().enumerate() {
         emu.bus.main_ram[0x0200 + i] = b;
@@ -163,11 +163,11 @@ fn execute_with_cycle_budget() {
 
     // LDA #$42; NOP; NOP; NOP...
     let program: &[u8] = &[
-        0xA9, 0x42,       // LDA #$42 (2 cycles)
-        0xEA,             // NOP (2 cycles)
-        0xEA,             // NOP (2 cycles)
-        0xEA,             // NOP (2 cycles)
-        0xEA,             // NOP (2 cycles)
+        0xA9, 0x42, // LDA #$42 (2 cycles)
+        0xEA, // NOP (2 cycles)
+        0xEA, // NOP (2 cycles)
+        0xEA, // NOP (2 cycles)
+        0xEA, // NOP (2 cycles)
     ];
     for (i, &b) in program.iter().enumerate() {
         emu.bus.main_ram[0x0200 + i] = b;
@@ -186,13 +186,13 @@ fn execute_65c02_specific_instructions() {
 
     // Test 65C02: STZ, BRA, INC A
     let program: &[u8] = &[
-        0xA9, 0x05,       // $0200: LDA #$05
-        0x1A,             // $0202: INC A  -> A=6
-        0x1A,             // $0203: INC A  -> A=7
-        0x85, 0x50,       // $0204: STA $50
-        0x64, 0x60,       // $0206: STZ $60
-        0x80, 0x00,       // $0208: BRA +0 (to next instruction)
-        0xEA,             // $020A: NOP (halt-ish)
+        0xA9, 0x05, // $0200: LDA #$05
+        0x1A, // $0202: INC A  -> A=6
+        0x1A, // $0203: INC A  -> A=7
+        0x85, 0x50, // $0204: STA $50
+        0x64, 0x60, // $0206: STZ $60
+        0x80, 0x00, // $0208: BRA +0 (to next instruction)
+        0xEA, // $020A: NOP (halt-ish)
     ];
     for (i, &b) in program.iter().enumerate() {
         emu.bus.main_ram[0x0200 + i] = b;
@@ -242,24 +242,24 @@ fn fibonacci_first_ten() {
     // Compute first 10 Fibonacci numbers, store at $50-$59
     // $00 = a (starts 0), $01 = b (starts 1), output at $50+
     let program: &[u8] = &[
-        0xA9, 0x00,       // $0200: LDA #$00
-        0x85, 0x00,       // $0202: STA $00 (a = 0)
-        0xA9, 0x01,       // $0204: LDA #$01
-        0x85, 0x01,       // $0206: STA $01 (b = 1)
-        0xA2, 0x00,       // $0208: LDX #$00 (index)
+        0xA9, 0x00, // $0200: LDA #$00
+        0x85, 0x00, // $0202: STA $00 (a = 0)
+        0xA9, 0x01, // $0204: LDA #$01
+        0x85, 0x01, // $0206: STA $01 (b = 1)
+        0xA2, 0x00, // $0208: LDX #$00 (index)
         // loop:
-        0xA5, 0x01,       // $020A: LDA $01 (load b)
+        0xA5, 0x01, // $020A: LDA $01 (load b)
         0x9D, 0x50, 0x00, // $020C: STA $0050,X (store fib[i])
-        0x18,             // $020F: CLC
-        0x65, 0x00,       // $0210: ADC $00 (b + a -> new)
-        0x48,             // $0212: PHA     (push new)
-        0xA5, 0x01,       // $0213: LDA $01
-        0x85, 0x00,       // $0215: STA $00 (a = old b)
-        0x68,             // $0217: PLA     (pull new)
-        0x85, 0x01,       // $0218: STA $01 (b = new)
-        0xE8,             // $021A: INX
-        0xE0, 0x0A,       // $021B: CPX #$0A
-        0xD0, 0xEB,       // $021D: BNE $020A (-21 from $021F)
+        0x18, // $020F: CLC
+        0x65, 0x00, // $0210: ADC $00 (b + a -> new)
+        0x48, // $0212: PHA     (push new)
+        0xA5, 0x01, // $0213: LDA $01
+        0x85, 0x00, // $0215: STA $00 (a = old b)
+        0x68, // $0217: PLA     (pull new)
+        0x85, 0x01, // $0218: STA $01 (b = new)
+        0xE8, // $021A: INX
+        0xE0, 0x0A, // $021B: CPX #$0A
+        0xD0, 0xEB, // $021D: BNE $020A (-21 from $021F)
         0x4C, 0x1F, 0x02, // $021F: JMP $021F (halt)
     ];
     for (i, &b) in program.iter().enumerate() {
@@ -276,7 +276,8 @@ fn fibonacci_first_ten() {
     let expected = [1u8, 1, 2, 3, 5, 8, 13, 21, 34, 55];
     for (i, &exp) in expected.iter().enumerate() {
         assert_eq!(
-            emu.bus.main_ram[0x50 + i], exp,
+            emu.bus.main_ram[0x50 + i],
+            exp,
             "fib[{i}]: expected {exp}, got {}",
             emu.bus.main_ram[0x50 + i]
         );

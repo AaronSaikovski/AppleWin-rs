@@ -113,9 +113,7 @@ impl Speaker {
             let mut accumulated = 0.0f64;
             let mut seg_start = sample_start;
 
-            while toggle_idx < toggles.len()
-                && (toggles[toggle_idx] as f64) < sample_end
-            {
+            while toggle_idx < toggles.len() && (toggles[toggle_idx] as f64) < sample_end {
                 let toggle_cycle = toggles[toggle_idx] as f64;
                 // Clamp to sample boundary (toggle may be before sample_start
                 // if there is slight overlap from rounding).
@@ -219,11 +217,7 @@ mod tests {
 
         // The output should contain nonzero samples (the square wave passes
         // through the high-pass filter with minimal attenuation at 1 kHz).
-        let max_abs = spk
-            .samples
-            .iter()
-            .map(|s| s.abs())
-            .fold(0.0f32, f32::max);
+        let max_abs = spk.samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         assert!(
             max_abs > 0.1,
             "Square wave at ~1 kHz should produce significant output, max_abs = {max_abs}"
@@ -304,7 +298,10 @@ mod tests {
     fn test_render_empty_range() {
         let mut spk = make_speaker();
         spk.render(100, 100, &[]);
-        assert!(spk.samples.is_empty(), "Zero-length range should produce no samples");
+        assert!(
+            spk.samples.is_empty(),
+            "Zero-length range should produce no samples"
+        );
     }
 
     #[test]
@@ -334,10 +331,7 @@ mod tests {
         spk.render(0, total, &toggles);
 
         for &s in &spk.samples {
-            assert!(
-                s.abs() <= 1.0,
-                "Output should be within [-1,1], got {s}"
-            );
+            assert!(s.abs() <= 1.0, "Output should be within [-1,1], got {s}");
         }
     }
 }
