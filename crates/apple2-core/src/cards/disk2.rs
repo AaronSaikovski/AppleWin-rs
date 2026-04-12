@@ -529,7 +529,10 @@ pub struct Disk2Card {
     drives: [Drive; 2],
     active_drive: usize,
     motor_on: bool,
+    /// Q7 state: false = read mode, true = write mode.
     write_mode: bool,
+    /// Q6 state: false = data latch (Q6L), true = load mode (Q6H).
+    load_mode: bool,
     latch: u8,
     /// Stepper magnet states, bits 0–3 = phases 0–3.
     phases: u8,
@@ -543,6 +546,7 @@ impl Disk2Card {
             active_drive: 0,
             motor_on: false,
             write_mode: false,
+            load_mode: false,
             latch: 0xFF,
             phases: 0,
         }
@@ -580,12 +584,13 @@ impl Disk2Card {
                 d.woz = Some(woz);
                 d.tracks = Vec::new(); // not used in WOZ mode
                 d.loaded = true;
+                // Reset media-specific state but preserve drive state (phase/head position).
+                // Changing the disk in the drive doesn't affect the drive's head position
+                // (matches C++ AppleWin: GH#138, GH#640).
                 d.byte_pos = 0;
                 d.bit_pos = 0;
                 d.shift_reg = 0;
                 d.zero_count = 0;
-                d.phase = 0;
-                d.current_track_idx = 0;
                 d.dirty = false;
                 d.format = DiskFormat::Woz;
                 d.raw = data.to_vec();
@@ -621,9 +626,10 @@ impl Disk2Card {
             d.woz = None; // ensure not in WOZ mode
             d.tracks = t;
             d.loaded = true;
+            // Reset media-specific state but preserve drive state (phase/head position).
+            // Changing the disk in the drive doesn't affect the drive's head position
+            // (matches C++ AppleWin: GH#138, GH#640).
             d.byte_pos = 0;
-            d.phase = 0;
-            d.current_track_idx = 0;
             d.dirty = false;
             d.format = format;
             d.raw = data.to_vec();
@@ -701,29 +707,35 @@ impl Card for Disk2Card {
     }
 
     fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
+        // Update Q6/Q7 sequencer state for $C0xC–$C0xF (matches C++ SetSequencerFunction).
+        // Addresses below $C0xC don't affect the sequencer.
+        match reg {
+            0x0C => self.load_mode = false,
+            0x0D => self.load_mode = true,
+            0x0E => self.write_mode = false,
+            0x0F => self.write_mode = true,
+            _ => {}
+        }
+
+        // Process side-effects for each register.
         match reg {
             0x00..=0x07 => {
                 self.step_phase(reg);
-                self.latch
             }
             0x08 => {
                 if self.motor_on {
                     self.drives[self.active_drive].flush();
                 }
                 self.motor_on = false;
-                self.latch
             }
             0x09 => {
                 self.motor_on = true;
-                self.latch
             }
             0x0A => {
                 self.active_drive = 0;
-                self.latch
             }
             0x0B => {
                 self.active_drive = 1;
-                self.latch
             }
             0x0C => {
                 if self.write_mode && self.motor_on {
@@ -736,28 +748,37 @@ impl Card for Disk2Card {
                         self.latch = nibble;
                     }
                 }
-                self.latch
             }
             0x0D => {
+                // LoadWriteProtect: update the latch with write-protect status.
+                // The LSS saturates the data register: 0xFF if protected, 0x00 if not
+                // (UTAIIe page 9-21, C++ AppleWin LoadWriteProtect).
                 if self.drives[self.active_drive].write_protected {
-                    0x80
+                    self.latch = 0xFF;
                 } else {
-                    0x00
+                    self.latch = 0x00;
                 }
             }
-            0x0E => {
-                self.write_mode = false;
-                self.latch
-            }
-            0x0F => {
-                self.write_mode = true;
-                self.latch
-            }
-            _ => self.latch,
+            0x0E | 0x0F => {} // Q7L/Q7H: side-effect already handled above
+            _ => {}
         }
+
+        // Only even addresses return the latch (UTAIIe Table 9.1).
+        // Odd addresses return floating bus (approximated as 0 here).
+        if reg & 1 == 0 { self.latch } else { 0 }
     }
 
     fn slot_io_write(&mut self, reg: u8, value: u8, cycles: u64) {
+        // Update Q6/Q7 sequencer state FIRST (matches C++ SetSequencerFunction order).
+        match reg {
+            0x0C => self.load_mode = false,
+            0x0D => self.load_mode = true,
+            0x0E => self.write_mode = false,
+            0x0F => self.write_mode = true,
+            _ => {}
+        }
+
+        // Process side-effects for each register.
         match reg {
             0x00..=0x07 => self.step_phase(reg),
             0x08 => {
@@ -776,28 +797,34 @@ impl Card for Disk2Card {
                 self.active_drive = 1;
             }
             0x0C => {
-                // Q6L write: load latch (data to write on next strobe)
+                // Q6L: ReadWrite — in C++, IOWrite for case 0xC calls ReadWrite()
+                // regardless of mode.  In read mode it reads the next nibble and
+                // advances position; in write mode it writes the latch to disk.
                 if self.write_mode && self.motor_on {
-                    self.latch = value;
-                    self.drives[self.active_drive].write_nibble(value, cycles);
+                    self.drives[self.active_drive].write_nibble(self.latch, cycles);
+                } else if !self.write_mode
+                    && self.motor_on
+                    && let Some(nibble) = self.drives[self.active_drive].read_nibble(cycles)
+                {
+                    self.latch = nibble;
                 }
             }
-            0x0D => {
-                self.latch = value;
-            } // Q6H: load data register
-            0x0E => {
-                self.write_mode = false;
-            } // Q7L: read mode
-            0x0F => {
-                self.write_mode = true;
-            } // Q7H: write mode
+            0x0D..=0x0F => {} // side-effects handled above
             _ => {}
+        }
+
+        // Any address write loads the latch via the sequencer LD command (74LS323),
+        // but ONLY when the sequencer function is dataLoadWrite (Q6=1 AND Q7=1).
+        // (C++ AppleWin: "any address writes the latch via sequencer LD command")
+        if self.load_mode && self.write_mode {
+            self.latch = value;
         }
     }
 
     fn reset(&mut self, _power_cycle: bool) {
         self.motor_on = false;
         self.write_mode = false;
+        self.load_mode = false;
         self.latch = 0xFF;
         self.phases = 0;
         self.active_drive = 0;
