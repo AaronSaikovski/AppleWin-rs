@@ -58,7 +58,38 @@ impl Emulator {
         let start = self.cpu.cycles;
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
+
+        // ── Tight-loop detector ──────────────────────────────────────────
+        let mut loop_pc: u16 = 0xFFFF;
+        let mut loop_count: u32 = 0;
+        const LOOP_THRESHOLD: u32 = 500_000;
+
         while self.cpu.cycles < target {
+            // Detect tight loops: if the same PC repeats many times, log it once.
+            if self.cpu.pc == loop_pc {
+                loop_count += 1;
+                if loop_count == LOOP_THRESHOLD {
+                    let opcode = self.bus.read(self.cpu.pc, self.cpu.cycles);
+                    let b1 = self.bus.read(self.cpu.pc.wrapping_add(1), self.cpu.cycles);
+                    let b2 = self.bus.read(self.cpu.pc.wrapping_add(2), self.cpu.cycles);
+                    eprintln!(
+                        "[LOOP] PC=${:04X} A=${:02X} X=${:02X} Y=${:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} cyc={}",
+                        self.cpu.pc,
+                        self.cpu.a,
+                        self.cpu.x,
+                        self.cpu.y,
+                        self.cpu.sp,
+                        self.cpu.flags.bits(),
+                        opcode,
+                        b1,
+                        b2,
+                        self.cpu.cycles
+                    );
+                }
+            } else {
+                loop_pc = self.cpu.pc;
+                loop_count = 0;
+            }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
             if self.cpu.waiting {
