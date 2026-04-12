@@ -60,35 +60,52 @@ impl Emulator {
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
         // ── Tight-loop detector ──────────────────────────────────────────
-        let mut loop_pc: u16 = 0xFFFF;
+        // Track whether the PC stays within a small region for too long.
+        // A tight loop (e.g. `LDA $C000 / BPL *-3`) spans multiple PCs but
+        // stays within a ~32-byte window.
+        let mut loop_base: u16 = 0;
         let mut loop_count: u32 = 0;
-        const LOOP_THRESHOLD: u32 = 500_000;
+        const LOOP_THRESHOLD: u32 = 2_000_000;
+        let mut loop_logged = false;
 
         while self.cpu.cycles < target {
-            // Detect tight loops: if the same PC repeats many times, log it once.
-            if self.cpu.pc == loop_pc {
-                loop_count += 1;
-                if loop_count == LOOP_THRESHOLD {
-                    let opcode = self.bus.read(self.cpu.pc, self.cpu.cycles);
-                    let b1 = self.bus.read(self.cpu.pc.wrapping_add(1), self.cpu.cycles);
-                    let b2 = self.bus.read(self.cpu.pc.wrapping_add(2), self.cpu.cycles);
-                    eprintln!(
-                        "[LOOP] PC=${:04X} A=${:02X} X=${:02X} Y=${:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} cyc={}",
-                        self.cpu.pc,
-                        self.cpu.a,
-                        self.cpu.x,
-                        self.cpu.y,
-                        self.cpu.sp,
-                        self.cpu.flags.bits(),
-                        opcode,
-                        b1,
-                        b2,
-                        self.cpu.cycles
-                    );
+            {
+                let pc = self.cpu.pc;
+                let dist = pc.wrapping_sub(loop_base);
+                if dist < 32 {
+                    loop_count += 1;
+                    if loop_count == LOOP_THRESHOLD && !loop_logged {
+                        loop_logged = true;
+                        // Dump 32 bytes from loop_base so we can see the full loop
+                        let mut code = [0u8; 32];
+                        for (i, b) in code.iter_mut().enumerate() {
+                            *b = self
+                                .bus
+                                .read(loop_base.wrapping_add(i as u16), self.cpu.cycles);
+                        }
+                        eprintln!(
+                            "[LOOP] PC=${:04X} A=${:02X} X=${:02X} Y=${:02X} S=${:02X} P=${:02X} cyc={}",
+                            pc,
+                            self.cpu.a,
+                            self.cpu.x,
+                            self.cpu.y,
+                            self.cpu.sp,
+                            self.cpu.flags.bits(),
+                            self.cpu.cycles
+                        );
+                        eprintln!("[LOOP] base=${:04X} code={:02X?}", loop_base, code);
+                        // Dump a few bytes of the I/O page the loop may be polling
+                        let io_addr = 0xC000u16;
+                        let mut io = [0u8; 16];
+                        for (i, b) in io.iter_mut().enumerate() {
+                            *b = self.bus.read(io_addr + i as u16, self.cpu.cycles);
+                        }
+                        eprintln!("[LOOP] $C000..C00F={:02X?}", io);
+                    }
+                } else {
+                    loop_base = pc;
+                    loop_count = 0;
                 }
-            } else {
-                loop_pc = self.cpu.pc;
-                loop_count = 0;
             }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
