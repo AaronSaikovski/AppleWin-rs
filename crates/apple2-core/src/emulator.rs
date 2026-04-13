@@ -60,28 +60,36 @@ impl Emulator {
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
         // ── Periodic PC logger ────────────────────────────────────────────
-        // Log the PC every ~50M cycles to help diagnose freezes.
+        // Log the PC every ~50M cycles to a file to help diagnose freezes.
         let mut next_log = start + 50_000_000;
 
         while self.cpu.cycles < target {
             if self.cpu.cycles >= next_log {
+                use std::io::Write;
                 let pc = self.cpu.pc;
                 let opcode = self.bus.read(pc, self.cpu.cycles);
                 let b1 = self.bus.read(pc.wrapping_add(1), self.cpu.cycles);
                 let b2 = self.bus.read(pc.wrapping_add(2), self.cpu.cycles);
-                eprintln!(
-                    "[TRACE] PC=${:04X} A=${:02X} X=${:02X} Y=${:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} cyc={}",
-                    pc,
-                    self.cpu.a,
-                    self.cpu.x,
-                    self.cpu.y,
-                    self.cpu.sp,
-                    self.cpu.flags.bits(),
-                    opcode,
-                    b1,
-                    b2,
-                    self.cpu.cycles
-                );
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("cpu_trace.log")
+                {
+                    let _ = writeln!(
+                        f,
+                        "[TRACE] PC=${:04X} A=${:02X} X=${:02X} Y={:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} cyc={}",
+                        pc,
+                        self.cpu.a,
+                        self.cpu.x,
+                        self.cpu.y,
+                        self.cpu.sp,
+                        self.cpu.flags.bits(),
+                        opcode,
+                        b1,
+                        b2,
+                        self.cpu.cycles
+                    );
+                }
                 next_log += 50_000_000;
             }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
