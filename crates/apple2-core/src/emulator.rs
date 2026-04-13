@@ -65,36 +65,43 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
-        // Bail-out detector: log first 3 hits of $9D0A (the PLA×6+RTS bail-out)
-        let mut bailout_logged: u32 = 0;
+        // Caller trace: log first 5 hits of $9C06 with stack dump
+        let mut caller_logged: u32 = 0;
 
         while self.cpu.cycles < target {
-            // ── Bail-out detector: catch when PC=$9D0A ───────────────────
-            if self.cpu.pc == 0x9D0A && bailout_logged < 3 {
-                bailout_logged += 1;
+            // ── Caller trace: dump return addresses when entering $9C06 ──
+            if self.cpu.pc == 0x9C06 && caller_logged < 5 && !self.bus.disk_motor_on() {
+                caller_logged += 1;
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open("cpu_trace.log")
                 {
-                    // Dump entity data at $0420-$043F and stack
-                    let mut entities = [0u8; 32];
-                    for (i, b) in entities.iter_mut().enumerate() {
-                        *b = self.bus.read(0x0420 + i as u16, self.cpu.cycles);
-                    }
-                    let mut stack = [0u8; 16];
+                    // Dump 32 bytes of stack (return addresses)
+                    let mut stack = [0u8; 32];
                     for (i, b) in stack.iter_mut().enumerate() {
                         *b = self.bus.read(
                             0x0100 + ((self.cpu.sp as u16 + 1 + i as u16) & 0xFF),
                             self.cpu.cycles,
                         );
                     }
+                    // Also dump the outer code: 64 bytes starting from each return address
+                    let ret1 = stack[0] as u16 | ((stack[1] as u16) << 8);
+                    let ret2 = stack[2] as u16 | ((stack[3] as u16) << 8);
+                    let mut outer1 = [0u8; 64];
+                    let mut outer2 = [0u8; 64];
+                    for i in 0..64u16 {
+                        outer1[i as usize] = self.bus.read(ret1.wrapping_add(i), self.cpu.cycles);
+                        outer2[i as usize] = self.bus.read(ret2.wrapping_add(i), self.cpu.cycles);
+                    }
                     let _ = writeln!(
                         f,
-                        "[BAILOUT] PC=$9D0A S=${:02X} A=${:02X} cyc={} entities={:02X?} stack={:02X?}",
-                        self.cpu.sp, self.cpu.a, self.cpu.cycles, entities, stack
+                        "[CALLER] S=${:02X} cyc={} stack={:02X?}",
+                        self.cpu.sp, self.cpu.cycles, stack
                     );
+                    let _ = writeln!(f, "[CALLER] ret1=${:04X}: {:02X?}", ret1, outer1);
+                    let _ = writeln!(f, "[CALLER] ret2=${:04X}: {:02X?}", ret2, outer2);
                 }
             }
 
