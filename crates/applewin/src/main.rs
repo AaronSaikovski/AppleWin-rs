@@ -6,6 +6,9 @@ use apple2_core::{
 /// Apple IIe Enhanced 16KB ROM embedded at compile time.
 static APPLE2E_ROM: &[u8] = include_bytes!("../../../roms/apple2e_enhanced.rom");
 
+/// Apple IIc 32KB ROM (ROM version 04, 341-0445-B) embedded at compile time.
+static APPLE2C_ROM: &[u8] = include_bytes!("../../../roms/apple2c.rom");
+
 #[cfg(feature = "gui")]
 mod config;
 
@@ -15,9 +18,23 @@ fn make_emulator(
     custom_rom: &Option<String>,
     custom_f8_rom: &Option<String>,
 ) -> Emulator {
+    // Apple IIc always uses a 65C02.
+    let cpu = if machine.is_iic() {
+        CpuType::Cpu65C02
+    } else {
+        cpu
+    };
+
+    // Select the correct default ROM for the machine model.
+    let default_rom: &[u8] = if machine.is_iic() {
+        APPLE2C_ROM
+    } else {
+        APPLE2E_ROM
+    };
+
     let mut rom = if let Some(path) = custom_rom {
         match std::fs::read(path) {
-            Ok(data) if data.len() == 16384 || data.len() == 12288 => {
+            Ok(data) if data.len() == 16384 || data.len() == 12288 || data.len() == 32768 => {
                 // Pad 12K ROMs to 16K (add 4K of 0xFF at the start).
                 if data.len() == 12288 {
                     let mut padded = vec![0xFF; 4096];
@@ -29,18 +46,18 @@ fn make_emulator(
             }
             Ok(data) => {
                 eprintln!(
-                    "Custom ROM wrong size ({} bytes, expected 12K or 16K), using default",
+                    "Custom ROM wrong size ({} bytes, expected 12K, 16K, or 32K), using default",
                     data.len()
                 );
-                APPLE2E_ROM.to_vec()
+                default_rom.to_vec()
             }
             Err(e) => {
                 eprintln!("Failed to load custom ROM '{}': {}, using default", path, e);
-                APPLE2E_ROM.to_vec()
+                default_rom.to_vec()
             }
         }
     } else {
-        APPLE2E_ROM.to_vec()
+        default_rom.to_vec()
     };
 
     // Patch $F800–$FFFF with a custom F8 ROM (2K) if configured.
@@ -49,7 +66,8 @@ fn make_emulator(
             Ok(data) if data.len() == 2048 => {
                 // F8 ROM goes at offset 0x3800 in the 16K ROM image
                 // ($F800 - $C000 = $3800 = 14336).
-                let offset = 0x3800;
+                // For 32K IIc ROMs, patch the standard bank (upper 16K).
+                let offset = if rom.len() > 16384 { 0x7800 } else { 0x3800 };
                 if rom.len() >= offset + 2048 {
                     rom[offset..offset + 2048].copy_from_slice(&data);
                 }
@@ -2388,6 +2406,12 @@ mod gui {
                                             });
                                         ui.end_row();
                                         ui.label("CPU type:");
+                                        // Apple IIc always uses 65C02.
+                                        if self.pending_config.machine_type.is_iic() {
+                                            self.pending_config.cpu_type = CpuType::Cpu65C02;
+                                        }
+                                        let cpu_enabled = !self.pending_config.machine_type.is_iic();
+                                        ui.add_enabled_ui(cpu_enabled, |ui| {
                                         egui::ComboBox::from_id_source("cpu_type")
                                             .selected_text(cpu_name(self.pending_config.cpu_type))
                                             .show_ui(ui, |ui| {
@@ -2399,6 +2423,7 @@ mod gui {
                                                     );
                                                 }
                                             });
+                                        }); // add_enabled_ui
                                         ui.end_row();
                                     });
                                 if self.pending_config.machine_type != self.config.machine_type
@@ -2581,6 +2606,29 @@ mod gui {
                                     .spacing([12.0, 4.0])
                                     .striped(true)
                                     .show(ui, |ui| {
+                                        if self.pending_config.machine_type.is_iic() {
+                                            // Apple IIc: fixed built-in peripherals (read-only)
+                                            let iic_slots = [
+                                                "(empty)",            // slot 0
+                                                "Serial (modem)",     // slot 1
+                                                "Serial (printer)",   // slot 2
+                                                "80-column (built-in)", // slot 3
+                                                "Mouse",              // slot 4
+                                                "(empty)",            // slot 5
+                                                "Disk II",            // slot 6
+                                                "(empty)",            // slot 7
+                                            ];
+                                            for (slot, name) in iic_slots.iter().enumerate() {
+                                                ui.label(format!("Slot {slot}:"));
+                                                ui.label(*name);
+                                                ui.label(""); // spacer
+                                                ui.end_row();
+                                            }
+                                            // No aux slot for IIc (128KB built-in)
+                                            ui.label("Aux:");
+                                            ui.label("128KB built-in");
+                                            ui.label("");
+                                        } else {
                                         for slot in 0..8usize {
                                             ui.label(format!("Slot {slot}:"));
                                             let current = self.pending_config.slot_cards[slot];
@@ -2632,6 +2680,7 @@ mod gui {
                                                 }
                                             });
                                         ui.label(""); // spacer (no options button for aux)
+                                        } // else (non-IIc)
                                         ui.end_row();
                                     });
                                 ui.add_space(4.0);
@@ -3287,6 +3336,20 @@ mod gui {
         for slot in 0..apple2_core::card::NUM_SLOTS {
             emu.bus.cards.remove(slot);
         }
+
+        // Apple IIc: install built-in peripherals (no user-configurable slots).
+        if emu.model.is_iic() {
+            emu.bus.cards.insert(Box::new(SscCard::new(1))); // modem port
+            emu.bus.cards.insert(Box::new(SscCard::new(2))); // printer port
+            // Slot 3: 80-col handled by ROM + bus soft-switches
+            emu.bus.cards.insert(Box::new(MouseCard::new(4)));
+            // Slot 5: empty
+            emu.bus.cards.insert(Box::new(Disk2Card::new(6)));
+            // Slot 7: empty
+            // No aux card — IIc has 128KB built-in (aux_ram is always present)
+            return;
+        }
+
         // Re-insert according to config
         for (slot, &card_type) in config.slot_cards.iter().enumerate() {
             match card_type {

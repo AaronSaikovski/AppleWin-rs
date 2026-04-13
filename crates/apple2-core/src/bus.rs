@@ -4,6 +4,7 @@
 //! `memreadPageType[]`, `IORead[256]`, `IOWrite[256]` from `source/Memory.h`.
 
 use crate::card::{CardManager, DmaWrite, DriveActivity};
+use crate::model::Apple2Model;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
@@ -205,6 +206,9 @@ pub struct Bus {
     /// Peripheral card ROM space ($C100–$CFFF, 3840 bytes = 15 pages).
     pub cx_rom: Box<[u8; 0x1000]>,
 
+    /// Machine model — controls IIc-specific behaviour (forced INTCXROM, ROM banking, etc.).
+    pub model: Apple2Model,
+
     /// Memory mode soft switches.
     pub mode: MemMode,
 
@@ -277,13 +281,19 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>) -> Self {
+    pub fn new(rom: Vec<u8>, model: Apple2Model) -> Self {
+        let mut initial_mode = MemMode::default();
+        if model.is_iic() {
+            // Apple IIc: internal ROM is always active (no expansion slots).
+            initial_mode.insert(MemMode::MF_INTCXROM);
+        }
         let mut bus = Self {
             main_ram: Box::new([0u8; 65536]),
             aux_ram: Box::new([0u8; 65536]),
             rom,
             cx_rom: Box::new([0u8; 0x1000]),
-            mode: MemMode::default(),
+            model,
+            mode: initial_mode,
             pages_r: [PageSrc::Main(0); 256],
             pages_w: [PageDst::Main(0); 256],
             cards: CardManager::new(),
@@ -342,7 +352,8 @@ impl Bus {
         let aux_read = self.mode.contains(MemMode::MF_AUXREAD);
         let aux_write = self.mode.contains(MemMode::MF_AUXWRITE);
         let altzp = self.mode.contains(MemMode::MF_ALTZP);
-        let intcxrom = self.mode.contains(MemMode::MF_INTCXROM);
+        // Apple IIc: INTCXROM is always on (no expansion slots).
+        let intcxrom = self.mode.contains(MemMode::MF_INTCXROM) || self.model.is_iic();
         let highram = self.mode.contains(MemMode::MF_HIGHRAM);
         let writeram = self.mode.contains(MemMode::MF_WRITERAM);
         let bank2 = self.mode.contains(MemMode::MF_BANK2);
@@ -554,12 +565,7 @@ impl Bus {
         let val = match self.pages_r[page] {
             PageSrc::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize],
             PageSrc::Aux(base) => self.aux_read((base | (addr & 0xFF)) as usize),
-            PageSrc::Rom(base) => {
-                let rom_off = (base | (addr & 0xFF)) as usize;
-                // ROM is mapped starting at $C000; offset accordingly
-                let index = rom_off.saturating_sub(0xC000);
-                self.rom.get(index).copied().unwrap_or(0)
-            }
+            PageSrc::Rom(base) => self.rom_read(base, addr),
             PageSrc::Io => self.io_read(addr, cycles),
             PageSrc::FloatingBus => self.floating_bus,
         };
@@ -600,10 +606,7 @@ impl Bus {
         match self.pages_r[page] {
             PageSrc::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize],
             PageSrc::Aux(base) => self.aux_read((base | (addr & 0xFF)) as usize),
-            PageSrc::Rom(base) => {
-                let index = ((base | (addr & 0xFF)) as usize).saturating_sub(0xC000);
-                self.rom.get(index).copied().unwrap_or(0)
-            }
+            PageSrc::Rom(base) => self.rom_read(base, addr),
             PageSrc::Io | PageSrc::FloatingBus => self.floating_bus,
         }
     }
@@ -618,6 +621,24 @@ impl Bus {
                 self.aux_write((base | (addr & 0xFF)) as usize, val);
             }
             PageDst::Inhibit => {}
+        }
+    }
+
+    /// Read a byte from the system ROM, handling 32KB bank switching for IIc.
+    #[inline]
+    fn rom_read(&self, base: u16, addr: u16) -> u8 {
+        let rom_off = (base | (addr & 0xFF)) as usize;
+        let index = rom_off.saturating_sub(0xC000);
+        if self.rom.len() > 16384 {
+            // 32KB ROM (IIc): upper 16KB = standard bank, lower 16KB = alternate bank.
+            let bank_offset = if self.mode.contains(MemMode::MF_ALTROM0) {
+                0 // alternate bank (lower 16KB of file)
+            } else {
+                0x4000 // standard bank (upper 16KB of file)
+            };
+            self.rom.get(bank_offset + index).copied().unwrap_or(0)
+        } else {
+            self.rom.get(index).copied().unwrap_or(0)
         }
     }
 
@@ -661,6 +682,13 @@ impl Bus {
                 let old = self.keyboard_data;
                 self.keyboard_data &= 0x7F;
                 old
+            }
+            // $C028: ROMSWITCH — toggle ROM bank on Apple IIc (read-strobe).
+            0x28 => {
+                if self.model.is_iic() {
+                    self.mode.toggle(MemMode::MF_ALTROM0);
+                }
+                self.floating_bus
             }
             0x30 => {
                 self.speaker_state = !self.speaker_state;
@@ -827,12 +855,17 @@ impl Bus {
                 self.floating_bus
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF — read also acts as write (same as $C050-$C057)
+            // On the IIc, these only control DHIRES when IOUDIS is set.
             0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.insert(MemMode::MF_DHIRES);
+                }
                 self.floating_bus
             }
             0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.remove(MemMode::MF_DHIRES);
+                }
                 self.floating_bus
             }
             // $C060: cassette input — bit 7 reflects the cassette audio waveform.
@@ -913,12 +946,16 @@ impl Bus {
                 self.rebuild_page_tables();
             }
             0x06 => {
-                self.mode.remove(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.remove(MemMode::MF_INTCXROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x07 => {
-                self.mode.insert(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.insert(MemMode::MF_INTCXROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x08 => {
                 self.mode.remove(MemMode::MF_ALTZP);
@@ -929,12 +966,16 @@ impl Bus {
                 self.rebuild_page_tables();
             }
             0x0A => {
-                self.mode.remove(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.remove(MemMode::MF_SLOTC3ROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x0B => {
-                self.mode.insert(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.insert(MemMode::MF_SLOTC3ROM);
+                    self.rebuild_page_tables();
+                }
             }
             // $C00C/$C00D: CLR/SET80VID — 80-column display mode
             0x0C => {
@@ -949,6 +990,12 @@ impl Bus {
             }
             0x0F => {
                 self.mode.insert(MemMode::MF_ALTCHAR);
+            }
+            // $C028: ROMSWITCH — toggle ROM bank on Apple IIc.
+            0x28 => {
+                if self.model.is_iic() {
+                    self.mode.toggle(MemMode::MF_ALTROM0);
+                }
             }
             // $C070: paddle strobe — reset one-shot timers
             0x70 => {
@@ -1019,11 +1066,16 @@ impl Bus {
                 self.ann[2] = true;
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF
+            // On the IIc, these only control DHIRES when IOUDIS is set.
             0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.insert(MemMode::MF_DHIRES);
+                }
             }
             0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.remove(MemMode::MF_DHIRES);
+                }
             }
             // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)
             0x7E => {
