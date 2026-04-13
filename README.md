@@ -22,8 +22,9 @@ Pre-built binaries for Windows, macOS, and Linux are available on the [Releases]
 - Apple II+ (`][+`)
 - Apple IIe (`//e`)
 - Apple IIe Enhanced (`//e Enhanced`) — default
+- Apple IIc (`//c`) — 32KB ROM, built-in peripherals, 128KB RAM
 
-> No support currently for the //c, //c+, Laser 128, Laser 128EX/EX2, or Apple IIgs.
+> No support currently for the //c+, Laser 128, Laser 128EX/EX2, or Apple IIgs.
 
 ---
 

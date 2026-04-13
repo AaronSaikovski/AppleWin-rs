@@ -36,7 +36,7 @@ impl Emulator {
     pub fn new(rom: Vec<u8>, model: Apple2Model, cpu_type: CpuType) -> Self {
         let is_65c02 = cpu_type == CpuType::Cpu65C02;
         let mut cpu = Cpu::new(is_65c02);
-        let mut bus = Bus::new(rom);
+        let mut bus = Bus::new(rom, model);
         cpu.reset(&mut bus);
         Self {
             cpu,
@@ -146,6 +146,9 @@ impl Emulator {
         // reading the reset vector.  On real hardware the ROM is always accessible
         // during the vector fetch regardless of language-card state.
         self.bus.mode = crate::bus::MemMode::empty();
+        if self.model.is_iic() {
+            self.bus.mode.insert(crate::bus::MemMode::MF_INTCXROM);
+        }
         self.bus.rebuild_page_tables();
         self.bus.cards.reset_all(power_cycle);
         self.bus.speaker_toggles.clear();

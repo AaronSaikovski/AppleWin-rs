@@ -4,6 +4,7 @@ use super::cpu6502::Cpu;
 use super::dispatch;
 use super::flags::Flags;
 use crate::bus::Bus;
+use crate::model::Apple2Model;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,7 +13,7 @@ use crate::bus::Bus;
 /// Create a minimal Bus with an empty 16 KB ROM (all zeros).
 /// The ROM covers $C000-$FFFF; reset vector defaults to $0000.
 fn make_bus() -> Bus {
-    Bus::new(vec![0u8; 16384])
+    Bus::new(vec![0u8; 16384], Apple2Model::AppleIIeEnh)
 }
 
 /// Create a Bus whose reset vector points to `entry`.
@@ -22,7 +23,7 @@ fn _make_bus_with_reset(entry: u16) -> Bus {
     let offset = 0xFFFC - 0xC000;
     rom[offset] = entry as u8;
     rom[offset + 1] = (entry >> 8) as u8;
-    Bus::new(rom)
+    Bus::new(rom, Apple2Model::AppleIIeEnh)
 }
 
 /// Create a 6502 CPU (NMOS) positioned at `pc`.
@@ -855,7 +856,7 @@ fn brk_rti() {
     let vec_off = 0xFFFE - 0xC000;
     rom[vec_off] = 0x00;
     rom[vec_off + 1] = 0x10;
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = cpu_6502(0x0200);
     cpu.flags = Flags::U; // clear I flag
 
@@ -1356,7 +1357,7 @@ fn irq_taken_when_i_clear() {
     let vec_off = 0xFFFE - 0xC000;
     rom[vec_off] = 0x00;
     rom[vec_off + 1] = 0x10;
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = cpu_6502(0x0200);
     cpu.flags.remove(Flags::I); // ensure I is clear
     cpu.irq_pending = 1;
@@ -1387,7 +1388,7 @@ fn nmi_always_taken() {
     let vec_off = 0xFFFA - 0xC000;
     rom[vec_off] = 0x00;
     rom[vec_off + 1] = 0x20;
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = cpu_6502(0x0200);
     cpu.flags.insert(Flags::I); // I flag does NOT block NMI
     cpu.nmi_pending = 1;
@@ -1408,7 +1409,7 @@ fn nmi_has_priority_over_irq() {
     let irq_off = 0xFFFE - 0xC000;
     rom[irq_off] = 0x00;
     rom[irq_off + 1] = 0x10;
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = cpu_6502(0x0200);
     cpu.nmi_pending = 1;
     cpu.irq_pending = 1;
@@ -1456,7 +1457,7 @@ fn reset_reads_vector() {
     let vec_off = 0xFFFC - 0xC000;
     rom[vec_off] = 0x00;
     rom[vec_off + 1] = 0x03;
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = Cpu::new(false);
     cpu.reset(&mut bus);
     assert_eq!(cpu.pc, 0x0300);
@@ -1604,7 +1605,7 @@ fn irq_deferral_unit_test() {
     let vec_off = 0xFFFE - 0xC000;
     rom[vec_off] = 0x00;
     rom[vec_off + 1] = 0x10; // IRQ vector -> $1000
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = cpu_6502(0x0200);
     cpu.flags.remove(Flags::I);
 
@@ -1896,7 +1897,7 @@ fn brk_clears_decimal_on_65c02() {
     let vec_off = 0xFFFE - 0xC000;
     rom[vec_off] = 0x00;
     rom[vec_off + 1] = 0x10;
-    let mut bus = Bus::new(rom);
+    let mut bus = Bus::new(rom, Apple2Model::AppleIIeEnh);
     let mut cpu = cpu_65c02(0x0200);
     cpu.flags.insert(Flags::D);
     poke(&mut bus, 0x0200, &[0x00, 0x00]); // BRK

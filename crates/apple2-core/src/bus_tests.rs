@@ -1,10 +1,11 @@
 //! Unit tests for the Apple II memory bus (soft switches, language card, page tables).
 
 use crate::bus::{Bus, MemMode, PageDst, PageSrc};
+use crate::model::Apple2Model;
 
 /// Create a minimal Bus with a 16K zero-filled ROM.
 fn make_bus() -> Bus {
-    Bus::new(vec![0u8; 16384])
+    Bus::new(vec![0u8; 16384], Apple2Model::AppleIIeEnh)
 }
 
 /// Write a byte through raw write (bypasses I/O side-effects).
