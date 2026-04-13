@@ -65,7 +65,39 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
+        // Bail-out detector: log first 3 hits of $9D0A (the PLA×6+RTS bail-out)
+        let mut bailout_logged: u32 = 0;
+
         while self.cpu.cycles < target {
+            // ── Bail-out detector: catch when PC=$9D0A ───────────────────
+            if self.cpu.pc == 0x9D0A && bailout_logged < 3 {
+                bailout_logged += 1;
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("cpu_trace.log")
+                {
+                    // Dump entity data at $0420-$043F and stack
+                    let mut entities = [0u8; 32];
+                    for (i, b) in entities.iter_mut().enumerate() {
+                        *b = self.bus.read(0x0420 + i as u16, self.cpu.cycles);
+                    }
+                    let mut stack = [0u8; 16];
+                    for (i, b) in stack.iter_mut().enumerate() {
+                        *b = self.bus.read(
+                            0x0100 + ((self.cpu.sp as u16 + 1 + i as u16) & 0xFF),
+                            self.cpu.cycles,
+                        );
+                    }
+                    let _ = writeln!(
+                        f,
+                        "[BAILOUT] PC=$9D0A S=${:02X} A=${:02X} cyc={} entities={:02X?} stack={:02X?}",
+                        self.cpu.sp, self.cpu.a, self.cpu.cycles, entities, stack
+                    );
+                }
+            }
+
             // ── Periodic PC logger (persistent across execute() calls) ───
             if self.cpu.cycles >= self.next_trace_log {
                 use std::io::Write;
