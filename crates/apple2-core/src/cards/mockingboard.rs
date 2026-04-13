@@ -18,197 +18,12 @@
 //! Reference: source/Mockingboard.cpp, source/AY8910.cpp
 
 use crate::card::{Card, CardType};
+use crate::cards::mb_firmware::MB_FIRMWARE;
 use crate::cards::ssi263::Ssi263;
+use crate::cards::via6522::Via6522;
 use crate::error::Result;
 use apple2_audio::ay8910::Ay8910;
 use std::io::{Read, Write};
-
-// Mockingboard firmware ROM (256 bytes, from AppleWin resource)
-static MB_FIRMWARE: &[u8; 256] = {
-    // The Mockingboard-D.rom is 2 KB; we take the first 256 bytes as the $Cn page
-    const ROM: &[u8] = include_bytes!("../../../../roms/Mockingboard-D.rom");
-    // Safety: ROM is guaranteed >= 256 bytes at compile time
-    // We use a const reference to the first 256 bytes
-    unsafe { &*(ROM.as_ptr() as *const [u8; 256]) }
-};
-
-// ── Simplified 6522 VIA ────────────────────────────────────────────────────
-
-/// Minimal 6522 VIA model — only the registers needed for AY control.
-struct Via {
-    ora: u8,  // Output Register A (data bus to AY)
-    orb: u8,  // Output Register B (BDIR/BC1 control lines)
-    ddra: u8, // Data Direction Register A
-    ddrb: u8, // Data Direction Register B
-    // Timer registers
-    t1cl: u8, // T1 counter low
-    t1ch: u8, // T1 counter high
-    t1ll: u8, // T1 latch low
-    t1lh: u8, // T1 latch high
-    t2cl: u8, // T2 counter low
-    t2ch: u8, // T2 counter high
-    sr: u8,   // Shift Register
-    acr: u8,  // Auxiliary Control Register
-    pcr: u8,  // Peripheral Control Register
-    ifr: u8,  // Interrupt Flag Register
-    ier: u8,  // Interrupt Enable Register
-    /// Last CPU cycle count when timers were updated.
-    last_cycles: u64,
-    /// True when T1 is running (armed by write to T1CH).
-    t1_running: bool,
-    /// True when T2 is running (armed by write to T2CH).
-    t2_running: bool,
-}
-
-impl Via {
-    fn new() -> Self {
-        Self {
-            ora: 0,
-            orb: 0,
-            ddra: 0,
-            ddrb: 0,
-            t1cl: 0,
-            t1ch: 0,
-            t1ll: 0,
-            t1lh: 0,
-            t2cl: 0,
-            t2ch: 0,
-            sr: 0,
-            acr: 0,
-            pcr: 0,
-            ifr: 0,
-            ier: 0,
-            last_cycles: 0,
-            t1_running: false,
-            t2_running: false,
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    /// Update timer state based on elapsed CPU cycles (lazy evaluation).
-    fn tick(&mut self, current_cycles: u64) {
-        if current_cycles <= self.last_cycles {
-            return;
-        }
-        let delta = (current_cycles - self.last_cycles) as u32;
-        self.last_cycles = current_cycles;
-
-        if self.t1_running {
-            let t1 = ((self.t1ch as u32) << 8) | (self.t1cl as u32);
-            if delta >= t1 + 2 {
-                // T1 expired
-                self.ifr |= 0x40; // bit 6 = T1 timeout
-                let continuous = self.acr & 0x40 != 0; // ACR bit 6
-                if continuous {
-                    // Reload from latch and continue
-                    let latch = ((self.t1lh as u32) << 8) | (self.t1ll as u32);
-                    let remaining = delta - (t1 + 2);
-                    let period = latch + 2;
-                    let new_count = if period > 0 {
-                        period - (remaining % period)
-                    } else {
-                        0
-                    };
-                    self.t1cl = (new_count & 0xFF) as u8;
-                    self.t1ch = ((new_count >> 8) & 0xFF) as u8;
-                } else {
-                    // One-shot: set to 0xFFFF and stop
-                    self.t1cl = 0xFF;
-                    self.t1ch = 0xFF;
-                    self.t1_running = false;
-                }
-            } else {
-                let new_t1 = t1 - delta;
-                self.t1cl = (new_t1 & 0xFF) as u8;
-                self.t1ch = ((new_t1 >> 8) & 0xFF) as u8;
-            }
-        }
-
-        if self.t2_running {
-            let t2 = ((self.t2ch as u32) << 8) | (self.t2cl as u32);
-            if delta >= t2 + 2 {
-                self.ifr |= 0x20; // bit 5 = T2 timeout
-                self.t2_running = false;
-                self.t2cl = 0xFF;
-                self.t2ch = 0xFF;
-            } else {
-                let new_t2 = t2 - delta;
-                self.t2cl = (new_t2 & 0xFF) as u8;
-                self.t2ch = ((new_t2 >> 8) & 0xFF) as u8;
-            }
-        }
-    }
-
-    fn read(&self, reg: u8) -> u8 {
-        match reg & 0x0F {
-            0x0 => self.orb,
-            0x1 => self.ora,
-            0x2 => self.ddrb,
-            0x3 => self.ddra,
-            0x4 => self.t1cl,
-            0x5 => self.t1ch,
-            0x6 => self.t1ll,
-            0x7 => self.t1lh,
-            0x8 => self.t2cl,
-            0x9 => self.t2ch,
-            0xA => self.sr,
-            0xB => self.acr,
-            0xC => self.pcr,
-            // IFR bit 7: set if any enabled interrupt is active
-            0xD => {
-                self.ifr
-                    | if self.ifr & self.ier & 0x7F != 0 {
-                        0x80
-                    } else {
-                        0x00
-                    }
-            }
-            0xE => self.ier,
-            _ => 0xFF,
-        }
-    }
-
-    fn write(&mut self, reg: u8, val: u8) {
-        match reg & 0x0F {
-            0x0 => self.orb = val,
-            0x1 => self.ora = val,
-            0x2 => self.ddrb = val,
-            0x3 => self.ddra = val,
-            // T1CL: update latch and counter low byte
-            0x4 => {
-                self.t1cl = val;
-                self.t1ll = val;
-            }
-            // T1CH: load counter, arm timer, clear IFR bit 6
-            0x5 => {
-                self.t1ch = val;
-                self.t1lh = val;
-                self.t1_running = true;
-                self.ifr &= !0x40;
-            }
-            // T1LL: just update latch, don't restart
-            0x6 => self.t1ll = val,
-            0x7 => self.t1lh = val,
-            0x8 => self.t2cl = val,
-            // T2CH: load counter, arm timer, clear IFR bit 5
-            0x9 => {
-                self.t2ch = val;
-                self.t2_running = true;
-                self.ifr &= !0x20;
-            }
-            0xA => self.sr = val,
-            0xB => self.acr = val,
-            0xC => self.pcr = val,
-            // IFR: writing 1s to bits CLEARS them (6522 behavior)
-            0xD => self.ifr &= !(val & 0x7F),
-            0xE => self.ier = val,
-            _ => {}
-        }
-    }
-}
 
 // ── MockingboardCard ───────────────────────────────────────────────────────
 
@@ -217,7 +32,7 @@ const AY_CLOCK: f64 = 1_020_484.0;
 
 pub struct MockingboardCard {
     slot: usize,
-    via: [Via; 2],
+    via: [Via6522; 2],
     ay: [Ay8910; 2],
     /// Two SSI263 speech chips (one per VIA, only present in Mockingboard D).
     ssi: [Ssi263; 2],
@@ -230,7 +45,7 @@ impl MockingboardCard {
     pub fn new(slot: usize) -> Self {
         Self {
             slot,
-            via: [Via::new(), Via::new()],
+            via: [Via6522::new(), Via6522::new()],
             ay: [Ay8910::new(), Ay8910::new()],
             ssi: std::array::from_fn(|_| Ssi263::new()),
             cycles_pending: 0,
@@ -358,32 +173,13 @@ impl Card for MockingboardCard {
     }
 
     fn irq_active(&self) -> bool {
-        self.via.iter().any(|v| v.ifr & v.ier & 0x7F != 0)
+        self.via.iter().any(|v| v.irq_active())
     }
 
     fn save_state(&self, out: &mut dyn Write) -> Result<()> {
         out.write_all(&[2u8])?; // version
         for via in &self.via {
-            out.write_all(&[
-                via.ora,
-                via.orb,
-                via.ddra,
-                via.ddrb,
-                via.t1cl,
-                via.t1ch,
-                via.t1ll,
-                via.t1lh,
-                via.t2cl,
-                via.t2ch,
-                via.sr,
-                via.acr,
-                via.pcr,
-                via.ifr,
-                via.ier,
-                via.t1_running as u8,
-                via.t2_running as u8,
-            ])?;
-            out.write_all(&via.last_cycles.to_le_bytes())?;
+            via.save_state(out)?;
         }
         for ay in &self.ay {
             out.write_all(&ay.regs)?;
@@ -404,30 +200,7 @@ impl Card for MockingboardCard {
         src.read_exact(&mut ver)?;
         // version 1 and 2: VIA and AY state
         for via in &mut self.via {
-            let mut buf = [0u8; 15];
-            src.read_exact(&mut buf)?;
-            via.ora = buf[0];
-            via.orb = buf[1];
-            via.ddra = buf[2];
-            via.ddrb = buf[3];
-            via.t1cl = buf[4];
-            via.t1ch = buf[5];
-            via.t1ll = buf[6];
-            via.t1lh = buf[7];
-            via.t2cl = buf[8];
-            via.t2ch = buf[9];
-            via.sr = buf[10];
-            via.acr = buf[11];
-            via.pcr = buf[12];
-            via.ifr = buf[13];
-            via.ier = buf[14];
-            let mut run_buf = [0u8; 2];
-            src.read_exact(&mut run_buf)?;
-            via.t1_running = run_buf[0] != 0;
-            via.t2_running = run_buf[1] != 0;
-            let mut cyc_buf = [0u8; 8];
-            src.read_exact(&mut cyc_buf)?;
-            via.last_cycles = u64::from_le_bytes(cyc_buf);
+            via.load_state(src)?;
         }
         for ay in &mut self.ay {
             src.read_exact(&mut ay.regs)?;

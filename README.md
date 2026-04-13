@@ -187,11 +187,11 @@ Or run the compiled binary directly:
 cargo test
 ```
 
-Runs 435 tests across all crates:
+Runs 458 tests across all crates:
 
 | Crate | Tests | Coverage |
 |---|---|---|
-| `apple2-core` | 266 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility, Apple IIc model (INTCXROM, ROM banking, IOUDIS/DHIRES gating) |
+| `apple2-core` | 284 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility, Apple IIc model (INTCXROM, ROM banking, IOUDIS/DHIRES gating), Via6522 (register read/write, timers, IRQ, state serialization) |
 | `apple2-core` (integration) | 12 | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution |
 | `apple2-iigs` | 89 | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP |
 | `apple2-iigs` (integration) | 15 | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches |

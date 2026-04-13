@@ -13,178 +13,11 @@
 //! is present, SD reads return 0xFF (card not present).
 
 use crate::card::{Card, CardType};
+use crate::cards::mb_firmware::MB_FIRMWARE;
+use crate::cards::via6522::Via6522;
 use crate::error::Result;
 use apple2_audio::ay8910::Ay8910;
 use std::io::{Read, Write};
-
-// Re-use the Mockingboard firmware ROM.
-static MB_FIRMWARE: &[u8; 256] = {
-    const ROM: &[u8] = include_bytes!("../../../../roms/Mockingboard-D.rom");
-    unsafe { &*(ROM.as_ptr() as *const [u8; 256]) }
-};
-
-// ── Simplified 6522 VIA (same as Mockingboard) ──────────────────────────────
-
-struct Via {
-    ora: u8,
-    orb: u8,
-    ddra: u8,
-    ddrb: u8,
-    t1cl: u8,
-    t1ch: u8,
-    t1ll: u8,
-    t1lh: u8,
-    t2cl: u8,
-    t2ch: u8,
-    sr: u8,
-    acr: u8,
-    pcr: u8,
-    ifr: u8,
-    ier: u8,
-    last_cycles: u64,
-    t1_running: bool,
-    t2_running: bool,
-}
-
-impl Via {
-    fn new() -> Self {
-        Self {
-            ora: 0,
-            orb: 0,
-            ddra: 0,
-            ddrb: 0,
-            t1cl: 0,
-            t1ch: 0,
-            t1ll: 0,
-            t1lh: 0,
-            t2cl: 0,
-            t2ch: 0,
-            sr: 0,
-            acr: 0,
-            pcr: 0,
-            ifr: 0,
-            ier: 0,
-            last_cycles: 0,
-            t1_running: false,
-            t2_running: false,
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    fn tick(&mut self, current_cycles: u64) {
-        if current_cycles <= self.last_cycles {
-            return;
-        }
-        let delta = (current_cycles - self.last_cycles) as u32;
-        self.last_cycles = current_cycles;
-
-        if self.t1_running {
-            let t1 = ((self.t1ch as u32) << 8) | (self.t1cl as u32);
-            if delta >= t1 + 2 {
-                self.ifr |= 0x40;
-                let continuous = self.acr & 0x40 != 0;
-                if continuous {
-                    let latch = ((self.t1lh as u32) << 8) | (self.t1ll as u32);
-                    let remaining = delta - (t1 + 2);
-                    let period = latch + 2;
-                    let new_count = if period > 0 {
-                        period - (remaining % period)
-                    } else {
-                        0
-                    };
-                    self.t1cl = (new_count & 0xFF) as u8;
-                    self.t1ch = ((new_count >> 8) & 0xFF) as u8;
-                } else {
-                    self.t1cl = 0xFF;
-                    self.t1ch = 0xFF;
-                    self.t1_running = false;
-                }
-            } else {
-                let new_t1 = t1 - delta;
-                self.t1cl = (new_t1 & 0xFF) as u8;
-                self.t1ch = ((new_t1 >> 8) & 0xFF) as u8;
-            }
-        }
-
-        if self.t2_running {
-            let t2 = ((self.t2ch as u32) << 8) | (self.t2cl as u32);
-            if delta >= t2 + 2 {
-                self.ifr |= 0x20;
-                self.t2_running = false;
-                self.t2cl = 0xFF;
-                self.t2ch = 0xFF;
-            } else {
-                let new_t2 = t2 - delta;
-                self.t2cl = (new_t2 & 0xFF) as u8;
-                self.t2ch = ((new_t2 >> 8) & 0xFF) as u8;
-            }
-        }
-    }
-
-    fn read(&self, reg: u8) -> u8 {
-        match reg & 0x0F {
-            0x0 => self.orb,
-            0x1 => self.ora,
-            0x2 => self.ddrb,
-            0x3 => self.ddra,
-            0x4 => self.t1cl,
-            0x5 => self.t1ch,
-            0x6 => self.t1ll,
-            0x7 => self.t1lh,
-            0x8 => self.t2cl,
-            0x9 => self.t2ch,
-            0xA => self.sr,
-            0xB => self.acr,
-            0xC => self.pcr,
-            0xD => {
-                self.ifr
-                    | if self.ifr & self.ier & 0x7F != 0 {
-                        0x80
-                    } else {
-                        0x00
-                    }
-            }
-            0xE => self.ier,
-            _ => 0xFF,
-        }
-    }
-
-    fn write(&mut self, reg: u8, val: u8) {
-        match reg & 0x0F {
-            0x0 => self.orb = val,
-            0x1 => self.ora = val,
-            0x2 => self.ddrb = val,
-            0x3 => self.ddra = val,
-            0x4 => {
-                self.t1cl = val;
-                self.t1ll = val;
-            }
-            0x5 => {
-                self.t1ch = val;
-                self.t1lh = val;
-                self.t1_running = true;
-                self.ifr &= !0x40;
-            }
-            0x6 => self.t1ll = val,
-            0x7 => self.t1lh = val,
-            0x8 => self.t2cl = val,
-            0x9 => {
-                self.t2ch = val;
-                self.t2_running = true;
-                self.ifr &= !0x20;
-            }
-            0xA => self.sr = val,
-            0xB => self.acr = val,
-            0xC => self.pcr = val,
-            0xD => self.ifr &= !(val & 0x7F),
-            0xE => self.ier = val,
-            _ => {}
-        }
-    }
-}
 
 // ── SdMusicCard ──────────────────────────────────────────────────────────────
 
@@ -193,7 +26,7 @@ const AY_CLOCK: f64 = 1_020_484.0;
 
 pub struct SdMusicCard {
     slot: usize,
-    via: [Via; 2],
+    via: [Via6522; 2],
     ay: [Ay8910; 2],
     cycles_pending: u64,
     /// SD card control register (directly addressed via ROM-page I/O).
@@ -207,7 +40,7 @@ impl SdMusicCard {
     pub fn new(slot: usize) -> Self {
         Self {
             slot,
-            via: [Via::new(), Via::new()],
+            via: [Via6522::new(), Via6522::new()],
             ay: [Ay8910::new(), Ay8910::new()],
             cycles_pending: 0,
             sd_ctrl: 0,
@@ -321,32 +154,13 @@ impl Card for SdMusicCard {
     fn update(&mut self, _cycles: u64) {}
 
     fn irq_active(&self) -> bool {
-        self.via.iter().any(|v| v.ifr & v.ier & 0x7F != 0)
+        self.via.iter().any(|v| v.irq_active())
     }
 
     fn save_state(&self, out: &mut dyn Write) -> Result<()> {
         out.write_all(&[1u8])?; // version
         for via in &self.via {
-            out.write_all(&[
-                via.ora,
-                via.orb,
-                via.ddra,
-                via.ddrb,
-                via.t1cl,
-                via.t1ch,
-                via.t1ll,
-                via.t1lh,
-                via.t2cl,
-                via.t2ch,
-                via.sr,
-                via.acr,
-                via.pcr,
-                via.ifr,
-                via.ier,
-                via.t1_running as u8,
-                via.t2_running as u8,
-            ])?;
-            out.write_all(&via.last_cycles.to_le_bytes())?;
+            via.save_state(out)?;
         }
         for ay in &self.ay {
             out.write_all(&ay.regs)?;
@@ -361,30 +175,7 @@ impl Card for SdMusicCard {
         let mut ver = [0u8; 1];
         src.read_exact(&mut ver)?;
         for via in &mut self.via {
-            let mut buf = [0u8; 15];
-            src.read_exact(&mut buf)?;
-            via.ora = buf[0];
-            via.orb = buf[1];
-            via.ddra = buf[2];
-            via.ddrb = buf[3];
-            via.t1cl = buf[4];
-            via.t1ch = buf[5];
-            via.t1ll = buf[6];
-            via.t1lh = buf[7];
-            via.t2cl = buf[8];
-            via.t2ch = buf[9];
-            via.sr = buf[10];
-            via.acr = buf[11];
-            via.pcr = buf[12];
-            via.ifr = buf[13];
-            via.ier = buf[14];
-            let mut run_buf = [0u8; 2];
-            src.read_exact(&mut run_buf)?;
-            via.t1_running = run_buf[0] != 0;
-            via.t2_running = run_buf[1] != 0;
-            let mut cyc_buf = [0u8; 8];
-            src.read_exact(&mut cyc_buf)?;
-            via.last_cycles = u64::from_le_bytes(cyc_buf);
+            via.load_state(src)?;
         }
         for ay in &mut self.ay {
             src.read_exact(&mut ay.regs)?;

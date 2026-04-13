@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IWM handshake echo, idle ready status, spinning latch return, and handshake vs
   idle fix interaction.
 
+- **Via6522 unit tests (18 new):** Register read/write roundtrip, T1/T2 timer
+  arming and expiry (one-shot and continuous modes), timer decrement without
+  expiry, IFR write-to-clear behavior, IFR bit 7 composite flag, IRQ active
+  detection, save/load state serialization roundtrip, T1LL latch-only write,
+  unknown register return value, and 4-bit register address masking.
+
 ### Fixed
 
 - **Apple IIc boot ROM garbled screen:** Fixed three issues that prevented the
@@ -60,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Refactor: Extract shared Via6522 module.** The 6522 VIA chip emulation
+  (struct, timers, register read/write, state serialization) was duplicated
+  identically across Mockingboard, Phasor, MegaAudio, and SD Music cards.
+  Extracted into `cards/via6522.rs` (~680 lines of duplication removed). The
+  shared Mockingboard firmware ROM was also extracted into `cards/mb_firmware.rs`
+  (previously duplicated in 3 card files).
 - `Bus::new()` now accepts an `Apple2Model` parameter for model-aware memory
   initialization and soft-switch behavior.
 - Custom ROM loading accepts 32KB ROMs in addition to 12KB and 16KB.
