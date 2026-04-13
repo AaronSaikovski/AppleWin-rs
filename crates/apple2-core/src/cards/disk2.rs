@@ -763,9 +763,11 @@ impl Card for Disk2Card {
             _ => {}
         }
 
-        // Only even addresses return the latch (UTAIIe Table 9.1).
-        // Odd addresses return floating bus (approximated as 0 here).
-        if reg & 1 == 0 { self.latch } else { 0 }
+        // UTAIIe Table 9.1: only even addresses return the latch.
+        // Odd addresses return floating bus on real hardware.  We return
+        // the latch value as a reasonable approximation (the data bus
+        // typically retains the last driven value).
+        self.latch
     }
 
     fn slot_io_write(&mut self, reg: u8, value: u8, cycles: u64) {
