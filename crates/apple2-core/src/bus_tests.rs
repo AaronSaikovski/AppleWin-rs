@@ -525,3 +525,163 @@ fn raw_read_write_bypass_io() {
     bus.write_raw(0x0500, 0xAD);
     assert_eq!(bus.main_ram[0x0500], 0xAD);
 }
+
+// ===========================================================================
+// Apple IIc model-specific tests
+// ===========================================================================
+
+/// Create a minimal IIc Bus with a 32K ROM (standard bank in upper 16K).
+fn make_iic_bus() -> Bus {
+    let mut rom = vec![0x00u8; 32768];
+    // Put a marker byte in the standard bank (upper 16K, offset 0x4000+)
+    // at ROM address $D000 (offset 0x4000 + 0x1000 = 0x5000 in file)
+    rom[0x5000] = 0xAA;
+    // Put a different marker in the alternate bank (lower 16K, offset 0x0000+)
+    // at ROM address $D000 (offset 0x1000 in file)
+    rom[0x1000] = 0xBB;
+    Bus::new(rom, Apple2Model::AppleIIc)
+}
+
+#[test]
+fn iic_intcxrom_always_on() {
+    let bus = make_iic_bus();
+    // IIc should have INTCXROM set at power-on
+    assert!(bus.mode.contains(MemMode::MF_INTCXROM));
+    // All $C1-$CF pages should route to ROM (not I/O)
+    for page in 0xC1..=0xCF {
+        assert!(
+            matches!(bus.pages_r[page], PageSrc::Rom(_)),
+            "page 0x{page:02X} should be Rom, got {:?}",
+            bus.pages_r[page]
+        );
+    }
+}
+
+#[test]
+fn iic_intcxrom_write_ignored() {
+    let mut bus = make_iic_bus();
+    // Writing to $C006 (INTCXROM off) should be ignored on IIc
+    bus.write(0xC006, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_INTCXROM));
+    // Pages should still route to ROM
+    assert!(matches!(bus.pages_r[0xC1], PageSrc::Rom(_)));
+}
+
+#[test]
+fn iic_slotc3rom_write_ignored() {
+    let mut bus = make_iic_bus();
+    // Writing to $C00B (SLOTC3ROM on) should be ignored on IIc
+    bus.write(0xC00B, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_SLOTC3ROM));
+}
+
+#[test]
+fn iic_rom_bank_switching_via_c028() {
+    let mut bus = make_iic_bus();
+    // Default: ALTROM0 is clear → standard bank (upper 16K)
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+
+    // Read from ROM at $D000 — should get the standard bank marker
+    let val = bus.read_raw(0xD000);
+    assert_eq!(val, 0xAA, "expected standard bank marker");
+
+    // Toggle ROM bank via $C028 write
+    bus.write(0xC028, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_ALTROM0));
+
+    // Now reading $D000 should return the alternate bank marker
+    let val = bus.read_raw(0xD000);
+    assert_eq!(val, 0xBB, "expected alternate bank marker");
+
+    // Toggle back
+    bus.write(0xC028, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+    let val = bus.read_raw(0xD000);
+    assert_eq!(val, 0xAA, "expected standard bank marker after toggle back");
+}
+
+#[test]
+fn iic_rom_bank_switching_via_c028_read() {
+    let mut bus = make_iic_bus();
+    // $C028 read should also toggle ALTROM0 (read-strobe)
+    bus.read(0xC028, 0);
+    assert!(bus.mode.contains(MemMode::MF_ALTROM0));
+    bus.read(0xC028, 0);
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+}
+
+#[test]
+fn iic_dhires_gated_by_ioudis() {
+    let mut bus = make_iic_bus();
+    // On IIc, DHIRES should NOT toggle when IOUDIS is clear
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC05E, 0, 0); // attempt DHIRESON
+    assert!(
+        !bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should not activate when IOUDIS is clear on IIc"
+    );
+
+    // Set IOUDIS, then DHIRES should work
+    bus.write(0xC07E, 0, 0); // IOUDIS on
+    assert!(bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC05E, 0, 0); // DHIRESON
+    assert!(bus.mode.contains(MemMode::MF_DHIRES));
+
+    // Clear DHIRES with IOUDIS still set
+    bus.write(0xC05F, 0, 0); // DHIRESOFF
+    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
+}
+
+#[test]
+fn iic_dhires_read_strobe_gated_by_ioudis() {
+    let mut bus = make_iic_bus();
+    // Read-strobe at $C05E should also be gated
+    bus.read(0xC05E, 0);
+    assert!(
+        !bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES read-strobe should be gated by IOUDIS on IIc"
+    );
+
+    bus.write(0xC07E, 0, 0); // IOUDIS on
+    bus.read(0xC05E, 0);
+    assert!(bus.mode.contains(MemMode::MF_DHIRES));
+}
+
+#[test]
+fn iic_c028_noop_on_iie() {
+    let mut bus = make_bus(); // IIe Enhanced
+    // $C028 should NOT toggle ALTROM0 on a non-IIc model
+    bus.write(0xC028, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+}
+
+#[test]
+fn iie_dhires_not_gated_by_ioudis() {
+    let mut bus = make_bus(); // IIe Enhanced
+    // On IIe, DHIRES should toggle regardless of IOUDIS state
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC05E, 0, 0);
+    assert!(
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should work on IIe even without IOUDIS"
+    );
+}
+
+#[test]
+fn iic_32k_rom_reads_standard_bank_by_default() {
+    let mut bus = make_iic_bus();
+    // Place distinct values in both banks at $F000
+    let f000_std_offset = 0x4000 + (0xF000 - 0xC000); // 0x7000
+    let f000_alt_offset = 0xF000 - 0xC000; // 0x3000
+    bus.rom[f000_std_offset] = 0x11;
+    bus.rom[f000_alt_offset] = 0x22;
+
+    // Default (ALTROM0 clear) → standard bank
+    let val = bus.read_raw(0xF000);
+    assert_eq!(val, 0x11);
+
+    // Switch to alternate bank
+    bus.write(0xC028, 0, 0);
+    let val = bus.read_raw(0xF000);
+    assert_eq!(val, 0x22);
+}
