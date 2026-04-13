@@ -31,6 +31,8 @@ pub struct Emulator {
     pub mode: AppMode,
     /// Next CPU cycle at which to emit a trace log line (debug diagnostic).
     next_trace_log: u64,
+    /// Whether we've already dumped the game loop code (one-shot).
+    code_dumped: bool,
 }
 
 impl Emulator {
@@ -46,6 +48,7 @@ impl Emulator {
             model,
             mode: AppMode::Logo,
             next_trace_log: 50_000_000,
+            code_dumped: false,
         }
     }
 
@@ -91,6 +94,28 @@ impl Emulator {
                         if motor { "ON" } else { "off" },
                         self.cpu.cycles
                     );
+                }
+                // Dump game loop code once when PC enters the $9Cxx range
+                if !self.code_dumped && (0x9C00..0x9E00).contains(&pc) && !motor {
+                    self.code_dumped = true;
+                    if let Ok(mut df) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("cpu_trace.log")
+                    {
+                        for &(sa, len) in &[(0x9400u16, 0x120), (0x9C00, 0x120), (0xA500, 0x100)] {
+                            let mut chunk = Vec::with_capacity(len);
+                            for i in 0..len {
+                                chunk.push(self.bus.read(sa + i as u16, self.cpu.cycles));
+                            }
+                            let _ = writeln!(df, "[DUMP] ${:04X}: {:02X?}", sa, chunk);
+                        }
+                        let mut zp = [0u8; 256];
+                        for (i, b) in zp.iter_mut().enumerate() {
+                            *b = self.bus.read(i as u16, self.cpu.cycles);
+                        }
+                        let _ = writeln!(df, "[DUMP] ZP: {:02X?}", &zp[..]);
+                    }
                 }
                 // Use shorter interval (10M) to get more samples during the freeze
                 self.next_trace_log = self.cpu.cycles + 10_000_000;
