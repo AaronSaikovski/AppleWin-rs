@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Apple IIgs emulation** (new `apple2-iigs` crate): 65C816 CPU with all 256
+  opcodes (emulation + native mode, 8/16-bit registers, 24-bit addressing),
+  IIgs memory bus (256KB-8MB RAM, 128-256KB ROM), Mega II IIe compatibility,
+  Super Hi-Res video (320x200/640x200), Ensoniq DOC 5503 wavetable audio
+  (32 oscillators, 64KB sound RAM), ADB keyboard/mouse, BRAM with factory
+  defaults, SmartPort disk I/O, speed control (1/2.8 MHz), shadow register.
+  ROM 00/01/03 auto-detected from `roms/Apple_IIgs/`. GUI integration with
+  machine type dropdown, IIgs settings (RAM size, ROM path), SHR rendering,
+  Ensoniq audio, debugger support. 136 new tests (89 CPU + 32 peripheral +
+  15 integration).
+
 - **Apple IIc emulation:** Full Apple //c model support with 32KB ROM (v04,
   341-0445-B) embedded at compile time, built-in peripherals (Super Serial Card
   in slots 1 & 2, 80-column text in slot 3, Mouse in slot 4, Disk II in slot 6),

@@ -1,0 +1,18 @@
+[package]
+name = "apple2-iigs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Apple IIgs emulation: 65C816 CPU, IIgs memory bus, Mega II, SHR video, Ensoniq audio"
+
+[dependencies]
+apple2-core  = { path = "../apple2-core" }
+apple2-audio = { path = "../apple2-audio" }
+apple2-video = { path = "../apple2-video" }
+bitflags     = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+serde_bytes  = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
