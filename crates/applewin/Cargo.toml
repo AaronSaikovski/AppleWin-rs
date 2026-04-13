@@ -14,6 +14,7 @@ apple2-core     = { workspace = true }
 apple2-audio    = { workspace = true }
 apple2-video    = { workspace = true }
 apple2-debugger = { workspace = true }
+apple2-iigs     = { workspace = true }
 
 thiserror  = { workspace = true }
 tracing    = { workspace = true }

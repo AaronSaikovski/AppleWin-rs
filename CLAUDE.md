@@ -43,21 +43,22 @@ cargo fmt
 
 ## Workspace Structure
 
-The project is a Cargo workspace with 5 crates, each with a distinct responsibility:
+The project is a Cargo workspace with 6 crates, each with a distinct responsibility:
 
-| Crate                    | Purpose                                                                             |
-| ------------------------ | ----------------------------------------------------------------------------------- |
-| `crates/apple2-core`     | Pure emulation engine — CPU, memory bus, expansion cards. **Zero OS dependencies.** |
-| `crates/apple2-audio`    | Audio synthesis (speaker, AY-8910/Mockingboard, SSI263 speech)                      |
-| `crates/apple2-video`    | Video rendering pipeline (NTSC, RGB, hi-res, text modes)                            |
-| `crates/apple2-debugger` | 6502 disassembler, breakpoints, symbol table — no GUI dependencies                  |
-| `crates/applewin`        | Main application: egui/eframe GUI, audio I/O (cpal), gamepad (gilrs), TOML config   |
+| Crate | Purpose |
+|-------|---------|
+| `crates/apple2-core` | Pure emulation engine — CPU, memory bus, expansion cards. **Zero OS dependencies.** |
+| `crates/apple2-iigs` | Apple IIgs emulation — 65C816 CPU, IIgs memory bus, Mega II, SHR video, Ensoniq DOC, ADB, SmartPort |
+| `crates/apple2-audio` | Audio synthesis (speaker, AY-8910/Mockingboard, SSI263 speech) |
+| `crates/apple2-video` | Video rendering pipeline (NTSC, RGB, hi-res, text modes) |
+| `crates/apple2-debugger` | 6502 disassembler, breakpoints, symbol table — no GUI dependencies |
+| `crates/applewin` | Main application: egui/eframe GUI, audio I/O (cpal), gamepad (gilrs), TOML config |
 
 ## Key Architectural Decisions
 
 **Core has no platform dependencies.** `apple2-core` is strictly OS-agnostic. All platform code (GUI, audio, file dialogs, input) lives exclusively in `crates/applewin`. This is enforced by crate boundaries.
 
-**ROMs are compiled in.** All ROM data is embedded via `include_bytes!` macros — there is no runtime ROM file loading. ROM files live under the top-level `roms/` directory.
+**Apple II/IIe/IIc ROMs are compiled in.** ROM data is embedded via `include_bytes!` macros from the top-level `roms/` directory. **Apple IIgs ROMs** are loaded at runtime from `roms/Apple_IIgs/` (128-256KB, auto-detected).
 
 **Headless mode.** Building with `--no-default-features --features headless` produces a binary with no GUI or audio, suitable for CI or library embedding.
 
@@ -93,7 +94,7 @@ At runtime, `applewin` stores a TOML config file at the platform config dir (`%A
 
 ## Supported Hardware
 
-**Models**: Apple II, II+, IIe, IIe Enhanced, Apple //c (and some clones). Apple IIgs is **not** supported.
+**Models**: Apple II, II+, IIe, IIe Enhanced, Apple //c, Apple IIgs (and some clones).
 
 **Expansion cards** (19 implemented): Disk II, Hard Disk Controller, Mockingboard/Phasor, SAM, SSI263, 80-Column, RamWorks III, Language Card, Saturn, Mouse, 4Play, SNES MAX, Uthernet I/II, Printer, Super Serial, Z80 CP/M, VidHD, No Slot Clock.
 

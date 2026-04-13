@@ -171,6 +171,11 @@ pub struct Config {
     pub custom_rom_path: Option<String>,
     /// Path to a custom F8 ROM (2K) that replaces only the $F800–$FFFF region.
     pub custom_f8_rom_path: Option<String>,
+    /// Path to the Apple IIgs ROM image file (128KB or 256KB).
+    /// When `machine_type` is `AppleIIgs`, this ROM is loaded at startup.
+    pub iigs_rom_path: Option<String>,
+    /// Apple IIgs RAM size in kilobytes (256–8192). Default 1024 (1MB).
+    pub iigs_ram_kb: u32,
 
     // ── UI behaviour ──────────────────────────────────────────────────────────
     /// Show a confirmation dialog before any reset (matches AppleWin's
@@ -272,6 +277,8 @@ impl Default for Config {
             memory_init_pattern: 0,
             custom_rom_path: None,
             custom_f8_rom_path: None,
+            iigs_rom_path: None,
+            iigs_ram_kb: 1024,
             confirm_reboot: true,
             show_disk_status: true, // always show disk LEDs by default
             scrolllock_toggle: false,
@@ -455,6 +462,7 @@ pub fn cpu_name(c: CpuType) -> &'static str {
         CpuType::Cpu6502 => "6502",
         CpuType::Cpu65C02 => "65C02",
         CpuType::CpuZ80 => "Z80",
+        CpuType::Cpu65C816 => "65C816",
     }
 }
 

@@ -203,6 +203,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "apple2-iigs"
+version = "1.0.0"
+dependencies = [
+ "apple2-audio",
+ "apple2-core",
+ "apple2-video",
+ "bitflags 2.11.0",
+ "serde",
+ "serde_bytes",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "apple2-video"
 version = "1.1.0"
 dependencies = [
@@ -219,6 +233,7 @@ dependencies = [
  "apple2-audio",
  "apple2-core",
  "apple2-debugger",
+ "apple2-iigs",
  "apple2-video",
  "cpal",
  "eframe",

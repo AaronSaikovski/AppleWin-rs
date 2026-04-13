@@ -12,8 +12,8 @@ pub enum Apple2Model {
     AppleIIeEnh = 3, // Enhanced //e
     AppleIIc = 4,
     AppleIIcPlus = 5,
-    AppleIIgs = 6, // placeholder — not emulated
-    Clone = 7,     // Pravets, Franklin, etc.
+    AppleIIgs = 6,
+    Clone = 7, // Pravets, Franklin, etc.
 }
 
 impl Apple2Model {
@@ -33,4 +33,5 @@ pub enum CpuType {
     #[default]
     Cpu65C02 = 2,
     CpuZ80 = 3,
+    Cpu65C816 = 4,
 }

@@ -5,6 +5,7 @@ members = [
     "crates/apple2-audio",
     "crates/apple2-video",
     "crates/apple2-debugger",
+    "crates/apple2-iigs",
     "crates/applewin",
 ]
 
@@ -20,6 +21,7 @@ apple2-core     = { path = "crates/apple2-core" }
 apple2-audio    = { path = "crates/apple2-audio" }
 apple2-video    = { path = "crates/apple2-video" }
 apple2-debugger = { path = "crates/apple2-debugger" }
+apple2-iigs     = { path = "crates/apple2-iigs" }
 
 bitflags         = { version = "2", features = ["serde"] }
 thiserror        = "1"
