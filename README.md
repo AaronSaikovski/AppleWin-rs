@@ -74,6 +74,8 @@ AppleWin-rs/
 │   ├── apple2-video      # Video rendering (NTSC, RGB, hi-res, double hi-res)
 │   ├── apple2-debugger   # Symbolic debugger (disassembler, breakpoints, symbols)
 │   └── applewin          # Main application, GUI, and platform I/O
+├── roms/                 # All ROM files (embedded at compile time via include_bytes!)
+│   └── firmware/         # ProDOS, DOS 3.3, and utility firmware binaries
 └── bin/                  # Runtime resources (disk images, symbol tables)
 ```
 
@@ -92,7 +94,7 @@ AppleWin-rs/
 - **`apple2-core` is OS-agnostic** — no platform code, no I/O; purely emulation logic.
 - **Subsystem crates** (`audio`, `video`, `debugger`) depend only on `apple2-core`.
 - **`applewin`** is the only crate with platform and GUI dependencies.
-- **ROMs are embedded at compile time** via `include_bytes!` — no runtime file loading required.
+- **ROMs are centralised** in the top-level `roms/` directory and embedded at compile time via `include_bytes!` — no runtime file loading required.
 - **Headless mode** is available (no GUI/audio dependencies) for testing and CI.
 
 ---

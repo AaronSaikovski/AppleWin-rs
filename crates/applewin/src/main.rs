@@ -4,7 +4,7 @@ use apple2_core::{
 };
 
 /// Apple IIe Enhanced 16KB ROM embedded at compile time.
-static APPLE2E_ROM: &[u8] = include_bytes!("../roms/apple2e_enhanced.rom");
+static APPLE2E_ROM: &[u8] = include_bytes!("../../../roms/apple2e_enhanced.rom");
 
 #[cfg(feature = "gui")]
 mod config;
@@ -3801,7 +3801,7 @@ mod gui {
     // Per UTAIIe §8-30, the ROM bit order is also reversed: bit 0 = leftmost pixel.
     // We XOR-invert then bit-reverse bits [6:0] and shift left by 1 to produce our
     // MSB-first format (bit 7 = leftmost pixel).
-    static VIDEO_ROM: &[u8] = include_bytes!("../roms/Apple2e_Enhanced_Video.rom");
+    static VIDEO_ROM: &[u8] = include_bytes!("../../../roms/Apple2e_Enhanced_Video.rom");
 
     fn build_font_from_rom(rom: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(128 * 8);

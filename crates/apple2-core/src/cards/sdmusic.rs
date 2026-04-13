@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 
 // Re-use the Mockingboard firmware ROM.
 static MB_FIRMWARE: &[u8; 256] = {
-    const ROM: &[u8] = include_bytes!("../../roms/Mockingboard-D.rom");
+    const ROM: &[u8] = include_bytes!("../../../../roms/Mockingboard-D.rom");
     unsafe { &*(ROM.as_ptr() as *const [u8; 256]) }
 };
 

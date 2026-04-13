@@ -26,7 +26,7 @@ use std::io::{Read, Write};
 // Mockingboard firmware ROM (256 bytes, from AppleWin resource)
 static MB_FIRMWARE: &[u8; 256] = {
     // The Mockingboard-D.rom is 2 KB; we take the first 256 bytes as the $Cn page
-    const ROM: &[u8] = include_bytes!("../../roms/Mockingboard-D.rom");
+    const ROM: &[u8] = include_bytes!("../../../../roms/Mockingboard-D.rom");
     // Safety: ROM is guaranteed >= 256 bytes at compile time
     // We use a const reference to the first 256 bytes
     unsafe { &*(ROM.as_ptr() as *const [u8; 256]) }
