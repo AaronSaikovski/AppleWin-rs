@@ -3,7 +3,7 @@
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.1-green.svg)
 
 A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
@@ -319,3 +319,8 @@ Please report issues for this Rust port at: [https://github.com/AaronSaikovski/A
 GPL-2.0-or-later — see [LICENSE](LICENSE) for details.
 
 This project is based on [AppleWin](https://github.com/AppleWin/AppleWin), which is also licensed under GPL-2.0-or-later.
+
+---
+
+## Apple II Roms
+Download Apple II and IIGS roms from [Virtual Apple ](https://www.virtualapple.org/),

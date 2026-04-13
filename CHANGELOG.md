@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IIe regression guards. Integration tests for IIc boot, reset persistence, and
   32KB ROM execution.
 
+### Removed
+
+- **Debug CPU trace logging:** Removed diagnostic cpu_trace.log instrumentation
+  from the emulator execute loop (caller trace, periodic PC logger, and memory
+  dump code). These were temporary debugging aids used during the v1.1.0 Disk II
+  and language card fixes.
+
 ### Changed
 
 - `Bus::new()` now accepts an `Apple2Model` parameter for model-aware memory

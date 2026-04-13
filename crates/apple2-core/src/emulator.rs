@@ -29,10 +29,6 @@ pub struct Emulator {
     pub bus: Bus,
     pub model: Apple2Model,
     pub mode: AppMode,
-    /// Next CPU cycle at which to emit a trace log line (debug diagnostic).
-    next_trace_log: u64,
-    /// Whether we've already dumped the game loop code (one-shot).
-    code_dumped: bool,
 }
 
 impl Emulator {
@@ -47,8 +43,6 @@ impl Emulator {
             bus,
             model,
             mode: AppMode::Logo,
-            next_trace_log: 50_000_000,
-            code_dumped: false,
         }
     }
 
@@ -65,109 +59,7 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
-        // Caller trace: log first 5 hits of $9C06 with stack dump
-        let mut caller_logged: u32 = 0;
-
         while self.cpu.cycles < target {
-            // ── Caller trace: dump return addresses when entering $9C06 ──
-            if self.cpu.pc == 0x9C06 && caller_logged < 5 && !self.bus.disk_motor_on() {
-                caller_logged += 1;
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("cpu_trace.log")
-                {
-                    // Dump 32 bytes of stack (return addresses)
-                    let mut stack = [0u8; 32];
-                    for (i, b) in stack.iter_mut().enumerate() {
-                        *b = self.bus.read(
-                            0x0100 + ((self.cpu.sp as u16 + 1 + i as u16) & 0xFF),
-                            self.cpu.cycles,
-                        );
-                    }
-                    // Also dump the outer code: 64 bytes starting from each return address
-                    let ret1 = stack[0] as u16 | ((stack[1] as u16) << 8);
-                    let ret2 = stack[2] as u16 | ((stack[3] as u16) << 8);
-                    let mut outer1 = [0u8; 64];
-                    let mut outer2 = [0u8; 64];
-                    for i in 0..64u16 {
-                        outer1[i as usize] = self.bus.read(ret1.wrapping_add(i), self.cpu.cycles);
-                        outer2[i as usize] = self.bus.read(ret2.wrapping_add(i), self.cpu.cycles);
-                    }
-                    let _ = writeln!(
-                        f,
-                        "[CALLER] S=${:02X} cyc={} stack={:02X?}",
-                        self.cpu.sp, self.cpu.cycles, stack
-                    );
-                    let _ = writeln!(f, "[CALLER] ret1=${:04X}: {:02X?}", ret1, outer1);
-                    let _ = writeln!(f, "[CALLER] ret2=${:04X}: {:02X?}", ret2, outer2);
-                }
-            }
-
-            // ── Periodic PC logger (persistent across execute() calls) ───
-            if self.cpu.cycles >= self.next_trace_log {
-                use std::io::Write;
-                let pc = self.cpu.pc;
-                let opcode = self.bus.read(pc, self.cpu.cycles);
-                let b1 = self.bus.read(pc.wrapping_add(1), self.cpu.cycles);
-                let b2 = self.bus.read(pc.wrapping_add(2), self.cpu.cycles);
-                let motor = self.bus.disk_motor_on();
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("cpu_trace.log")
-                {
-                    let _ = writeln!(
-                        f,
-                        "[TRACE] PC=${:04X} A=${:02X} X=${:02X} Y={:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} motor={} cyc={}",
-                        pc,
-                        self.cpu.a,
-                        self.cpu.x,
-                        self.cpu.y,
-                        self.cpu.sp,
-                        self.cpu.flags.bits(),
-                        opcode,
-                        b1,
-                        b2,
-                        if motor { "ON" } else { "off" },
-                        self.cpu.cycles
-                    );
-                }
-                // Dump game loop code once when PC enters the $9Cxx range
-                if !self.code_dumped && (0x9C00..0x9E00).contains(&pc) {
-                    self.code_dumped = true;
-                    if let Ok(mut df) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("cpu_trace.log")
-                    {
-                        for &(sa, len) in &[
-                            (0x9400u16, 0x120),
-                            (0x9C00, 0x200),
-                            (0xA500, 0x100),
-                            (0xE060, 0xC0),
-                            (0x0400, 0x100),
-                            (0x0E00, 0x40),
-                            (0x9100, 0x60),
-                            (0xE000, 0x60),
-                        ] {
-                            let mut chunk = Vec::with_capacity(len);
-                            for i in 0..len {
-                                chunk.push(self.bus.read(sa + i as u16, self.cpu.cycles));
-                            }
-                            let _ = writeln!(df, "[DUMP] ${:04X}: {:02X?}", sa, chunk);
-                        }
-                        let mut zp = [0u8; 256];
-                        for (i, b) in zp.iter_mut().enumerate() {
-                            *b = self.bus.read(i as u16, self.cpu.cycles);
-                        }
-                        let _ = writeln!(df, "[DUMP] ZP: {:02X?}", &zp[..]);
-                    }
-                }
-                // Use shorter interval (10M) to get more samples during the freeze
-                self.next_trace_log = self.cpu.cycles + 10_000_000;
-            }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
             if self.cpu.waiting {
