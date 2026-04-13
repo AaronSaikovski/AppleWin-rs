@@ -237,14 +237,14 @@ fn snapshot_round_trip() {
 /// Build a 32KB IIc ROM image with a reset vector pointing to `entry`.
 fn build_iic_rom(entry: u16, code_addr: u16, code: &[u8]) -> Vec<u8> {
     let mut rom = vec![0xEA; 32768]; // fill with NOP
-    // Standard bank is the upper 16K (offsets 0x4000-0x7FFF)
-    let vec_off = 0x4000 + (0xFFFC - 0xC000); // 0x7FFC
+    // Standard bank is the lower 16K (offsets 0x0000-0x3FFF)
+    let vec_off = 0xFFFC - 0xC000; // 0x3FFC
     rom[vec_off] = entry as u8;
     rom[vec_off + 1] = (entry >> 8) as u8;
 
-    // Place code in the standard bank
+    // Place code in the standard bank (lower 16K)
     if code_addr >= 0xC000 {
-        let off = 0x4000 + (code_addr - 0xC000) as usize;
+        let off = (code_addr - 0xC000) as usize;
         for (i, &b) in code.iter().enumerate() {
             if off + i < rom.len() {
                 rom[off + i] = b;

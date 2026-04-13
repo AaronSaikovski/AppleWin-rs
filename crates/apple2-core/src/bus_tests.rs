@@ -530,15 +530,15 @@ fn raw_read_write_bypass_io() {
 // Apple IIc model-specific tests
 // ===========================================================================
 
-/// Create a minimal IIc Bus with a 32K ROM (standard bank in upper 16K).
+/// Create a minimal IIc Bus with a 32K ROM (standard bank in lower 16K).
 fn make_iic_bus() -> Bus {
     let mut rom = vec![0x00u8; 32768];
-    // Put a marker byte in the standard bank (upper 16K, offset 0x4000+)
-    // at ROM address $D000 (offset 0x4000 + 0x1000 = 0x5000 in file)
-    rom[0x5000] = 0xAA;
-    // Put a different marker in the alternate bank (lower 16K, offset 0x0000+)
+    // Put a marker byte in the standard bank (lower 16K, offset 0x0000+)
     // at ROM address $D000 (offset 0x1000 in file)
-    rom[0x1000] = 0xBB;
+    rom[0x1000] = 0xAA;
+    // Put a different marker in the alternate bank (upper 16K, offset 0x4000+)
+    // at ROM address $D000 (offset 0x4000 + 0x1000 = 0x5000 in file)
+    rom[0x5000] = 0xBB;
     Bus::new(rom, Apple2Model::AppleIIc)
 }
 
@@ -578,7 +578,7 @@ fn iic_slotc3rom_write_ignored() {
 #[test]
 fn iic_rom_bank_switching_via_c028() {
     let mut bus = make_iic_bus();
-    // Default: ALTROM0 is clear → standard bank (upper 16K)
+    // Default: ALTROM0 is clear → standard bank (lower 16K)
     assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
 
     // Read from ROM at $D000 — should get the standard bank marker
@@ -671,16 +671,16 @@ fn iie_dhires_not_gated_by_ioudis() {
 fn iic_32k_rom_reads_standard_bank_by_default() {
     let mut bus = make_iic_bus();
     // Place distinct values in both banks at $F000
-    let f000_std_offset = 0x4000 + (0xF000 - 0xC000); // 0x7000
-    let f000_alt_offset = 0xF000 - 0xC000; // 0x3000
+    let f000_std_offset = 0xF000 - 0xC000; // 0x3000 (lower 16K = standard)
+    let f000_alt_offset = 0x4000 + (0xF000 - 0xC000); // 0x7000 (upper 16K = alternate)
     bus.rom[f000_std_offset] = 0x11;
     bus.rom[f000_alt_offset] = 0x22;
 
-    // Default (ALTROM0 clear) → standard bank
+    // Default (ALTROM0 clear) → standard bank (lower 16K)
     let val = bus.read_raw(0xF000);
     assert_eq!(val, 0x11);
 
-    // Switch to alternate bank
+    // Switch to alternate bank (upper 16K)
     bus.write(0xC028, 0, 0);
     let val = bus.read_raw(0xF000);
     assert_eq!(val, 0x22);

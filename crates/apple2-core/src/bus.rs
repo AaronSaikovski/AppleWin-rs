@@ -625,16 +625,20 @@ impl Bus {
     }
 
     /// Read a byte from the system ROM, handling 32KB bank switching for IIc.
+    ///
+    /// 32KB ROM layout: lower 16KB (offset 0x0000) = standard bank (active at
+    /// power-on), upper 16KB (offset 0x4000) = alternate bank (selected when
+    /// MF_ALTROM0 is set via $C028 toggle).
     #[inline]
     fn rom_read(&self, base: u16, addr: u16) -> u8 {
         let rom_off = (base | (addr & 0xFF)) as usize;
         let index = rom_off.saturating_sub(0xC000);
         if self.rom.len() > 16384 {
-            // 32KB ROM (IIc): upper 16KB = standard bank, lower 16KB = alternate bank.
+            // 32KB ROM (IIc): lower 16KB = standard bank, upper 16KB = alternate bank.
             let bank_offset = if self.mode.contains(MemMode::MF_ALTROM0) {
-                0 // alternate bank (lower 16KB of file)
+                0x4000 // alternate bank (upper 16KB of file)
             } else {
-                0x4000 // standard bank (upper 16KB of file)
+                0 // standard bank (lower 16KB of file)
             };
             self.rom.get(bank_offset + index).copied().unwrap_or(0)
         } else {
