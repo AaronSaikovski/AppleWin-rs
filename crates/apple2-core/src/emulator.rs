@@ -70,6 +70,7 @@ impl Emulator {
                 let opcode = self.bus.read(pc, self.cpu.cycles);
                 let b1 = self.bus.read(pc.wrapping_add(1), self.cpu.cycles);
                 let b2 = self.bus.read(pc.wrapping_add(2), self.cpu.cycles);
+                let motor = self.bus.disk_motor_on();
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -77,7 +78,7 @@ impl Emulator {
                 {
                     let _ = writeln!(
                         f,
-                        "[TRACE] PC=${:04X} A=${:02X} X=${:02X} Y={:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} cyc={}",
+                        "[TRACE] PC=${:04X} A=${:02X} X=${:02X} Y={:02X} S=${:02X} P=${:02X} op={:02X} {:02X} {:02X} motor={} cyc={}",
                         pc,
                         self.cpu.a,
                         self.cpu.x,
@@ -87,10 +88,12 @@ impl Emulator {
                         opcode,
                         b1,
                         b2,
+                        if motor { "ON" } else { "off" },
                         self.cpu.cycles
                     );
                 }
-                self.next_trace_log = self.cpu.cycles + 50_000_000;
+                // Use shorter interval (10M) to get more samples during the freeze
+                self.next_trace_log = self.cpu.cycles + 10_000_000;
             }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
