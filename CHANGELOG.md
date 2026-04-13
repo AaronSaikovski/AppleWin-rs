@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IIe regression guards. Integration tests for IIc boot, reset persistence, and
   32KB ROM execution.
 
+- **Disk II IWM compatibility tests (5 new):** Tests for Q7H write latch storage,
+  IWM handshake echo, idle ready status, spinning latch return, and handshake vs
+  idle fix interaction.
+
+### Fixed
+
+- **Apple IIc boot ROM garbled screen:** Fixed three issues that prevented the
+  IIc boot ROM from executing correctly:
+  - **ROM bank mapping:** The 32KB ROM bank offsets were inverted — the standard
+    bank (lower 16K) was mapped as alternate and vice versa, causing the CPU to
+    read from the empty upper bank.
+  - **Padded ROM mirroring:** 16K ROMs padded to 32K now mirror the lower bank
+    to the upper bank, so the $C028 ROM bank switch doesn't jump into zeros.
+  - **IWM disk controller compatibility:** The Disk2Card now handles two IWM-specific
+    polling loops in the IIc boot ROM: (1) the handshake loop at $CC29 that writes
+    to Q7H and expects the value echoed back via Q7L, and (2) the ready loop at
+    $CC3F that checks Q7L bit 5 for controller busy status. Without these fixes the
+    CPU would loop indefinitely during boot.
+
 ### Removed
 
 - **Debug CPU trace logging:** Removed diagnostic cpu_trace.log instrumentation

@@ -2268,4 +2268,86 @@ mod tests {
         let _bit = drive.woz_read_bit();
         assert_eq!(drive.bit_pos, 0); // wrapped around
     }
+
+    // ── IWM compatibility (Apple IIc boot ROM) ──────────────────────────
+
+    #[test]
+    fn test_q7h_write_stores_latch() {
+        // Writing to register $0F (Q7H) should store the bus value in the latch.
+        // The IIc boot ROM's handshake loop at $CC29 relies on this.
+        let mut card = Disk2Card::new(6);
+        assert_eq!(card.latch, 0xFF); // default
+
+        card.slot_io_write(0x0F, 0x07, 0);
+        assert_eq!(card.latch, 0x07);
+        assert!(card.write_mode); // Q7H sets write mode
+    }
+
+    #[test]
+    fn test_iwm_handshake_echo() {
+        // IWM handshake: write Y to Q7H, read Q7L, expect Y echoed back.
+        // This is the pattern at $CC29 in the IIc boot ROM.
+        let mut card = Disk2Card::new(6);
+        let y: u8 = 0x07;
+
+        // Write Y to Q7H (register $0F)
+        card.slot_io_write(0x0F, y, 0);
+        assert!(card.write_mode);
+        assert_eq!(card.latch, y);
+
+        // Read Q7L (register $0E) — should return latch (Y) because
+        // write_mode was true before this read cleared it.
+        let val = card.slot_io_read(0x0E, 0);
+        assert!(!card.write_mode); // Q7L clears write mode
+        assert_eq!(
+            val, y,
+            "IWM handshake: Q7L should echo back the value written to Q7H"
+        );
+    }
+
+    #[test]
+    fn test_iwm_ready_returns_zero_when_idle() {
+        // IWM ready check: read Q7L when motor off and write_mode already false.
+        // The IIc boot ROM's ready loop at $CC3F expects bit 5 to be clear.
+        let mut card = Disk2Card::new(6);
+        card.write_mode = false;
+        card.motor_on = false;
+
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(
+            val, 0,
+            "Q7L should return 0 when idle (motor off, write_mode was already false)"
+        );
+    }
+
+    #[test]
+    fn test_iwm_ready_returns_latch_when_spinning() {
+        // When the drive IS spinning, Q7L should return the latch (normal Disk II behavior).
+        let mut card = Disk2Card::new(6);
+        card.write_mode = false;
+        card.motor_on = true;
+        card.latch = 0xAB;
+
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(val, 0xAB, "Q7L should return latch when drive is spinning");
+    }
+
+    #[test]
+    fn test_iwm_handshake_not_affected_by_idle_fix() {
+        // Ensure the idle fix (return 0) doesn't break the handshake path.
+        // When write_mode is true before the Q7L read, the latch should be returned.
+        let mut card = Disk2Card::new(6);
+        card.motor_on = false;
+
+        // Write to Q7H: sets write_mode=true, stores latch
+        card.slot_io_write(0x0F, 0x05, 0);
+        assert!(card.write_mode);
+
+        // Read Q7L: was_write_mode=true, should return latch, NOT 0
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(
+            val, 0x05,
+            "handshake read must return latch even when motor is off"
+        );
+    }
 }
