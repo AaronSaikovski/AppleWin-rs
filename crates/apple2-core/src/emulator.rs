@@ -29,6 +29,8 @@ pub struct Emulator {
     pub bus: Bus,
     pub model: Apple2Model,
     pub mode: AppMode,
+    /// Next CPU cycle at which to emit a trace log line (debug diagnostic).
+    next_trace_log: u64,
 }
 
 impl Emulator {
@@ -43,6 +45,7 @@ impl Emulator {
             bus,
             model,
             mode: AppMode::Logo,
+            next_trace_log: 50_000_000,
         }
     }
 
@@ -59,12 +62,9 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
-        // ── Periodic PC logger ────────────────────────────────────────────
-        // Log the PC every ~50M cycles to a file to help diagnose freezes.
-        let mut next_log = start + 50_000_000;
-
         while self.cpu.cycles < target {
-            if self.cpu.cycles >= next_log {
+            // ── Periodic PC logger (persistent across execute() calls) ───
+            if self.cpu.cycles >= self.next_trace_log {
                 use std::io::Write;
                 let pc = self.cpu.pc;
                 let opcode = self.bus.read(pc, self.cpu.cycles);
@@ -90,7 +90,7 @@ impl Emulator {
                         self.cpu.cycles
                     );
                 }
-                next_log += 50_000_000;
+                self.next_trace_log = self.cpu.cycles + 50_000_000;
             }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
