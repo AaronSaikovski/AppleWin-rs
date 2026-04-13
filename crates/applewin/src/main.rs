@@ -60,6 +60,17 @@ fn make_emulator(
         default_rom.to_vec()
     };
 
+    // IIc 32K ROM: if the alternate bank (upper 16K) is empty, mirror the
+    // standard bank (lower 16K) into it.  Some ROM dumps are 16K padded to
+    // 32K; without mirroring, the $C028 ROM bank switch jumps into zeros.
+    if machine.is_iic() && rom.len() == 32768 {
+        let upper_empty = rom[0x4000..].iter().all(|&b| b == 0);
+        if upper_empty {
+            let lower: Vec<u8> = rom[..0x4000].to_vec();
+            rom[0x4000..].copy_from_slice(&lower);
+        }
+    }
+
     // Patch $F800–$FFFF with a custom F8 ROM (2K) if configured.
     if let Some(path) = custom_f8_rom {
         match std::fs::read(path) {

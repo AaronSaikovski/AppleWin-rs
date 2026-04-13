@@ -822,6 +822,7 @@ impl Card for Disk2Card {
 
     fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
         let is_woz = self.is_woz();
+        let was_write_mode = self.write_mode;
 
         // Update Q6/Q7 sequencer state for $C0xC–$C0xF (matches C++ SetSequencerFunction).
         // Addresses below $C0xC don't affect the sequencer.
@@ -910,6 +911,25 @@ impl Card for Disk2Card {
             self.data_latch_read_write_woz(cycles);
         }
 
+        // IWM compatibility for Apple IIc boot ROM:
+        //
+        // The IIc ROM has two polling loops that read register $0E (Q7L):
+        //
+        // 1. Handshake loop ($CC29): writes data to Q7H ($0F), then reads Q7L
+        //    ($0E) and checks if the lower 5 bits match.  The IWM echoes the
+        //    written data back; we return the latch (set by the Q7H write).
+        //
+        // 2. Ready loop ($CC3F): reads Q7L ($0E) and checks bit 5.  The IWM
+        //    returns 0 when idle; returning the stale $FF latch loops forever.
+        //
+        // We distinguish these by checking whether write_mode was just cleared
+        // by THIS read (handshake: write_mode was true before we cleared it)
+        // vs. already clear (ready check).  The `was_write_mode` flag captures
+        // the state before the sequencer update at the top of this function.
+        if reg == 0x0E && !was_write_mode && !self.motor_on && !self.is_spinning() {
+            return 0;
+        }
+
         self.latch
     }
 
@@ -962,7 +982,22 @@ impl Card for Disk2Card {
                     }
                 }
             }
-            0x0D..=0x0F => {} // side-effects handled above
+            0x0D => {
+                // Q6H write: load data register with bus value when in write mode.
+                // The data register is loaded when Q6=1 AND Q7=1 — handled at the
+                // bottom of this function via the load_mode && write_mode check.
+            }
+            0x0E => {} // Q7L: side-effect handled above
+            0x0F => {
+                // Q7H write: IWM compatibility — the Apple IIc's Integrated Woz
+                // Machine loads the data register from the bus on any write when in
+                // write mode.  The standard Disk II only loads when both Q6H and Q7H
+                // are active, but the IIc firmware writes to Q7H and expects the
+                // value to be echoed back from Q7L (handshake check at $CC29).
+                // Storing the bus value here satisfies that handshake without
+                // affecting normal Disk II write operations.
+                self.latch = value;
+            }
             _ => {}
         }
 
