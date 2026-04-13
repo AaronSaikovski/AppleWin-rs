@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gating of DHIRES, and locked slot/CPU UI. Selectable from the Machine Type
   dropdown in Settings.
 
+- **Apple IIc unit tests (12 new):** Bus tests for INTCXROM enforcement, ROM bank
+  switching via $C028, IOUDIS gating of DHIRES, soft-switch no-ops on IIc, and
+  IIe regression guards. Integration tests for IIc boot, reset persistence, and
+  32KB ROM execution.
+
 ### Changed
 
 - `Bus::new()` now accepts an `Apple2Model` parameter for model-aware memory
