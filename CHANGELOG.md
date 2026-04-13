@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Apple IIc emulation:** Full Apple //c model support with 32KB ROM (v04,
+  341-0445-B) embedded at compile time, built-in peripherals (Super Serial Card
+  in slots 1 & 2, 80-column text in slot 3, Mouse in slot 4, Disk II in slot 6),
+  128KB RAM, forced 65C02 CPU, ROM bank switching via $C028 (MF_ALTROM0), IOUDIS
+  gating of DHIRES, and locked slot/CPU UI. Selectable from the Machine Type
+  dropdown in Settings.
+
+### Changed
+
+- `Bus::new()` now accepts an `Apple2Model` parameter for model-aware memory
+  initialization and soft-switch behavior.
+- Custom ROM loading accepts 32KB ROMs in addition to 12KB and 16KB.
+
 ## [1.1.0] - 2026-04-13
 
 ### Fixed
