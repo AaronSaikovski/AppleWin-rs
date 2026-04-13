@@ -278,10 +278,10 @@ fn page_table_highram_on() {
     let mut bus = make_bus();
     // Enable LC RAM reading
     bus.read(0xC080, 0); // HIGHRAM on, bank 2
-    // $D0-$FF should now read from aux RAM (language card)
-    assert!(matches!(bus.pages_r[0xD0], PageSrc::Aux(_)));
-    assert!(matches!(bus.pages_r[0xE0], PageSrc::Aux(_)));
-    assert!(matches!(bus.pages_r[0xFF], PageSrc::Aux(_)));
+    // $D0-$FF should now read from main RAM (language card, ALTZP=0 default)
+    assert!(matches!(bus.pages_r[0xD0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xE0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xFF], PageSrc::Main(_)));
 }
 
 #[test]
@@ -291,9 +291,9 @@ fn page_table_writeram_on() {
     // WRITERAM requires two consecutive reads of the same odd address
     bus.read(0xC081, 0);
     bus.read(0xC081, 0); // HIGHRAM off, WRITERAM on, bank 2
-    // $D0-$FF should read ROM but write to aux
+    // $D0-$FF should read ROM but write to main (language card, ALTZP=0 default)
     assert!(matches!(bus.pages_r[0xD0], PageSrc::Rom(_)));
-    assert!(matches!(bus.pages_w[0xD0], PageDst::Aux(_)));
+    assert!(matches!(bus.pages_w[0xD0], PageDst::Main(_)));
 }
 
 #[test]
@@ -430,6 +430,85 @@ fn dhires_switch() {
     assert!(bus.mode.contains(MemMode::MF_DHIRES));
     bus.write(0xC05F, 0, 0);
     assert!(!bus.mode.contains(MemMode::MF_DHIRES));
+}
+
+// ===========================================================================
+// Language card ALTZP routing
+// ===========================================================================
+
+#[test]
+fn lc_altzp_off_routes_to_main_ram() {
+    let mut bus = make_bus();
+    // ALTZP=0 (default), enable LC RAM read+write
+    bus.read(0xC083, 0);
+    bus.read(0xC083, 0); // HIGHRAM on, WRITERAM on, bank 2
+    // LC pages should route through main RAM when ALTZP is off
+    assert!(matches!(bus.pages_r[0xD0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xE0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xFF], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_w[0xD0], PageDst::Main(_)));
+    assert!(matches!(bus.pages_w[0xE0], PageDst::Main(_)));
+    assert!(matches!(bus.pages_w[0xFF], PageDst::Main(_)));
+}
+
+#[test]
+fn lc_altzp_on_routes_to_aux_ram() {
+    let mut bus = make_bus();
+    // Enable ALTZP first, then enable LC RAM
+    bus.write(0xC009, 0, 0); // ALTZP on
+    bus.read(0xC083, 0);
+    bus.read(0xC083, 0); // HIGHRAM on, WRITERAM on, bank 2
+    // LC pages should route through aux RAM when ALTZP is on
+    assert!(matches!(bus.pages_r[0xD0], PageSrc::Aux(_)));
+    assert!(matches!(bus.pages_r[0xE0], PageSrc::Aux(_)));
+    assert!(matches!(bus.pages_r[0xFF], PageSrc::Aux(_)));
+    assert!(matches!(bus.pages_w[0xD0], PageDst::Aux(_)));
+    assert!(matches!(bus.pages_w[0xE0], PageDst::Aux(_)));
+    assert!(matches!(bus.pages_w[0xFF], PageDst::Aux(_)));
+}
+
+#[test]
+fn lc_main_and_aux_banks_are_independent() {
+    let mut bus = make_bus();
+    // Enable LC RAM read+write with ALTZP=0 (main bank)
+    bus.read(0xC083, 0);
+    bus.read(0xC083, 0);
+
+    // Write a value to LC RAM in the main bank
+    bus.write(0xE000, 0x42, 0);
+    assert_eq!(bus.read(0xE000, 0), 0x42);
+
+    // Switch to ALTZP=1 (aux bank) — LC RAM should be independent
+    bus.write(0xC009, 0, 0); // ALTZP on
+    // The aux bank's LC RAM should still be zero (never written)
+    assert_eq!(bus.read(0xE000, 0), 0x00);
+
+    // Write a different value to the aux bank's LC
+    bus.write(0xE000, 0x99, 0);
+    assert_eq!(bus.read(0xE000, 0), 0x99);
+
+    // Switch back to ALTZP=0 — main bank LC should be preserved
+    bus.write(0xC008, 0, 0); // ALTZP off
+    assert_eq!(bus.read(0xE000, 0), 0x42);
+}
+
+#[test]
+fn lc_write_through_rom_respects_altzp() {
+    let mut bus = make_bus();
+    // HIGHRAM=off, WRITERAM=on: reads come from ROM, writes go to LC RAM
+    bus.read(0xC081, 0);
+    bus.read(0xC081, 0);
+
+    // With ALTZP=0, writes should go to main_ram
+    bus.write(0xE000, 0xAB, 0);
+    assert_eq!(bus.main_ram[0xE000], 0xAB);
+    assert_eq!(bus.aux_ram[0xE000], 0x00); // aux untouched
+
+    // With ALTZP=1, writes should go to aux_ram
+    bus.write(0xC009, 0, 0); // ALTZP on
+    bus.write(0xE000, 0xCD, 0);
+    assert_eq!(bus.aux_ram[0xE000], 0xCD);
+    assert_eq!(bus.main_ram[0xE000], 0xAB); // main untouched
 }
 
 // ===========================================================================

@@ -3,7 +3,7 @@
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-green.svg)
 
 A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
@@ -159,15 +159,15 @@ Or run the compiled binary directly:
 cargo test
 ```
 
-Runs 297 tests across all crates:
+Runs 286 tests across all crates:
 
 | Crate | Tests | Coverage |
 |---|---|---|
-| `apple2-core` | 247 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, expansion cards |
+| `apple2-core` | 251 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller |
 | `apple2-core` (integration) | 9 | Boot sequence, program execution, snapshots, Fibonacci |
-| `apple2-audio` | 9 | Speaker interpolation, DC filter, amplitude |
+| `apple2-audio` | 10 | Speaker interpolation, DC filter, amplitude, WAV recording |
 | `apple2-video` | 14 | NTSC tables, text/lores/hires/dlores rendering, mixed mode |
-| `apple2-debugger` | 18 | Disassembly, breakpoints, assembler |
+| `apple2-debugger` | 2 | Disassembly |
 
 ---
 

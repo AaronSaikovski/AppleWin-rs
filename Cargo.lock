@@ -168,7 +168,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apple2-audio"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "hound",
  "serde",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "apple2-audio",
  "bitflags 2.11.0",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-debugger"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "apple2-core",
  "serde",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-video"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "apple2-core",
  "serde",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "applewin"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "apple2-audio",
  "apple2-core",

@@ -135,14 +135,23 @@ impl Emulator {
                     );
                 }
                 // Dump game loop code once when PC enters the $9Cxx range
-                if !self.code_dumped && (0x9C00..0x9E00).contains(&pc) && !motor {
+                if !self.code_dumped && (0x9C00..0x9E00).contains(&pc) {
                     self.code_dumped = true;
                     if let Ok(mut df) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open("cpu_trace.log")
                     {
-                        for &(sa, len) in &[(0x9400u16, 0x120), (0x9C00, 0x120), (0xA500, 0x100)] {
+                        for &(sa, len) in &[
+                            (0x9400u16, 0x120),
+                            (0x9C00, 0x200),
+                            (0xA500, 0x100),
+                            (0xE060, 0xC0),
+                            (0x0400, 0x100),
+                            (0x0E00, 0x40),
+                            (0x9100, 0x60),
+                            (0xE000, 0x60),
+                        ] {
                             let mut chunk = Vec::with_capacity(len);
                             for i in 0..len {
                                 chunk.push(self.bus.read(sa + i as u16, self.cpu.cycles));

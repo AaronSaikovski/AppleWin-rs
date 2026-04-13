@@ -444,25 +444,43 @@ impl Bus {
         }
 
         // Pages 0xD0–0xDF: language card bank 1/2 or ROM
-        // Bank2 lives in aux_ram[$D000-$DFFF].
-        // Bank1 lives in aux_ram[$C000-$CFFF] (safe: that area is never used for normal RAM).
+        //
+        // C++ AppleWin memory layout (Memory.cpp MemUpdatePaging):
+        //   ALTZP=0 → LC reads/writes use g_pMemMainLanguageCard (= memmain+$C000)
+        //   ALTZP=1 → LC reads/writes use memaux
+        //
+        // Rust equivalent:
+        //   ALTZP=0 → LC lives in main_ram[$C000–$FFFF]  (PageSrc/Dst::Main)
+        //   ALTZP=1 → LC lives in aux_ram[$C000–$FFFF]   (PageSrc/Dst::Aux)
+        //
+        // Bank2 uses the $D000 offset directly; Bank1 subtracts $1000 so that
+        // $D000 maps to the $C000 region (both in main_ram and aux_ram).
         for page in 0xD0u16..=0xDF {
             let base = page << 8;
+            let lc_base = if bank2 { base } else { base - 0x1000 };
             if highram {
-                // LC RAM active — choose bank via MF_BANK2
-                let lc_base = if bank2 { base } else { base - 0x1000 };
-                self.pages_r[page as usize] = PageSrc::Aux(lc_base);
+                if altzp {
+                    self.pages_r[page as usize] = PageSrc::Aux(lc_base);
+                } else {
+                    self.pages_r[page as usize] = PageSrc::Main(lc_base);
+                }
                 self.pages_w[page as usize] = if writeram {
-                    PageDst::Aux(lc_base)
+                    if altzp {
+                        PageDst::Aux(lc_base)
+                    } else {
+                        PageDst::Main(lc_base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
                 self.pages_w[page as usize] = if writeram {
-                    // Write to LC RAM even while ROM is being read (pre-condition for $C083 sequence)
-                    let lc_base = if bank2 { base } else { base - 0x1000 };
-                    PageDst::Aux(lc_base)
+                    if altzp {
+                        PageDst::Aux(lc_base)
+                    } else {
+                        PageDst::Main(lc_base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
@@ -470,20 +488,32 @@ impl Bus {
         }
 
         // Pages 0xE0–0xFF: upper ROM or LC RAM
+        // Same ALTZP-based routing as $D0–$DF but without the bank offset.
         for page in 0xE0u16..=0xFF {
             let base = page << 8;
             if highram {
-                self.pages_r[page as usize] = PageSrc::Aux(base);
+                if altzp {
+                    self.pages_r[page as usize] = PageSrc::Aux(base);
+                } else {
+                    self.pages_r[page as usize] = PageSrc::Main(base);
+                }
                 self.pages_w[page as usize] = if writeram {
-                    PageDst::Aux(base)
+                    if altzp {
+                        PageDst::Aux(base)
+                    } else {
+                        PageDst::Main(base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
-                // Write to LC RAM even while ROM is being read (same as $D000–$DFFF)
                 self.pages_w[page as usize] = if writeram {
-                    PageDst::Aux(base)
+                    if altzp {
+                        PageDst::Aux(base)
+                    } else {
+                        PageDst::Main(base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
@@ -1063,7 +1093,9 @@ impl Bus {
     /// Perform a pending Saturn-style language card bank swap for `slot`.
     ///
     /// If the card in `slot` has a pending swap, the bus copies the new bank
-    /// data into `aux_ram[$C000..]` and gives the displaced data back to the card.
+    /// data into the current LC RAM area and gives the displaced data back to
+    /// the card.  The LC RAM area is determined by ALTZP: main_ram when
+    /// ALTZP=0, aux_ram when ALTZP=1.
     fn process_lc_bank_swap(&mut self, slot: usize) {
         let new_data = match self
             .cards
@@ -1073,11 +1105,17 @@ impl Bus {
             Some(d) => d,
             None => return,
         };
+        let altzp = self.mode.contains(MemMode::MF_ALTZP);
+        let ram = if altzp {
+            &mut *self.aux_ram
+        } else {
+            &mut *self.main_ram
+        };
         // Save displaced bank into pre-allocated scratch buffer (no heap allocation).
         self.lc_swap_buf
-            .copy_from_slice(&self.aux_ram[0xC000..0xC000 + 16384]);
+            .copy_from_slice(&ram[0xC000..0xC000 + 16384]);
         // Install the incoming bank.
-        self.aux_ram[0xC000..0xC000 + 16384].copy_from_slice(&*new_data);
+        ram[0xC000..0xC000 + 16384].copy_from_slice(&*new_data);
         // Return the displaced data to the card via a reference — the card copies
         // what it needs into its own storage, so no Box allocation is required here.
         if let Some(card) = self.cards.slot_mut(slot) {

@@ -1,0 +1,77 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.1.0] - 2026-04-13
+
+### Fixed
+
+- **Language card RAM routing (critical):** Fixed a fundamental memory architecture
+  bug where language card RAM ($D000-$FFFF) was always stored in auxiliary RAM
+  regardless of the ALTZP soft-switch state. The C++ AppleWin correctly routes LC
+  RAM through main RAM when ALTZP=0 and auxiliary RAM when ALTZP=1, giving each
+  bank independent storage. The Rust port shared a single storage area for both
+  banks, causing auxiliary memory writes to silently corrupt game code loaded into
+  the main bank's language card area. This fix resolves hangs and infinite loops
+  in software that uses both language card RAM and auxiliary memory, including
+  Ultima V and other ProDOS-based titles.
+
+- **Disk II: Odd-address return value:** Soft-switch reads at odd addresses
+  ($C0E1, $C0E3, ..., $C0ED, $C0EF) now return 0 (floating bus approximation)
+  instead of the data latch, matching the C++ AppleWin `MemReadFloatingBus()`
+  behavior and UTAIIe Table 9.1.
+
+- **Disk II: Spinning/spin-down delay:** Added a 1-second (~1M cycle) spin-down
+  timer after motor-off, matching C++ `SPINNING_CYCLES`. Reads and writes are now
+  only serviced while the drive is spinning. "DRIVES OFF forces the data register
+  to hold its present state" (UTAIIe p9-12).
+
+- **Disk II: LoadWriteProtect spinning guard:** The $C0xD (Q6H) write-protect
+  check now respects the spinning state and will not update the data latch if the
+  drive has stopped, matching C++ `LoadWriteProtect()` (GH#599).
+
+- **Disk II: Motor-off clears magnet states:** Turning the motor off now clears
+  the stepper magnet states (`phases = 0`), matching the C++ behavior described
+  in UTAIIe p9-12 (GH#926, GH#1315).
+
+- **Disk II: Drive select stops other drive:** Selecting drive 0 or 1 now
+  immediately stops the other drive's spinning counter, matching C++ `Enable()`.
+
+- **Disk II: Stepper ignores motor-off:** Phase changes are now ignored when
+  the motor is off and the drive is not spinning, matching C++ `ControlStepper()`
+  (GH#525).
+
+### Added
+
+- **Disk II: WOZ headWindow/latchDelay/MC3470 model:** Replaced the simplified
+  WOZ shift register with the full C++ Logic State Sequencer model, including a
+  4-bit head window tracking the last 4 raw magnetic flux transitions, MC3470
+  output bit calculation with ~30% random bit generation for zero runs, and a
+  latch delay mechanism (7 us hold after valid nibble with extension on zero
+  shift register).
+
+- **Disk II: WOZ even-address bit-stream advance:** Any even-address read now
+  triggers the WOZ LSS to advance the bit stream, not just register $C0xC (Q6L).
+  This matches the C++ `DataLatchReadWriteWOZ()` call at the bottom of `IORead`
+  for all even addresses.
+
+- **Unit tests:** Added 4 new bus tests for ALTZP-aware language card RAM
+  routing: `lc_altzp_off_routes_to_main_ram`, `lc_altzp_on_routes_to_aux_ram`,
+  `lc_main_and_aux_banks_are_independent`, and
+  `lc_write_through_rom_respects_altzp`.
+
+## [1.0.0] - 2026-03-17
+
+### Added
+
+- Initial release of AppleWin-rs.
+- Full emulation of Apple II, II+, IIe, and IIe Enhanced models.
+- 21 expansion card implementations.
+- Cross-platform GUI with egui/eframe.
+- WOZ v1/v2 bit-level disk emulation.
+- Symbolic debugger with breakpoints and disassembler.
+- Save/restore state, screenshot capture, WAV recording.
+- Headless build mode for CI and embedding.
