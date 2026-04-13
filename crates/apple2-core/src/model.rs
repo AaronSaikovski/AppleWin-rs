@@ -16,6 +16,13 @@ pub enum Apple2Model {
     Clone = 7,     // Pravets, Franklin, etc.
 }
 
+impl Apple2Model {
+    /// Returns true for Apple //c and //c Plus models.
+    pub fn is_iic(&self) -> bool {
+        matches!(self, Apple2Model::AppleIIc | Apple2Model::AppleIIcPlus)
+    }
+}
+
 /// CPU variant installed in the machine.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,

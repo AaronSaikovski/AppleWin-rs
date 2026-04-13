@@ -1,10 +1,11 @@
 //! Unit tests for the Apple II memory bus (soft switches, language card, page tables).
 
 use crate::bus::{Bus, MemMode, PageDst, PageSrc};
+use crate::model::Apple2Model;
 
 /// Create a minimal Bus with a 16K zero-filled ROM.
 fn make_bus() -> Bus {
-    Bus::new(vec![0u8; 16384])
+    Bus::new(vec![0u8; 16384], Apple2Model::AppleIIeEnh)
 }
 
 /// Write a byte through raw write (bypasses I/O side-effects).
@@ -444,4 +445,114 @@ fn raw_read_write_bypass_io() {
 
     bus.write_raw(0x0500, 0xAD);
     assert_eq!(bus.main_ram[0x0500], 0xAD);
+}
+
+// ===========================================================================
+// Apple IIc model-specific behaviour
+// ===========================================================================
+
+/// Create a minimal Bus configured as an Apple IIc.
+fn make_iic_bus() -> Bus {
+    Bus::new(vec![0u8; 16384], Apple2Model::AppleIIc)
+}
+
+#[test]
+fn iic_intcxrom_write_is_noop() {
+    let mut bus = make_iic_bus();
+    // Manually set INTCXROM (as finish_reset would)
+    bus.mode.insert(MemMode::MF_INTCXROM);
+    bus.rebuild_page_tables();
+
+    // Attempt to clear INTCXROM via $C006 — should be ignored on IIc
+    bus.write(0xC006, 0, 0);
+    assert!(
+        bus.mode.contains(MemMode::MF_INTCXROM),
+        "INTCXROM must stay on for Apple IIc"
+    );
+
+    // Attempt to set INTCXROM via $C007 — also a no-op (already on)
+    bus.write(0xC007, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_INTCXROM));
+}
+
+#[test]
+fn iic_slotc3rom_write_is_noop() {
+    let mut bus = make_iic_bus();
+    assert!(!bus.mode.contains(MemMode::MF_SLOTC3ROM));
+
+    // Attempt to set SLOTC3ROM via $C00B — should be ignored on IIc
+    bus.write(0xC00B, 0, 0);
+    assert!(
+        !bus.mode.contains(MemMode::MF_SLOTC3ROM),
+        "SLOTC3ROM must not change on Apple IIc"
+    );
+
+    // Attempt to clear via $C00A — also a no-op
+    bus.write(0xC00A, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_SLOTC3ROM));
+}
+
+#[test]
+fn iic_dhires_gated_by_ioudis() {
+    let mut bus = make_iic_bus();
+    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+
+    // Without IOUDIS, $C05E should NOT enable DHIRES on IIc
+    bus.write(0xC05E, 0, 0);
+    assert!(
+        !bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES must not toggle without IOUDIS on IIc"
+    );
+
+    // Enable IOUDIS first
+    bus.write(0xC07E, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_IOUDIS));
+
+    // Now $C05E should enable DHIRES
+    bus.write(0xC05E, 0, 0);
+    assert!(
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should toggle when IOUDIS is set on IIc"
+    );
+
+    // $C05F should disable DHIRES (IOUDIS still set)
+    bus.write(0xC05F, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
+}
+
+#[test]
+fn iie_intcxrom_write_works_normally() {
+    let mut bus = make_bus(); // IIe Enhanced
+    assert!(!bus.mode.contains(MemMode::MF_INTCXROM));
+
+    // $C007 should enable INTCXROM on IIe
+    bus.write(0xC007, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_INTCXROM));
+
+    // $C006 should disable INTCXROM on IIe
+    bus.write(0xC006, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_INTCXROM));
+}
+
+#[test]
+fn iie_dhires_not_gated_by_ioudis() {
+    let mut bus = make_bus(); // IIe Enhanced
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+
+    // On IIe, DHIRES should toggle without IOUDIS
+    bus.write(0xC05E, 0, 0);
+    assert!(
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should toggle freely on IIe without IOUDIS"
+    );
+}
+
+#[test]
+fn iic_model_is_iic() {
+    assert!(Apple2Model::AppleIIc.is_iic());
+    assert!(Apple2Model::AppleIIcPlus.is_iic());
+    assert!(!Apple2Model::AppleIIeEnh.is_iic());
+    assert!(!Apple2Model::AppleII.is_iic());
+    assert!(!Apple2Model::AppleIIgs.is_iic());
 }

@@ -5,6 +5,8 @@ use apple2_core::{
 
 /// Apple IIe Enhanced 16KB ROM embedded at compile time.
 static APPLE2E_ROM: &[u8] = include_bytes!("../roms/apple2e_enhanced.rom");
+/// Apple IIc 16KB ROM (v1.30) embedded at compile time.
+static APPLE2C_ROM: &[u8] = include_bytes!("../roms/apple2c.rom");
 
 #[cfg(feature = "gui")]
 mod config;
@@ -39,6 +41,8 @@ fn make_emulator(
                 APPLE2E_ROM.to_vec()
             }
         }
+    } else if machine.is_iic() {
+        APPLE2C_ROM.to_vec()
     } else {
         APPLE2E_ROM.to_vec()
     };

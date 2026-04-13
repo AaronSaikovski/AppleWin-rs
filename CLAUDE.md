@@ -91,7 +91,7 @@ At runtime, `applewin` stores a TOML config file at the platform config dir (`%A
 
 ## Supported Hardware
 
-**Models**: Apple II, II+, IIe, IIe Enhanced (and some clones). Apple //c and IIgs are **not** supported.
+**Models**: Apple II, II+, IIe, IIe Enhanced (and some clones), Apple //c. Apple IIgs is **not** supported.
 
 **Expansion cards** (19 implemented): Disk II, Hard Disk Controller, Mockingboard/Phasor, SAM, SSI263, 80-Column, RamWorks III, Language Card, Saturn, Mouse, 4Play, SNES MAX, Uthernet I/II, Printer, Super Serial, Z80 CP/M, VidHD, No Slot Clock.
 

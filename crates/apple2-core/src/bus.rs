@@ -4,6 +4,7 @@
 //! `memreadPageType[]`, `IORead[256]`, `IOWrite[256]` from `source/Memory.h`.
 
 use crate::card::{CardManager, DmaWrite, DriveActivity};
+use crate::model::Apple2Model;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
@@ -196,11 +197,13 @@ pub enum PageDst {
 
 /// The Apple II memory bus.
 pub struct Bus {
+    /// Machine model — controls IIc-specific soft switch behaviour.
+    pub model: Apple2Model,
     /// Main 64K RAM.
     pub main_ram: Box<[u8; 65536]>,
     /// Auxiliary 64K RAM (//e and later).
     pub aux_ram: Box<[u8; 65536]>,
-    /// System ROM (up to 16K for //e).
+    /// System ROM (up to 16K for //e, 32K for //c bank-switched).
     pub rom: Vec<u8>,
     /// Peripheral card ROM space ($C100–$CFFF, 3840 bytes = 15 pages).
     pub cx_rom: Box<[u8; 0x1000]>,
@@ -277,8 +280,9 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>) -> Self {
+    pub fn new(rom: Vec<u8>, model: Apple2Model) -> Self {
         let mut bus = Self {
+            model,
             main_ram: Box::new([0u8; 65536]),
             aux_ram: Box::new([0u8; 65536]),
             rom,
@@ -883,12 +887,17 @@ impl Bus {
                 self.rebuild_page_tables();
             }
             0x06 => {
-                self.mode.remove(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
+                // Apple //c: INTCXROM is always on (no expansion slots).
+                if !self.model.is_iic() {
+                    self.mode.remove(MemMode::MF_INTCXROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x07 => {
-                self.mode.insert(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.insert(MemMode::MF_INTCXROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x08 => {
                 self.mode.remove(MemMode::MF_ALTZP);
@@ -899,12 +908,17 @@ impl Bus {
                 self.rebuild_page_tables();
             }
             0x0A => {
-                self.mode.remove(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
+                // Apple //c: SLOTC3ROM is meaningless (no expansion slots).
+                if !self.model.is_iic() {
+                    self.mode.remove(MemMode::MF_SLOTC3ROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x0B => {
-                self.mode.insert(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.insert(MemMode::MF_SLOTC3ROM);
+                    self.rebuild_page_tables();
+                }
             }
             // $C00C/$C00D: CLR/SET80VID — 80-column display mode
             0x0C => {
@@ -989,11 +1003,16 @@ impl Bus {
                 self.ann[2] = true;
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF
+            // On Apple //c, DHIRES is only toggled when IOUDIS is set.
             0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.insert(MemMode::MF_DHIRES);
+                }
             }
             0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.remove(MemMode::MF_DHIRES);
+                }
             }
             // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)
             0x7E => {

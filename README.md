@@ -22,8 +22,9 @@ Pre-built binaries for Windows, macOS, and Linux are available on the [Releases]
 - Apple II+ (`][+`)
 - Apple IIe (`//e`)
 - Apple IIe Enhanced (`//e Enhanced`) — default
+- Apple IIc (`//c`) — with built-in 80-column, 128K RAM, and internal disk controller
 
-> No support currently for the //c, //c+, Laser 128, Laser 128EX/EX2, or Apple IIgs.
+> No support currently for the //c+, Laser 128, Laser 128EX/EX2, or Apple IIgs.
 
 ---
 
