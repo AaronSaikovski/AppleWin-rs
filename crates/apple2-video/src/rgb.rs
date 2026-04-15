@@ -10,7 +10,7 @@
 //! - Hi-res is rendered per-pixel without NTSC colour fringing.
 //! - Double hi-res maps each 4-bit nibble directly to one of 16 colours.
 
-use crate::framebuffer::Framebuffer;
+use crate::framebuffer::{FB_WIDTH, Framebuffer};
 use crate::ntsc::CharRom;
 use apple2_core::bus::MemMode;
 
@@ -202,20 +202,24 @@ impl RgbRenderer {
     // ── Lo-res rendering ─────────────────────────────────────────────────────
 
     fn render_lores(&self, text_page: &[u8], fb: &mut Framebuffer) {
+        // Batch write: each lores cell is a 14-wide span of a single colour per
+        // scan line, so we can use slice::fill to blast 14 pixels at once rather
+        // than per-pixel set_pixel calls with bounds checks.
+        let pixels = fb.pixels_mut();
         for row in 0..24 {
             let base = crate::ntsc::text_row_offset(row);
             for col in 0..40 {
                 let byte = text_page[base + col];
                 let top_color = RGB_PALETTE[(byte & 0x0F) as usize];
                 let bot_color = RGB_PALETTE[((byte >> 4) & 0x0F) as usize];
-                // Each lo-res block is 14×8 pixels (doubled for 560×384).
                 let fb_x_base = col * 14;
                 let fb_y_base = row * 16;
                 for y in 0..8 {
                     let color = if y < 4 { top_color } else { bot_color };
-                    for x in 0..14 {
-                        fb.set_pixel(fb_x_base + x, fb_y_base + y * 2, color);
-                        fb.set_pixel(fb_x_base + x, fb_y_base + y * 2 + 1, color);
+                    for line in 0..2 {
+                        let fb_y = fb_y_base + y * 2 + line;
+                        let row_start = fb_y * FB_WIDTH + fb_x_base;
+                        pixels[row_start..row_start + 14].fill(color);
                     }
                 }
             }
@@ -229,13 +233,12 @@ impl RgbRenderer {
         text_base: usize,
         fb: &mut Framebuffer,
     ) {
+        let pixels = fb.pixels_mut();
         for row in 0..24 {
             let base = crate::ntsc::text_row_offset(row);
             for col in 0..40 {
                 let aux_byte = aux_ram[text_base + base + col];
                 let main_byte = main_ram[text_base + base + col];
-                // Double lo-res: each column produces two 7-pixel-wide colour blocks.
-                // Aux provides the left column, main the right.
                 let fb_x_base = col * 14;
                 let fb_y_base = row * 16;
                 for y in 0..8 {
@@ -249,11 +252,11 @@ impl RgbRenderer {
                     } else {
                         RGB_PALETTE[((main_byte >> 4) & 0x0F) as usize]
                     };
-                    for x in 0..7 {
-                        fb.set_pixel(fb_x_base + x, fb_y_base + y * 2, aux_color);
-                        fb.set_pixel(fb_x_base + x, fb_y_base + y * 2 + 1, aux_color);
-                        fb.set_pixel(fb_x_base + 7 + x, fb_y_base + y * 2, main_color);
-                        fb.set_pixel(fb_x_base + 7 + x, fb_y_base + y * 2 + 1, main_color);
+                    for line in 0..2 {
+                        let fb_y = fb_y_base + y * 2 + line;
+                        let row_start = fb_y * FB_WIDTH + fb_x_base;
+                        pixels[row_start..row_start + 7].fill(aux_color);
+                        pixels[row_start + 7..row_start + 14].fill(main_color);
                     }
                 }
             }

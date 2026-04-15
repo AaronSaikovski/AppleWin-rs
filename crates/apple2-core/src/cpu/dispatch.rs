@@ -39,7 +39,26 @@ pub const CYCLES_6502: [u8; 256] = [
 // ── Opcode handler helpers ────────────────────────────────────────────────────
 
 /// Execute one instruction.  Returns total cycles consumed.
+///
+/// This path selects the 6502 vs 65C02 table on every call and is used by
+/// the debugger / single-step callers. Hot execution loops should use
+/// `step_with_table` after picking the table once per batch.
 pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
+    let table: &[OpFn; 256] = if cpu.is_65c02 {
+        &DISPATCH_65C02
+    } else {
+        &DISPATCH_6502
+    };
+    step_with_table(cpu, bus, table)
+}
+
+/// Same as [`step`], but the caller supplies the dispatch table directly.
+///
+/// Hoisting the `is_65c02` branch out of the execute loop removes one
+/// predictable-but-non-free branch per instruction and lets the optimizer
+/// keep the table pointer in a register.
+#[inline]
+pub fn step_with_table(cpu: &mut Cpu, bus: &mut Bus, table: &[OpFn; 256]) -> u8 {
     // Check for pending NMI first, then IRQ
     if cpu.nmi_pending != 0 {
         cpu.nmi_pending = 0;
@@ -57,11 +76,7 @@ pub fn step(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.pc = cpu.pc.wrapping_add(1);
 
     let base = CYCLES_6502[opcode as usize];
-    let extra = if cpu.is_65c02 {
-        DISPATCH_65C02[opcode as usize](cpu, bus)
-    } else {
-        DISPATCH_6502[opcode as usize](cpu, bus)
-    };
+    let extra = table[opcode as usize](cpu, bus);
 
     let total = base + extra;
     cpu.cycles += total as u64;
@@ -151,6 +166,7 @@ fn op_asl_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bpl(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = !cpu.flags.contains(Flags::N);
     cpu.branch_target(bus, taken)
@@ -180,6 +196,7 @@ fn op_asl_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_clc(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.flags.remove(Flags::C);
     0
@@ -209,6 +226,7 @@ fn op_asl_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_jsr(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let target = cpu.addr_abs(bus);
     let ret = cpu.pc.wrapping_sub(1);
@@ -226,6 +244,7 @@ fn op_and_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bit_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -268,6 +287,7 @@ fn op_rol_a(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bit_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -291,6 +311,7 @@ fn op_rol_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bmi(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = cpu.flags.contains(Flags::N);
     cpu.branch_target(bus, taken)
@@ -320,6 +341,7 @@ fn op_rol_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sec(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.flags.insert(Flags::C);
     0
@@ -382,6 +404,7 @@ fn op_lsr_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_pha(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let a = cpu.a;
     cpu.push(bus, a);
@@ -401,6 +424,7 @@ fn op_lsr_a(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_jmp_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.pc = cpu.addr_abs(bus);
     0
@@ -422,6 +446,7 @@ fn op_lsr_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bvc(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = !cpu.flags.contains(Flags::V);
     cpu.branch_target(bus, taken)
@@ -451,6 +476,7 @@ fn op_lsr_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_cli(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.flags.remove(Flags::I);
     0
@@ -480,6 +506,7 @@ fn op_lsr_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_rts(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let lo = cpu.pop(bus) as u16;
     let hi = cpu.pop(bus) as u16;
@@ -494,6 +521,7 @@ fn op_adc_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_adc_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -509,12 +537,14 @@ fn op_ror_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_pla(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.a = cpu.pop(bus);
     cpu.flags.set_nz(cpu.a);
     0
 }
 
+#[inline]
 fn op_adc_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let val = cpu.addr_imm(bus);
     cpu.op_adc(val);
@@ -527,6 +557,7 @@ fn op_ror_a(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_jmp_ind(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     // NMOS 6502 bug: JMP ($xxFF) reads from $xxFF and $xx00 (not $xx+1:00)
     let ptr = cpu.addr_abs(bus);
@@ -542,6 +573,7 @@ fn op_jmp_ind(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_adc_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -557,6 +589,7 @@ fn op_ror_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bvs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = cpu.flags.contains(Flags::V);
     cpu.branch_target(bus, taken)
@@ -584,6 +617,7 @@ fn op_ror_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sei(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.flags.insert(Flags::I);
     0
@@ -611,118 +645,138 @@ fn op_ror_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sta_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_indx(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_sty_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     bus.write(ea, cpu.y, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_sta_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_stx_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     bus.write(ea, cpu.x, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_dey(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.y = cpu.y.wrapping_sub(1);
     cpu.flags.set_nz(cpu.y);
     0
 }
 
+#[inline]
 fn op_txa(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.a = cpu.x;
     cpu.flags.set_nz(cpu.a);
     0
 }
 
+#[inline]
 fn op_sty_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     bus.write(ea, cpu.y, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_sta_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_stx_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     bus.write(ea, cpu.x, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_bcc(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = !cpu.flags.contains(Flags::C);
     cpu.branch_target(bus, taken)
 }
 
+#[inline]
 fn op_sta_indy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, _) = cpu.addr_indy(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_sty_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpx(bus);
     bus.write(ea, cpu.y, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_sta_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpx(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_stx_zpy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpy(bus);
     bus.write(ea, cpu.x, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_tya(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.a = cpu.y;
     cpu.flags.set_nz(cpu.a);
     0
 }
 
+#[inline]
 fn op_sta_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, _) = cpu.addr_absy(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_txs(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.sp = cpu.x;
     0
 }
 
+#[inline]
 fn op_sta_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, _) = cpu.addr_absx(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_ldy_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.y = cpu.addr_imm(bus);
     cpu.flags.set_nz(cpu.y);
     0
 }
 
+#[inline]
 fn op_lda_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_indx(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -730,12 +784,14 @@ fn op_lda_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_ldx_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.x = cpu.addr_imm(bus);
     cpu.flags.set_nz(cpu.x);
     0
 }
 
+#[inline]
 fn op_ldy_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     cpu.y = bus.read(ea, cpu.cycles);
@@ -743,6 +799,7 @@ fn op_ldy_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_lda_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -750,6 +807,7 @@ fn op_lda_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_ldx_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     cpu.x = bus.read(ea, cpu.cycles);
@@ -757,24 +815,28 @@ fn op_ldx_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_tay(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.y = cpu.a;
     cpu.flags.set_nz(cpu.y);
     0
 }
 
+#[inline]
 fn op_lda_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.a = cpu.addr_imm(bus);
     cpu.flags.set_nz(cpu.a);
     0
 }
 
+#[inline]
 fn op_tax(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.x = cpu.a;
     cpu.flags.set_nz(cpu.x);
     0
 }
 
+#[inline]
 fn op_ldy_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     cpu.y = bus.read(ea, cpu.cycles);
@@ -782,6 +844,7 @@ fn op_ldy_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_lda_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -789,6 +852,7 @@ fn op_lda_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_ldx_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     cpu.x = bus.read(ea, cpu.cycles);
@@ -796,11 +860,13 @@ fn op_ldx_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bcs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = cpu.flags.contains(Flags::C);
     cpu.branch_target(bus, taken)
 }
 
+#[inline]
 fn op_lda_indy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_indy(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -808,6 +874,7 @@ fn op_lda_indy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_ldy_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpx(bus);
     cpu.y = bus.read(ea, cpu.cycles);
@@ -815,6 +882,7 @@ fn op_ldy_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_lda_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpx(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -822,6 +890,7 @@ fn op_lda_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_ldx_zpy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpy(bus);
     cpu.x = bus.read(ea, cpu.cycles);
@@ -834,6 +903,7 @@ fn op_clv(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_lda_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_absy(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -841,12 +911,14 @@ fn op_lda_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_tsx(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.x = cpu.sp;
     cpu.flags.set_nz(cpu.x);
     0
 }
 
+#[inline]
 fn op_ldy_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_absx(bus);
     cpu.y = bus.read(ea, cpu.cycles);
@@ -854,6 +926,7 @@ fn op_ldy_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_lda_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_absx(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -861,6 +934,7 @@ fn op_lda_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_ldx_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_absy(bus);
     cpu.x = bus.read(ea, cpu.cycles);
@@ -868,12 +942,14 @@ fn op_ldx_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_cpy_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let val = cpu.addr_imm(bus);
     cpu.op_cmp(cpu.y, val);
     0
 }
 
+#[inline]
 fn op_cmp_indx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_indx(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -888,6 +964,7 @@ fn op_cpy_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_cmp_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -895,6 +972,7 @@ fn op_cmp_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_dec_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     let val = bus.read(ea, cpu.cycles).wrapping_sub(1);
@@ -903,18 +981,21 @@ fn op_dec_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_iny(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.y = cpu.y.wrapping_add(1);
     cpu.flags.set_nz(cpu.y);
     0
 }
 
+#[inline]
 fn op_cmp_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let val = cpu.addr_imm(bus);
     cpu.op_cmp(cpu.a, val);
     0
 }
 
+#[inline]
 fn op_dex(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.x = cpu.x.wrapping_sub(1);
     cpu.flags.set_nz(cpu.x);
@@ -928,6 +1009,7 @@ fn op_cpy_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_cmp_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -935,6 +1017,7 @@ fn op_cmp_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_dec_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     let val = bus.read(ea, cpu.cycles).wrapping_sub(1);
@@ -943,11 +1026,13 @@ fn op_dec_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_bne(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = !cpu.flags.contains(Flags::Z);
     cpu.branch_target(bus, taken)
 }
 
+#[inline]
 fn op_cmp_indy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_indy(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -955,6 +1040,7 @@ fn op_cmp_indy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_cmp_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpx(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -970,11 +1056,13 @@ fn op_dec_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_cld(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.flags.remove(Flags::D);
     0
 }
 
+#[inline]
 fn op_cmp_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_absy(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -982,6 +1070,7 @@ fn op_cmp_absy(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cross as u8
 }
 
+#[inline]
 fn op_cmp_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, cross) = cpu.addr_absx(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -997,6 +1086,7 @@ fn op_dec_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_cpx_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let val = cpu.addr_imm(bus);
     cpu.op_cmp(cpu.x, val);
@@ -1017,6 +1107,7 @@ fn op_cpx_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sbc_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -1024,6 +1115,7 @@ fn op_sbc_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_inc_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     let val = bus.read(ea, cpu.cycles).wrapping_add(1);
@@ -1032,12 +1124,14 @@ fn op_inc_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_inx(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.x = cpu.x.wrapping_add(1);
     cpu.flags.set_nz(cpu.x);
     0
 }
 
+#[inline]
 fn op_sbc_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let val = cpu.addr_imm(bus);
     cpu.op_sbc(val);
@@ -1051,6 +1145,7 @@ fn op_cpx_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sbc_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -1058,6 +1153,7 @@ fn op_sbc_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_inc_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     let val = bus.read(ea, cpu.cycles).wrapping_add(1);
@@ -1066,6 +1162,7 @@ fn op_inc_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_beq(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let taken = cpu.flags.contains(Flags::Z);
     cpu.branch_target(bus, taken)
@@ -1093,6 +1190,7 @@ fn op_inc_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sed(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.flags.insert(Flags::D);
     0
@@ -1154,24 +1252,28 @@ fn op_trb_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_stz_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zp(bus);
     bus.write(ea, 0, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_stz_zpx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_zpx(bus);
     bus.write(ea, 0, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_stz_abs(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_abs(bus);
     bus.write(ea, 0, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_stz_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let (ea, _) = cpu.addr_absx(bus);
     bus.write(ea, 0, cpu.cycles);
@@ -1179,6 +1281,7 @@ fn op_stz_absx(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
 }
 
 /// 65C02: BIT immediate (no N/V update).
+#[inline]
 fn op_bit_imm(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let val = cpu.addr_imm(bus);
     cpu.flags.set(Flags::Z, cpu.a & val == 0);
@@ -1271,12 +1374,14 @@ fn op_adc_ind_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_sta_ind_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_ind_zp(bus);
     bus.write(ea, cpu.a, cpu.cycles);
     0
 }
 
+#[inline]
 fn op_lda_ind_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_ind_zp(bus);
     cpu.a = bus.read(ea, cpu.cycles);
@@ -1284,6 +1389,7 @@ fn op_lda_ind_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     0
 }
 
+#[inline]
 fn op_cmp_ind_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     let ea = cpu.addr_ind_zp(bus);
     let val = bus.read(ea, cpu.cycles);
@@ -1299,6 +1405,7 @@ fn op_sbc_ind_zp(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
 }
 
 /// 65C02: INC A (accumulator increment).
+#[inline]
 fn op_inc_a(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.a = cpu.a.wrapping_add(1);
     cpu.flags.set_nz(cpu.a);
@@ -1306,6 +1413,7 @@ fn op_inc_a(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
 }
 
 /// 65C02: DEC A (accumulator decrement).
+#[inline]
 fn op_dec_a(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.a = cpu.a.wrapping_sub(1);
     cpu.flags.set_nz(cpu.a);
@@ -2021,6 +2129,7 @@ pub static DISPATCH_65C02: [OpFn; 256] = [
 ];
 
 // 65C02 BRA (branch always)
+#[inline]
 fn op_bra(cpu: &mut Cpu, bus: &mut Bus) -> u8 {
     cpu.branch_target(bus, true)
 }
@@ -2038,4 +2147,71 @@ fn op_wai(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
 fn op_stp(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.jammed = true;
     0
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Apple2Model;
+
+    fn make_cpu_bus(is_65c02: bool) -> (Cpu, Bus) {
+        let cpu = Cpu::new(is_65c02);
+        let bus = Bus::new(vec![0u8; 16384], Apple2Model::AppleIIe);
+        (cpu, bus)
+    }
+
+    /// `step_with_table` must behave identically to `step` for both CPU variants.
+    /// Guards the Phase 2.2 dispatch-hoist optimization against regression.
+    #[test]
+    fn step_with_table_equivalent_to_step_6502() {
+        step_with_table_equivalence(false);
+    }
+
+    #[test]
+    fn step_with_table_equivalent_to_step_65c02() {
+        step_with_table_equivalence(true);
+    }
+
+    fn step_with_table_equivalence(is_65c02: bool) {
+        // A short program exercising LDA imm / ADC imm / STA abs — three of
+        // the hottest dispatch handlers.
+        let program: [u8; 7] = [
+            0xA9, 0x20, // LDA #$20
+            0x69, 0x05, // ADC #$05
+            0x8D, 0x00, 0x30, // STA $3000
+        ];
+
+        let run = |use_table: bool| -> (u8, u8, u8, u8, u64) {
+            let (mut cpu, mut bus) = make_cpu_bus(is_65c02);
+            cpu.pc = 0x0300;
+            for (i, &b) in program.iter().enumerate() {
+                bus.write_raw(0x0300 + i as u16, b);
+            }
+            cpu.cycles = 0;
+
+            if use_table {
+                let table: &[OpFn; 256] = if is_65c02 {
+                    &DISPATCH_65C02
+                } else {
+                    &DISPATCH_6502
+                };
+                for _ in 0..3 {
+                    step_with_table(&mut cpu, &mut bus, table);
+                }
+            } else {
+                for _ in 0..3 {
+                    step(&mut cpu, &mut bus);
+                }
+            }
+            (cpu.a, cpu.x, cpu.y, bus.read_raw(0x3000), cpu.cycles)
+        };
+
+        let direct = run(false);
+        let via_table = run(true);
+        assert_eq!(direct, via_table, "step and step_with_table diverged");
+        assert_eq!(direct.0, 0x25, "LDA+ADC result");
+        assert_eq!(direct.3, 0x25, "STA target");
+    }
 }

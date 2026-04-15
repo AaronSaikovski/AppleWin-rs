@@ -13,8 +13,9 @@ AppleWin-rs is a Rust rewrite of the [AppleWin](https://github.com/AppleWin/Appl
 1. Format all code: `cargo fmt --all`
 2. Pass Clippy with no warnings: `cargo clippy --workspace --all-targets -- -D warnings`
 3. Build cleanly with no errors or warnings: `cargo build --release`
+4. All unit tests must pass: `cargo test`
 
-All three checks must pass. If any check fails, fix all errors and warnings immediately before moving on. The codebase must be in a clean, formatted, warning-free state at all times.
+All four checks must pass. If any check fails, fix all errors and warnings immediately before moving on. The codebase must be in a clean, formatted, warning-free state at all times.
 
 **CI enforces these same checks** on every push and PR to `main` and `development` branches. A PR will not merge if any check fails.
 
@@ -42,11 +43,12 @@ cargo fmt
 
 ## Workspace Structure
 
-The project is a Cargo workspace with 5 crates, each with a distinct responsibility:
+The project is a Cargo workspace with 6 crates, each with a distinct responsibility:
 
 | Crate | Purpose |
 |-------|---------|
 | `crates/apple2-core` | Pure emulation engine — CPU, memory bus, expansion cards. **Zero OS dependencies.** |
+| `crates/apple2-iigs` | Apple IIgs emulation — 65C816 CPU, IIgs memory bus, Mega II, SHR video, Ensoniq DOC, ADB, SmartPort |
 | `crates/apple2-audio` | Audio synthesis (speaker, AY-8910/Mockingboard, SSI263 speech) |
 | `crates/apple2-video` | Video rendering pipeline (NTSC, RGB, hi-res, text modes) |
 | `crates/apple2-debugger` | 6502 disassembler, breakpoints, symbol table — no GUI dependencies |
@@ -56,13 +58,14 @@ The project is a Cargo workspace with 5 crates, each with a distinct responsibil
 
 **Core has no platform dependencies.** `apple2-core` is strictly OS-agnostic. All platform code (GUI, audio, file dialogs, input) lives exclusively in `crates/applewin`. This is enforced by crate boundaries.
 
-**ROMs are compiled in.** All ROM data is embedded via `include_bytes!` macros — there is no runtime ROM file loading. ROM files live under `crates/apple2-core/roms/` and `crates/applewin/roms/`.
+**Apple II/IIe/IIc ROMs are compiled in.** ROM data is embedded via `include_bytes!` macros from the top-level `roms/` directory. **Apple IIgs ROMs** are loaded at runtime from `roms/Apple_IIgs/` (128-256KB, auto-detected).
 
 **Headless mode.** Building with `--no-default-features --features headless` produces a binary with no GUI or audio, suitable for CI or library embedding.
 
 ## Core Emulation Internals
 
 The main data flow:
+
 ```
 Emulator (emulator.rs)
   └── Bus (bus.rs)         — 64KB address space, soft-switches, card slots
@@ -91,10 +94,9 @@ At runtime, `applewin` stores a TOML config file at the platform config dir (`%A
 
 ## Supported Hardware
 
-**Models**: Apple II, II+, IIe, IIe Enhanced (and some clones). Apple //c and IIgs are **not** supported.
+**Models**: Apple II, II+, IIe, IIe Enhanced, Apple //c, Apple IIgs (and some clones).
 
 **Expansion cards** (19 implemented): Disk II, Hard Disk Controller, Mockingboard/Phasor, SAM, SSI263, 80-Column, RamWorks III, Language Card, Saturn, Mouse, 4Play, SNES MAX, Uthernet I/II, Printer, Super Serial, Z80 CP/M, VidHD, No Slot Clock.
-
 
 ## Workflow Orchestration
 
@@ -124,7 +126,8 @@ At runtime, `applewin` stores a TOML config file at the platform config dir (`%A
 - **Always run `cargo fmt --all` after every change** — code must be formatted
 - **Always run `cargo clippy --workspace --all-targets -- -D warnings` after every change** — zero warnings allowed
 - **Always run `cargo build --release`** — must compile cleanly
-- All three checks must pass before marking any task complete
+- **Always run `cargo test`** — all unit tests must pass
+- All four checks must pass before marking any task complete
 - Never mark a task complete without proving it works
 - Diff behavior between main and your changes when relevant
 - Ask yourself: "Would a staff engineer approve this?"
@@ -152,6 +155,10 @@ At runtime, `applewin` stores a TOML config file at the platform config dir (`%A
 4. **Explain Changes**: High-level summary at each step
 5. **Document Results**: Add review section to `tasks/todo.md`
 6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+
+## Changelog
+
+**All major fixes and updates must be documented in `CHANGELOG.md`.** When making significant changes (bug fixes, new features, refactors, or behavioral changes), always add an entry to `CHANGELOG.md` describing what changed.
 
 ## Core Principles
 

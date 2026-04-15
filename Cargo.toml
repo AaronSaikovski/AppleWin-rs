@@ -5,11 +5,12 @@ members = [
     "crates/apple2-audio",
     "crates/apple2-video",
     "crates/apple2-debugger",
+    "crates/apple2-iigs",
     "crates/applewin",
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/AaronSaikovski/AppleWin-rs"
@@ -20,6 +21,7 @@ apple2-core     = { path = "crates/apple2-core" }
 apple2-audio    = { path = "crates/apple2-audio" }
 apple2-video    = { path = "crates/apple2-video" }
 apple2-debugger = { path = "crates/apple2-debugger" }
+apple2-iigs     = { path = "crates/apple2-iigs" }
 
 bitflags         = { version = "2", features = ["serde"] }
 thiserror        = "1"

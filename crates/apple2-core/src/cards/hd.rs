@@ -33,7 +33,7 @@ const ERR_NO_DEVICE: u8 = 0x28;
 // The firmware contains the correct ProDOS ID bytes at required offsets,
 // allowing ProDOS to auto-discover the card in any slot.
 
-static HD_FIRMWARE: &[u8; 256] = include_bytes!("../../roms/Hddrvr.bin");
+static HD_FIRMWARE: &[u8; 256] = include_bytes!("../../../../roms/Hddrvr.bin");
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 

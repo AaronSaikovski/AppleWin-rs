@@ -217,6 +217,10 @@ fn crc32(data: &[u8]) -> u32 {
 /// 1_023_000 / 250_000 = ~4.092 cycles per bit.
 const CYCLES_PER_BIT: u64 = 4;
 
+/// Number of CPU cycles the drive keeps spinning after motor-off (~1 second).
+/// Matches C++ AppleWin `SPINNING_CYCLES`.
+const SPINNING_CYCLES: u64 = 1_000_000;
+
 // ── Per-drive state ───────────────────────────────────────────────────────────
 
 struct Drive {
@@ -243,6 +247,12 @@ struct Drive {
     /// Whether this drive is write-protected.
     write_protected: bool,
 
+    /// Spin-down counter: remaining CPU cycles of inertia after motor-off.
+    /// When the motor is turned on this is set to `SPINNING_CYCLES`.
+    /// `update()` decrements it while the motor is off.
+    /// Reads/writes are only serviced while `spinning > 0`.
+    spinning: u64,
+
     // ── WOZ bit-level fields ──────────────────────────────────────────────
     /// Parsed WOZ image data (None for non-WOZ formats).
     woz: Option<WozImage>,
@@ -252,6 +262,8 @@ struct Drive {
     shift_reg: u8,
     /// Number of zero bits encountered consecutively (for MC3470 emulation).
     zero_count: u32,
+    /// 4-bit head window tracking the last 4 raw magnetic bits (C++ m_headWindow).
+    head_window: u8,
     /// Last CPU cycle when a bit was read/written (for timing).
     last_cycle: u64,
     /// RNG state for weak/flux bits.
@@ -271,10 +283,12 @@ impl Drive {
             format: DiskFormat::Dos33,
             path: None,
             write_protected: false,
+            spinning: 0,
             woz: None,
             bit_pos: 0,
             shift_reg: 0,
             zero_count: 0,
+            head_window: 0,
             last_cycle: 0,
             rng: SimpleRng::new(0xCAFE_BABE),
         }
@@ -366,33 +380,16 @@ impl Drive {
         }
     }
 
-    /// Read bits until a complete nibble is formed (1-bit followed by 7 more bits).
-    /// This simulates the Apple II disk controller's shift register behavior.
-    /// `cycles` is the current CPU cycle count for timing.
-    ///
-    /// Returns `Some(nibble)` when a full byte with bit 7 set is assembled,
-    /// or `None` if the shift register hasn't accumulated a complete nibble yet.
-    /// This matches real hardware: the data latch retains the previous value
-    /// until a new valid nibble is ready.
-    fn woz_read_nibble(&mut self, cycles: u64) -> Option<u8> {
-        // Advance position based on elapsed cycles
-        let bits_elapsed = self.advance_bits(cycles);
-
-        // Simulate each bit that elapsed
-        for _ in 0..bits_elapsed.min(128) {
-            let bit = self.woz_read_bit();
-            self.shift_reg = (self.shift_reg << 1) | bit;
-
-            if self.shift_reg & 0x80 != 0 {
-                // Full nibble accumulated
-                let result = self.shift_reg;
-                self.shift_reg = 0;
-                return Some(result);
+    /// Advance the WOZ bit position by `count` bits without reading.
+    fn woz_skip_bits(&mut self, count: u32) {
+        let qt = self.quarter_track();
+        let woz = self.woz.as_ref().unwrap();
+        if let Some(track) = woz.track_for_quarter(qt) {
+            let bit_count = track.bit_count;
+            if bit_count > 0 {
+                self.bit_pos = (self.bit_pos + count) % bit_count;
             }
         }
-
-        // No complete nibble yet — caller should preserve the current latch value.
-        None
     }
 
     /// Write a single bit to the current WOZ track at the current position.
@@ -439,15 +436,10 @@ impl Drive {
 
     // ── Unified read/write dispatchers ───────────────────────────────────
 
-    /// Read next nibble from disk.  Returns `Some(nibble)` when data is
-    /// available, or `None` when the WOZ shift register hasn't formed a
-    /// complete byte yet (caller should preserve the current data latch).
-    fn read_nibble(&mut self, cycles: u64) -> Option<u8> {
-        if self.is_woz() {
-            self.woz_read_nibble(cycles)
-        } else {
-            Some(self.read_nibble_legacy())
-        }
+    /// Read next nibble from disk (non-WOZ only).
+    /// For WOZ images, the LSS logic in `Disk2Card` handles reads instead.
+    fn read_nibble_non_woz(&mut self) -> u8 {
+        self.read_nibble_legacy()
     }
 
     fn write_nibble(&mut self, byte: u8, cycles: u64) {
@@ -529,10 +521,22 @@ pub struct Disk2Card {
     drives: [Drive; 2],
     active_drive: usize,
     motor_on: bool,
+    /// Q7 state: false = read mode, true = write mode.
     write_mode: bool,
+    /// Q6 state: false = data latch (Q6L), true = load mode (Q6H).
+    load_mode: bool,
     latch: u8,
     /// Stepper magnet states, bits 0–3 = phases 0–3.
     phases: u8,
+
+    // ── WOZ LSS (Logic State Sequencer) fields ──────────────────────────
+    /// Shift register used by the LSS for WOZ reads/writes.
+    shift_reg: u8,
+    /// Latch delay counter (in µs units): when > 0, the data latch is held
+    /// and not updated from the shift register (UTAIIe page 9-22).
+    latch_delay: i8,
+    /// CPU cycle of the last `update()` call (for spinning countdown).
+    last_update_cycle: u64,
 }
 
 impl Disk2Card {
@@ -543,14 +547,18 @@ impl Disk2Card {
             active_drive: 0,
             motor_on: false,
             write_mode: false,
+            load_mode: false,
             latch: 0xFF,
             phases: 0,
+            shift_reg: 0,
+            latch_delay: 0,
+            last_update_cycle: 0,
         }
     }
 
-    /// Returns true if the disk motor is currently spinning.
+    /// Returns true if the disk motor is on or the drive is still spinning down.
     pub fn motor_on(&self) -> bool {
-        self.motor_on
+        self.motor_on || self.drives[self.active_drive].spinning > 0
     }
 
     /// Load a disk image into `drive` (0 or 1).
@@ -580,12 +588,13 @@ impl Disk2Card {
                 d.woz = Some(woz);
                 d.tracks = Vec::new(); // not used in WOZ mode
                 d.loaded = true;
+                // Reset media-specific state but preserve drive state (phase/head position).
+                // Changing the disk in the drive doesn't affect the drive's head position
+                // (matches C++ AppleWin: GH#138, GH#640).
                 d.byte_pos = 0;
                 d.bit_pos = 0;
                 d.shift_reg = 0;
                 d.zero_count = 0;
-                d.phase = 0;
-                d.current_track_idx = 0;
                 d.dirty = false;
                 d.format = DiskFormat::Woz;
                 d.raw = data.to_vec();
@@ -621,9 +630,10 @@ impl Disk2Card {
             d.woz = None; // ensure not in WOZ mode
             d.tracks = t;
             d.loaded = true;
+            // Reset media-specific state but preserve drive state (phase/head position).
+            // Changing the disk in the drive doesn't affect the drive's head position
+            // (matches C++ AppleWin: GH#138, GH#640).
             d.byte_pos = 0;
-            d.phase = 0;
-            d.current_track_idx = 0;
             d.dirty = false;
             d.format = format;
             d.raw = data.to_vec();
@@ -649,6 +659,116 @@ impl Disk2Card {
             self.drives[drive].raw.clear();
             self.drives[drive].path = None;
         }
+    }
+
+    /// Returns true if the current drive has a WOZ image loaded.
+    fn is_woz(&self) -> bool {
+        self.drives[self.active_drive].is_woz()
+    }
+
+    /// Returns true if the current drive is still spinning (motor on OR inertia).
+    fn is_spinning(&self) -> bool {
+        self.drives[self.active_drive].spinning > 0
+    }
+
+    /// Set the current drive's spinning counter.  Called on motor-on and drive-select.
+    fn check_spinning(&mut self) {
+        if self.motor_on && self.drives[self.active_drive].loaded {
+            self.drives[self.active_drive].spinning = SPINNING_CYCLES;
+        }
+    }
+
+    /// Reset the WOZ Logic State Sequencer (shift reg, latch delay, head window).
+    fn reset_lss(&mut self) {
+        self.shift_reg = 0;
+        self.latch_delay = 0;
+        self.drives[self.active_drive].head_window = 0;
+    }
+
+    /// Run the WOZ LSS for `bit_cell_count` bit cells, updating the data latch.
+    /// This is the Rust equivalent of C++ `DataLatchReadWOZ`.
+    fn data_latch_read_woz(&mut self, bit_cell_count: u32) {
+        let drive = &mut self.drives[self.active_drive];
+
+        for _ in 0..bit_cell_count {
+            let raw_bit = drive.woz_read_bit();
+
+            // 4-bit head window tracks the last 4 raw magnetic flux transitions
+            drive.head_window <<= 1;
+            drive.head_window |= raw_bit;
+
+            // MC3470 output: if any of the last 4 bits are set, use bit 1 of
+            // the window.  Otherwise produce a random bit with ~30% chance of 1.
+            // (WOZ reference, UTAIIe page 9-11)
+            let output_bit = if drive.head_window & 0x0F != 0 {
+                (drive.head_window >> 1) & 1
+            } else {
+                // ~30% chance of a 1 bit (3/10 threshold, matches C++ RAND_THRESHOLD(3,10))
+                if (drive.rng.next() % 10) < 3 { 1 } else { 0 }
+            };
+
+            self.shift_reg = (self.shift_reg << 1) | output_bit;
+
+            // Latch delay: when non-zero the latch holds its value and is not
+            // updated from the shift register (7 µs window per UTAIIe p9-22).
+            if self.latch_delay > 0 {
+                self.latch_delay -= 4;
+                if self.latch_delay < 0 {
+                    self.latch_delay = 0;
+                }
+
+                if self.shift_reg == 0 {
+                    // Extend delay while shift reg is empty (GH#662)
+                    self.latch_delay += 4;
+                }
+            }
+
+            if self.latch_delay == 0 {
+                self.latch = self.shift_reg;
+
+                if self.shift_reg & 0x80 != 0 {
+                    self.latch_delay = 7;
+                    self.shift_reg = 0;
+                }
+            }
+        }
+    }
+
+    /// Full WOZ read/write dispatch (C++ `DataLatchReadWriteWOZ`).
+    /// Called on any even-address read when the drive has a WOZ image.
+    fn data_latch_read_write_woz(&mut self, cycles: u64) {
+        let drive = &mut self.drives[self.active_drive];
+
+        if !drive.is_woz() || drive.spinning == 0 {
+            return;
+        }
+
+        let bit_cell_delta = drive.advance_bits(cycles);
+
+        // If skipping a large number of bit cells, fast-forward the bulk and
+        // only run the last `significant` cells through the sequencer (GH#1020).
+        const SIGNIFICANT: u32 = 100;
+        let remainder = if bit_cell_delta <= SIGNIFICANT {
+            bit_cell_delta
+        } else {
+            let skip = bit_cell_delta - SIGNIFICANT;
+            let drv = &mut self.drives[self.active_drive];
+            drv.woz_skip_bits(skip);
+            drv.head_window = 0;
+            self.latch_delay = 0;
+            SIGNIFICANT
+        };
+
+        if !self.write_mode {
+            // Only run the sequencer in read-sequencing mode (Q6L + Q7L).
+            // In checkWriteProtAndInitWrite mode (Q6H + Q7L), just advance position.
+            if self.load_mode {
+                self.drives[self.active_drive].woz_skip_bits(remainder);
+            } else {
+                self.data_latch_read_woz(remainder);
+            }
+        }
+        // Write handling for WOZ is separate and unchanged
     }
 
     /// Update the stepper motor phases and move the head if needed.
@@ -701,66 +821,139 @@ impl Card for Disk2Card {
     }
 
     fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
+        let is_woz = self.is_woz();
+        let was_write_mode = self.write_mode;
+
+        // Update Q6/Q7 sequencer state for $C0xC–$C0xF (matches C++ SetSequencerFunction).
+        // Addresses below $C0xC don't affect the sequencer.
+        match reg {
+            0x0C => self.load_mode = false,
+            0x0D => self.load_mode = true,
+            0x0E => self.write_mode = false,
+            0x0F => self.write_mode = true,
+            _ => {}
+        }
+
+        // Process side-effects for each register.
         match reg {
             0x00..=0x07 => {
-                self.step_phase(reg);
-                self.latch
+                // Stepper: ignore if motor off AND drive not spinning (C++ GH#525)
+                if self.motor_on || self.is_spinning() {
+                    self.step_phase(reg);
+                }
             }
             0x08 => {
+                // Motor off: clear magnet states (UTAIIe p9-12, C++ GH#926, GH#1315)
+                self.phases = 0;
                 if self.motor_on {
                     self.drives[self.active_drive].flush();
                 }
                 self.motor_on = false;
-                self.latch
             }
             0x09 => {
                 self.motor_on = true;
-                self.latch
+                self.check_spinning();
             }
             0x0A => {
+                // Drive select 0: stop the other drive's spinning
+                self.drives[1].spinning = 0;
                 self.active_drive = 0;
-                self.latch
+                self.check_spinning();
             }
             0x0B => {
+                // Drive select 1: stop the other drive's spinning
+                self.drives[0].spinning = 0;
                 self.active_drive = 1;
-                self.latch
+                self.check_spinning();
             }
             0x0C => {
-                if self.write_mode && self.motor_on {
-                    self.drives[self.active_drive].write_nibble(self.latch, cycles);
-                } else if !self.write_mode && self.motor_on {
-                    // Only update the data latch when a complete nibble is ready.
-                    // Real hardware holds the previous latch value until the shift
-                    // register produces a new byte with bit 7 set.
-                    if let Some(nibble) = self.drives[self.active_drive].read_nibble(cycles) {
-                        self.latch = nibble;
+                // For non-WOZ: read/write nibble (WOZ handled below via even-address path)
+                if !is_woz {
+                    if self.write_mode && self.is_spinning() {
+                        self.drives[self.active_drive].write_nibble(self.latch, cycles);
+                    } else if !self.write_mode && self.is_spinning() {
+                        self.latch = self.drives[self.active_drive].read_nibble_non_woz();
                     }
                 }
-                self.latch
             }
             0x0D => {
-                if self.drives[self.active_drive].write_protected {
-                    0x80
-                } else {
-                    0x00
+                // LoadWriteProtect: only update latch if drive is spinning (GH#599).
+                // "DRIVES OFF forces the data register to hold its present state." (UTAIIe p9-12)
+                if self.is_spinning() {
+                    if self.drives[self.active_drive].write_protected {
+                        self.latch = 0xFF;
+                    } else {
+                        self.latch = 0x00;
+                    }
+                    // For WOZ: advance bit stream and reset LSS (C++ fix for E7 protection)
+                    if is_woz {
+                        let drv = &mut self.drives[self.active_drive];
+                        let delta = drv.advance_bits(cycles);
+                        drv.woz_skip_bits(delta);
+                        self.reset_lss();
+                    }
                 }
             }
-            0x0E => {
-                self.write_mode = false;
-                self.latch
-            }
-            0x0F => {
-                self.write_mode = true;
-                self.latch
-            }
-            _ => self.latch,
+            0x0E | 0x0F => {} // Q7L/Q7H: side-effect already handled above
+            _ => {}
         }
+
+        // Only even addresses return the latch (UTAIIe Table 9.1).
+        // Odd addresses return floating bus.  We approximate floating bus as 0,
+        // matching the C++ `MemReadFloatingBus()` average behavior.
+        if reg & 1 != 0 {
+            return 0;
+        }
+
+        // For WOZ images, any even-address read runs the LSS to advance the
+        // bit stream (C++ `DataLatchReadWriteWOZ` at the bottom of `IORead`).
+        if is_woz && !self.write_mode {
+            self.data_latch_read_write_woz(cycles);
+        }
+
+        // IWM compatibility for Apple IIc boot ROM:
+        //
+        // The IIc ROM has two polling loops that read register $0E (Q7L):
+        //
+        // 1. Handshake loop ($CC29): writes data to Q7H ($0F), then reads Q7L
+        //    ($0E) and checks if the lower 5 bits match.  The IWM echoes the
+        //    written data back; we return the latch (set by the Q7H write).
+        //
+        // 2. Ready loop ($CC3F): reads Q7L ($0E) and checks bit 5.  The IWM
+        //    returns 0 when idle; returning the stale $FF latch loops forever.
+        //
+        // We distinguish these by checking whether write_mode was just cleared
+        // by THIS read (handshake: write_mode was true before we cleared it)
+        // vs. already clear (ready check).  The `was_write_mode` flag captures
+        // the state before the sequencer update at the top of this function.
+        if reg == 0x0E && !was_write_mode && !self.motor_on && !self.is_spinning() {
+            return 0;
+        }
+
+        self.latch
     }
 
     fn slot_io_write(&mut self, reg: u8, value: u8, cycles: u64) {
+        let is_woz = self.is_woz();
+
+        // Update Q6/Q7 sequencer state FIRST (matches C++ SetSequencerFunction order).
         match reg {
-            0x00..=0x07 => self.step_phase(reg),
+            0x0C => self.load_mode = false,
+            0x0D => self.load_mode = true,
+            0x0E => self.write_mode = false,
+            0x0F => self.write_mode = true,
+            _ => {}
+        }
+
+        // Process side-effects for each register.
+        match reg {
+            0x00..=0x07 => {
+                if self.motor_on || self.is_spinning() {
+                    self.step_phase(reg);
+                }
+            }
             0x08 => {
+                self.phases = 0;
                 if self.motor_on {
                     self.drives[self.active_drive].flush();
                 }
@@ -768,45 +961,91 @@ impl Card for Disk2Card {
             }
             0x09 => {
                 self.motor_on = true;
+                self.check_spinning();
             }
             0x0A => {
+                self.drives[1].spinning = 0;
                 self.active_drive = 0;
+                self.check_spinning();
             }
             0x0B => {
+                self.drives[0].spinning = 0;
                 self.active_drive = 1;
+                self.check_spinning();
             }
             0x0C => {
-                // Q6L write: load latch (data to write on next strobe)
-                if self.write_mode && self.motor_on {
-                    self.latch = value;
-                    self.drives[self.active_drive].write_nibble(value, cycles);
+                if !is_woz {
+                    if self.write_mode && self.is_spinning() {
+                        self.drives[self.active_drive].write_nibble(self.latch, cycles);
+                    } else if !self.write_mode && self.is_spinning() {
+                        self.latch = self.drives[self.active_drive].read_nibble_non_woz();
+                    }
                 }
             }
             0x0D => {
-                self.latch = value;
-            } // Q6H: load data register
-            0x0E => {
-                self.write_mode = false;
-            } // Q7L: read mode
+                // Q6H write: load data register with bus value when in write mode.
+                // The data register is loaded when Q6=1 AND Q7=1 — handled at the
+                // bottom of this function via the load_mode && write_mode check.
+            }
+            0x0E => {} // Q7L: side-effect handled above
             0x0F => {
-                self.write_mode = true;
-            } // Q7H: write mode
+                // Q7H write: IWM compatibility — the Apple IIc's Integrated Woz
+                // Machine loads the data register from the bus on any write when in
+                // write mode.  The standard Disk II only loads when both Q6H and Q7H
+                // are active, but the IIc firmware writes to Q7H and expects the
+                // value to be echoed back from Q7L (handshake check at $CC29).
+                // Storing the bus value here satisfies that handshake without
+                // affecting normal Disk II write operations.
+                self.latch = value;
+            }
             _ => {}
+        }
+
+        // For WOZ: run the LSS on even-address writes too (C++ DataLatchReadWriteWOZ)
+        if is_woz && reg & 1 == 0 && !self.write_mode {
+            self.data_latch_read_write_woz(cycles);
+        }
+
+        // Any address write loads the latch via the sequencer LD command (74LS323),
+        // but ONLY when the sequencer function is dataLoadWrite (Q6=1 AND Q7=1).
+        // (C++ AppleWin: "any address writes the latch via sequencer LD command")
+        if self.load_mode && self.write_mode {
+            self.latch = value;
         }
     }
 
     fn reset(&mut self, _power_cycle: bool) {
         self.motor_on = false;
         self.write_mode = false;
+        self.load_mode = false;
         self.latch = 0xFF;
         self.phases = 0;
         self.active_drive = 0;
+        self.shift_reg = 0;
+        self.latch_delay = 0;
         for d in &mut self.drives {
             d.byte_pos = 0;
+            d.spinning = 0;
+            d.head_window = 0;
         }
     }
 
-    fn update(&mut self, _cycles: u64) {}
+    fn update(&mut self, cycles: u64) {
+        // Spin-down timer: decrement each drive's spinning counter while
+        // the motor is off, matching C++ `Disk2InterfaceCard::Update()`.
+        let elapsed = cycles.saturating_sub(self.last_update_cycle);
+        self.last_update_cycle = cycles;
+
+        for i in 0..2 {
+            if self.drives[i].spinning > 0 && !self.motor_on {
+                self.drives[i].spinning = self.drives[i].spinning.saturating_sub(elapsed);
+                // When spin-down completes, flush any dirty track
+                if self.drives[i].spinning == 0 {
+                    self.drives[i].flush();
+                }
+            }
+        }
+    }
 
     fn save_state(&self, _out: &mut dyn Write) -> Result<()> {
         Ok(())
@@ -822,7 +1061,9 @@ impl Card for Disk2Card {
     fn disk_drive_activity(&self, drive: usize) -> DriveActivity {
         if drive < 2 {
             let track = self.drives[drive].phase / 2;
-            if self.motor_on && self.active_drive == drive {
+            let spinning =
+                (self.motor_on || self.drives[drive].spinning > 0) && self.active_drive == drive;
+            if spinning {
                 DriveActivity {
                     motor_on: true,
                     writing: self.write_mode,
@@ -1705,15 +1946,31 @@ mod tests {
 
     #[test]
     fn test_woz_read_nibble_shift_register() {
-        // Create a bitstream that encodes nibble 0xD5:
-        // 0xD5 = 0b11010101
-        // The shift register accumulates bits until bit 7 is set.
-        // So bits: 1,1,0,1,0,1,0,1 -> first 1 starts, then 7 more -> 0xD5
+        // Test that the LSS headWindow/latchDelay model can read valid
+        // nibbles from a stream of 0xFF sync bytes.  The headWindow
+        // introduces a 1-bit pipeline delay and the latch delay holds the
+        // previous value for 7µs, so we need several sync nibbles to prime
+        // the LSS before it stabilises.
+        //
+        // A 0xFF sync byte on disk is encoded as a 10-bit pattern:
+        // 1111111100 (8 data bits + 2 zero-bit gap).
+        // We pack 10 of them = 100 bits (13 bytes).
+        let mut bit_vec = vec![0u8; 13];
+        // Write 10 copies of the 10-bit pattern 1111111100
+        // into the packed bitstream (MSB-first).
+        let pattern: u128 = 0b1111111100;
+        let mut accum: u128 = 0;
+        for i in 0..10u32 {
+            accum |= pattern << (128 - 10 - i * 10);
+        }
+        let accum_bytes = accum.to_be_bytes();
+        bit_vec[..13].copy_from_slice(&accum_bytes[..13]);
+
         let track = WozTrack {
-            bits: vec![0xD5, 0xAA], // 0xD5 followed by 0xAA
-            bit_count: 16,
+            bits: bit_vec,
+            bit_count: 100,
             has_weak_bits: false,
-            weak_mask: vec![0, 0],
+            weak_mask: vec![0; 13],
         };
 
         let woz = WozImage {
@@ -1729,14 +1986,22 @@ mod tests {
             synchronized: false,
         };
 
-        let mut drive = Drive::new();
-        drive.woz = Some(woz);
-        drive.loaded = true;
-        drive.last_cycle = 0;
+        let mut card = Disk2Card::new(6);
+        card.drives[0].woz = Some(woz);
+        card.drives[0].loaded = true;
+        card.drives[0].spinning = SPINNING_CYCLES;
+        card.drives[0].last_cycle = 0;
+        card.motor_on = true;
 
-        // Reading a nibble with enough cycles elapsed (8 bits * 4 cycles = 32 cycles)
-        let nibble = drive.woz_read_nibble(32);
-        assert_eq!(nibble, Some(0xD5));
+        // Run all 100 bit-cells through the LSS
+        card.data_latch_read_woz(100);
+        // After enough sync bytes, the latch must hold a valid nibble
+        // with bit 7 set (0xFF from sync).
+        assert!(
+            card.latch & 0x80 != 0,
+            "Expected valid nibble (bit 7 set), got 0x{:02X}",
+            card.latch
+        );
     }
 
     // ── Bit-level write tests ────────────────────────────────────────────
@@ -2002,5 +2267,87 @@ mod tests {
         // Read one bit, should wrap to position 0
         let _bit = drive.woz_read_bit();
         assert_eq!(drive.bit_pos, 0); // wrapped around
+    }
+
+    // ── IWM compatibility (Apple IIc boot ROM) ──────────────────────────
+
+    #[test]
+    fn test_q7h_write_stores_latch() {
+        // Writing to register $0F (Q7H) should store the bus value in the latch.
+        // The IIc boot ROM's handshake loop at $CC29 relies on this.
+        let mut card = Disk2Card::new(6);
+        assert_eq!(card.latch, 0xFF); // default
+
+        card.slot_io_write(0x0F, 0x07, 0);
+        assert_eq!(card.latch, 0x07);
+        assert!(card.write_mode); // Q7H sets write mode
+    }
+
+    #[test]
+    fn test_iwm_handshake_echo() {
+        // IWM handshake: write Y to Q7H, read Q7L, expect Y echoed back.
+        // This is the pattern at $CC29 in the IIc boot ROM.
+        let mut card = Disk2Card::new(6);
+        let y: u8 = 0x07;
+
+        // Write Y to Q7H (register $0F)
+        card.slot_io_write(0x0F, y, 0);
+        assert!(card.write_mode);
+        assert_eq!(card.latch, y);
+
+        // Read Q7L (register $0E) — should return latch (Y) because
+        // write_mode was true before this read cleared it.
+        let val = card.slot_io_read(0x0E, 0);
+        assert!(!card.write_mode); // Q7L clears write mode
+        assert_eq!(
+            val, y,
+            "IWM handshake: Q7L should echo back the value written to Q7H"
+        );
+    }
+
+    #[test]
+    fn test_iwm_ready_returns_zero_when_idle() {
+        // IWM ready check: read Q7L when motor off and write_mode already false.
+        // The IIc boot ROM's ready loop at $CC3F expects bit 5 to be clear.
+        let mut card = Disk2Card::new(6);
+        card.write_mode = false;
+        card.motor_on = false;
+
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(
+            val, 0,
+            "Q7L should return 0 when idle (motor off, write_mode was already false)"
+        );
+    }
+
+    #[test]
+    fn test_iwm_ready_returns_latch_when_spinning() {
+        // When the drive IS spinning, Q7L should return the latch (normal Disk II behavior).
+        let mut card = Disk2Card::new(6);
+        card.write_mode = false;
+        card.motor_on = true;
+        card.latch = 0xAB;
+
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(val, 0xAB, "Q7L should return latch when drive is spinning");
+    }
+
+    #[test]
+    fn test_iwm_handshake_not_affected_by_idle_fix() {
+        // Ensure the idle fix (return 0) doesn't break the handshake path.
+        // When write_mode is true before the Q7L read, the latch should be returned.
+        let mut card = Disk2Card::new(6);
+        card.motor_on = false;
+
+        // Write to Q7H: sets write_mode=true, stores latch
+        card.slot_io_write(0x0F, 0x05, 0);
+        assert!(card.write_mode);
+
+        // Read Q7L: was_write_mode=true, should return latch, NOT 0
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(
+            val, 0x05,
+            "handshake read must return latch even when motor is off"
+        );
     }
 }

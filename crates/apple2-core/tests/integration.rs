@@ -231,6 +231,81 @@ fn snapshot_round_trip() {
 }
 
 // ===========================================================================
+// Apple IIc model tests
+// ===========================================================================
+
+/// Build a 32KB IIc ROM image with a reset vector pointing to `entry`.
+fn build_iic_rom(entry: u16, code_addr: u16, code: &[u8]) -> Vec<u8> {
+    let mut rom = vec![0xEA; 32768]; // fill with NOP
+    // Standard bank is the lower 16K (offsets 0x0000-0x3FFF)
+    let vec_off = 0xFFFC - 0xC000; // 0x3FFC
+    rom[vec_off] = entry as u8;
+    rom[vec_off + 1] = (entry >> 8) as u8;
+
+    // Place code in the standard bank (lower 16K)
+    if code_addr >= 0xC000 {
+        let off = (code_addr - 0xC000) as usize;
+        for (i, &b) in code.iter().enumerate() {
+            if off + i < rom.len() {
+                rom[off + i] = b;
+            }
+        }
+    }
+    rom
+}
+
+#[test]
+fn iic_boots_with_65c02() {
+    let rom = build_iic_rom(0xC100, 0xC100, &[0xEA]);
+    let emu = Emulator::new(rom, Apple2Model::AppleIIc, CpuType::Cpu65C02);
+    assert_eq!(emu.cpu.pc, 0xC100);
+    // IIc should be a 65C02
+    assert!(emu.cpu.is_65c02);
+}
+
+#[test]
+fn iic_intcxrom_persists_after_reset() {
+    let rom = build_iic_rom(0xC100, 0xC100, &[0xEA]);
+    let mut emu = Emulator::new(rom, Apple2Model::AppleIIc, CpuType::Cpu65C02);
+
+    // INTCXROM should be set at power-on
+    assert!(
+        emu.bus
+            .mode
+            .contains(apple2_core::bus::MemMode::MF_INTCXROM)
+    );
+
+    // Reset the emulator
+    emu.reset(true);
+
+    // INTCXROM should still be set after reset
+    assert!(
+        emu.bus
+            .mode
+            .contains(apple2_core::bus::MemMode::MF_INTCXROM)
+    );
+}
+
+#[test]
+fn iic_executes_code_from_32k_rom() {
+    // Place a small program in the standard bank of the 32KB ROM.
+    // LDA #$42; STA $50; JMP halt
+    let code: &[u8] = &[
+        0xA9, 0x42, // LDA #$42
+        0x85, 0x50, // STA $50
+        0x4C, 0x04, 0xC1, // JMP $C104 (halt)
+    ];
+    let rom = build_iic_rom(0xC100, 0xC100, code);
+    let mut emu = Emulator::new(rom, Apple2Model::AppleIIc, CpuType::Cpu65C02);
+
+    // Step through: LDA + STA = 2 instructions
+    emu.step();
+    emu.step();
+    assert_eq!(emu.cpu.a, 0x42);
+    assert_eq!(emu.bus.main_ram[0x50], 0x42);
+}
+
+// ===========================================================================
 // Fibonacci sequence test (exercises ADC, STA, LDA, branches)
 // ===========================================================================
 

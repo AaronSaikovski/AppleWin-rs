@@ -10,7 +10,7 @@ use crate::error::Result;
 use std::io::{Read, Write};
 
 static MOUSE_FIRMWARE: &[u8; 256] = {
-    const ROM: &[u8] = include_bytes!("../../roms/MouseInterface.rom");
+    const ROM: &[u8] = include_bytes!("../../../../roms/MouseInterface.rom");
     unsafe { &*(ROM.as_ptr() as *const [u8; 256]) }
 };
 

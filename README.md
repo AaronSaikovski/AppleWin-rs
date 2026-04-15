@@ -3,7 +3,7 @@
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.1-green.svg)
 
 A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
@@ -22,8 +22,34 @@ Pre-built binaries for Windows, macOS, and Linux are available on the [Releases]
 - Apple II+ (`][+`)
 - Apple IIe (`//e`)
 - Apple IIe Enhanced (`//e Enhanced`) — default
+- Apple IIc (`//c`) — 32KB ROM, built-in peripherals, 128KB RAM
+- **Apple IIgs** (`//gs`) — 65C816 CPU, Super Hi-Res graphics, Ensoniq audio *(temporarily disabled in the UI; see note below)*
 
-> No support currently for the //c, //c+, Laser 128, Laser 128EX/EX2, or Apple IIgs.
+> No support currently for the //c+, Laser 128, or Laser 128EX/EX2.
+
+> **Note:** Apple IIgs selection is currently disabled in the Settings UI while IIgs support stabilises. The underlying emulation code remains in the tree and can be re-enabled later.
+
+---
+
+### Apple IIgs Features
+
+The Apple IIgs emulation includes:
+
+| Feature | Description |
+|---------|-------------|
+| 65C816 CPU | Full 16-bit CPU with all 256 opcodes, emulation and native modes |
+| Super Hi-Res | 320x200 (16 colors) and 640x200 (4 colors) per-scanline modes |
+| Ensoniq DOC 5503 | 32-oscillator wavetable synthesizer with 64KB sound RAM |
+| ADB | Apple Desktop Bus keyboard and mouse input |
+| Mega II | Full Apple IIe backwards compatibility |
+| Memory | 256KB to 8MB configurable RAM, bank-switched addressing |
+| ROM support | ROM 00, ROM 01, and ROM 03 auto-detected from `roms/Apple_IIgs/` |
+| SmartPort | Block-level 3.5" (.2mg) and hard disk image support |
+| Speed control | 1 MHz (IIe compatible) and 2.8 MHz (native) switching |
+| Shadowing | Bank $00/$01 to $E0/$E1 display memory mirroring |
+| BRAM | 256-byte battery-backed parameter RAM with factory defaults |
+
+> **ROM files:** IIgs ROMs are not included. Place your ROM file in `roms/Apple_IIgs/` next to the executable. ROM 03 (256KB) is recommended. The emulator auto-detects the ROM version.
 
 ---
 
@@ -64,16 +90,19 @@ Pre-built binaries for Windows, macOS, and Linux are available on the [Releases]
 
 ## Architecture
 
-The project is structured as a Cargo workspace with five crates, organised so that the core emulation has zero OS or I/O dependencies:
+The project is structured as a Cargo workspace with six crates, organised so that the core emulation has zero OS or I/O dependencies:
 
 ```
 AppleWin-rs/
 ├── crates/
 │   ├── apple2-core       # Pure emulation engine (CPU, bus, cards)
+│   ├── apple2-iigs       # Apple IIgs emulation (65C816, SHR, Ensoniq, ADB)
 │   ├── apple2-audio      # Audio synthesis (speaker, AY8910, SSI263)
 │   ├── apple2-video      # Video rendering (NTSC, RGB, hi-res, double hi-res)
 │   ├── apple2-debugger   # Symbolic debugger (disassembler, breakpoints, symbols)
 │   └── applewin          # Main application, GUI, and platform I/O
+├── roms/                 # All ROM files (embedded at compile time via include_bytes!)
+│   └── firmware/         # ProDOS, DOS 3.3, and utility firmware binaries
 └── bin/                  # Runtime resources (disk images, symbol tables)
 ```
 
@@ -82,6 +111,7 @@ AppleWin-rs/
 | Crate | Purpose | Key Dependencies |
 |---|---|---|
 | `apple2-core` | 6502/65C02 CPU, memory bus, 21 expansion card implementations | `bitflags`, `thiserror`, `tracing`, `serde` |
+| `apple2-iigs` | 65C816 CPU, IIgs memory bus, Mega II, SHR video, Ensoniq audio, ADB, SmartPort | `apple2-core`, `bitflags`, `tracing`, `serde` |
 | `apple2-audio` | AY8910 PSG synthesis, SSI263 speech, speaker emulation | `thiserror`, `tracing`, `serde` |
 | `apple2-video` | Framebuffer (560x384), NTSC signal chain, all video mode rendering | `apple2-core`, `thiserror`, `tracing`, `serde` |
 | `apple2-debugger` | Disassembler, breakpoint manager, symbol table loader | `apple2-core`, `thiserror`, `tracing`, `serde` |
@@ -92,7 +122,7 @@ AppleWin-rs/
 - **`apple2-core` is OS-agnostic** — no platform code, no I/O; purely emulation logic.
 - **Subsystem crates** (`audio`, `video`, `debugger`) depend only on `apple2-core`.
 - **`applewin`** is the only crate with platform and GUI dependencies.
-- **ROMs are embedded at compile time** via `include_bytes!` — no runtime file loading required.
+- **Apple II/IIe/IIc ROMs are centralised** in the top-level `roms/` directory and embedded at compile time via `include_bytes!`. **Apple IIgs ROMs** are loaded at runtime from `roms/Apple_IIgs/` (128-256KB, not distributed).
 - **Headless mode** is available (no GUI/audio dependencies) for testing and CI.
 
 ---
@@ -159,15 +189,18 @@ Or run the compiled binary directly:
 cargo test
 ```
 
-Runs 297 tests across all crates:
+Runs 467 tests across all crates:
 
 | Crate | Tests | Coverage |
 |---|---|---|
-| `apple2-core` | 247 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, expansion cards |
-| `apple2-core` (integration) | 9 | Boot sequence, program execution, snapshots, Fibonacci |
-| `apple2-audio` | 9 | Speaker interpolation, DC filter, amplitude |
+| `apple2-core` | 290 | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility, Apple IIc model (INTCXROM, ROM banking, IOUDIS/DHIRES gating), Via6522 (register read/write, timers, IRQ, state serialization), performance regression guards (dispatch-table equivalence, speaker toggle cap, card slot range checks) |
+| `apple2-core` (integration) | 12 | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution |
+| `apple2-iigs` | 89 | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP |
+| `apple2-iigs` (integration) | 15 | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches |
+| `apple2-iigs` (peripherals) | 35 | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path) |
+| `apple2-audio` | 10 | Speaker interpolation, DC filter, amplitude, WAV recording |
 | `apple2-video` | 14 | NTSC tables, text/lores/hires/dlores rendering, mixed mode |
-| `apple2-debugger` | 18 | Disassembly, breakpoints, assembler |
+| `apple2-debugger` | 2 | Disassembly |
 
 ---
 
@@ -197,6 +230,11 @@ Runs 297 tests across all crates:
 - **Save/restore** emulator state (F11 / Shift+F11)
 - **Gamepad support** via gilrs (Xbox, PlayStation, and other controllers)
 - **TOML configuration** with platform-standard paths
+- **Optimized hot paths** — per-instruction dispatch with hoisted 6502/65C02
+  table selection and `#[inline]` on the ~90 most-executed opcode handlers,
+  direct-to-display rendering with no intermediate framebuffer copy,
+  compile-time SHR scale LUTs, and lock-free audio synthesis into reusable
+  scratch buffers for the speaker, Ensoniq DOC, and Mockingboard paths
 
 ---
 
@@ -258,12 +296,12 @@ On first run, `applewin` creates a TOML config file in the platform-standard loc
 
 ### Configurable Options
 
-- **Machine:** Model, CPU type (6502/65C02), slot card assignments
+- **Machine:** Model (II/II+/IIe/IIe Enhanced/IIgs), CPU type (6502/65C02/65C816), slot card assignments
 - **Video:** Mode, scanlines, color blending, monochrome color, refresh rate
 - **Audio:** Master volume (0-100%)
 - **Speed:** Emulation speed (0-40, 10 = normal), enhanced disk speed (16x during motor spin)
 - **Input:** Joystick type per port, paddle trim, auto-fire, self-centering, button swap, mouse options
-- **Memory:** RAM initialization pattern (0-7), custom ROM paths
+- **Memory:** RAM initialization pattern (0-7), custom ROM paths, IIgs RAM size (256KB-8MB), IIgs ROM path
 - **Save state:** Auto-save on exit, custom save state path
 - **UI:** Window scale, position, disk activity LEDs, confirm reboot dialog
 
@@ -316,3 +354,8 @@ Please report issues for this Rust port at: [https://github.com/AaronSaikovski/A
 GPL-2.0-or-later — see [LICENSE](LICENSE) for details.
 
 This project is based on [AppleWin](https://github.com/AppleWin/AppleWin), which is also licensed under GPL-2.0-or-later.
+
+---
+
+## Apple II Roms
+Download Apple II and IIGS roms from [Virtual Apple ](https://www.virtualapple.org/),

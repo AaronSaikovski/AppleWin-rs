@@ -4,8 +4,21 @@
 //! `memreadPageType[]`, `IORead[256]`, `IOWrite[256]` from `source/Memory.h`.
 
 use crate::card::{CardManager, DmaWrite, DriveActivity};
+use crate::model::Apple2Model;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
+
+// ── Capacity caps for bounded hot-path buffers ───────────────────────────────
+
+/// Maximum entries kept in `mem_trace` before new trace records are dropped.
+/// Prevents unbounded growth when debugger tracing is left enabled for long
+/// runs; 1M entries ≈ 4 MiB and covers seconds of emulation.
+const MEM_TRACE_MAX: usize = 1_000_000;
+
+/// Maximum speaker toggles retained between frame boundaries. One frame at
+/// full speed cannot realistically produce anywhere near this many toggles;
+/// the cap exists purely as a safety valve against pathological programs.
+const SPEAKER_TOGGLES_MAX: usize = 65_536;
 
 // ── Memory mode flags ─────────────────────────────────────────────────────────
 
@@ -205,6 +218,9 @@ pub struct Bus {
     /// Peripheral card ROM space ($C100–$CFFF, 3840 bytes = 15 pages).
     pub cx_rom: Box<[u8; 0x1000]>,
 
+    /// Machine model — controls IIc-specific behaviour (forced INTCXROM, ROM banking, etc.).
+    pub model: Apple2Model,
+
     /// Memory mode soft switches.
     pub mode: MemMode,
 
@@ -277,13 +293,19 @@ pub struct Bus {
 }
 
 impl Bus {
-    pub fn new(rom: Vec<u8>) -> Self {
+    pub fn new(rom: Vec<u8>, model: Apple2Model) -> Self {
+        let mut initial_mode = MemMode::default();
+        if model.is_iic() {
+            // Apple IIc: internal ROM is always active (no expansion slots).
+            initial_mode.insert(MemMode::MF_INTCXROM);
+        }
         let mut bus = Self {
             main_ram: Box::new([0u8; 65536]),
             aux_ram: Box::new([0u8; 65536]),
             rom,
             cx_rom: Box::new([0u8; 0x1000]),
-            mode: MemMode::default(),
+            model,
+            mode: initial_mode,
             pages_r: [PageSrc::Main(0); 256],
             pages_w: [PageDst::Main(0); 256],
             cards: CardManager::new(),
@@ -342,7 +364,8 @@ impl Bus {
         let aux_read = self.mode.contains(MemMode::MF_AUXREAD);
         let aux_write = self.mode.contains(MemMode::MF_AUXWRITE);
         let altzp = self.mode.contains(MemMode::MF_ALTZP);
-        let intcxrom = self.mode.contains(MemMode::MF_INTCXROM);
+        // Apple IIc: INTCXROM is always on (no expansion slots).
+        let intcxrom = self.mode.contains(MemMode::MF_INTCXROM) || self.model.is_iic();
         let highram = self.mode.contains(MemMode::MF_HIGHRAM);
         let writeram = self.mode.contains(MemMode::MF_WRITERAM);
         let bank2 = self.mode.contains(MemMode::MF_BANK2);
@@ -444,25 +467,43 @@ impl Bus {
         }
 
         // Pages 0xD0–0xDF: language card bank 1/2 or ROM
-        // Bank2 lives in aux_ram[$D000-$DFFF].
-        // Bank1 lives in aux_ram[$C000-$CFFF] (safe: that area is never used for normal RAM).
+        //
+        // C++ AppleWin memory layout (Memory.cpp MemUpdatePaging):
+        //   ALTZP=0 → LC reads/writes use g_pMemMainLanguageCard (= memmain+$C000)
+        //   ALTZP=1 → LC reads/writes use memaux
+        //
+        // Rust equivalent:
+        //   ALTZP=0 → LC lives in main_ram[$C000–$FFFF]  (PageSrc/Dst::Main)
+        //   ALTZP=1 → LC lives in aux_ram[$C000–$FFFF]   (PageSrc/Dst::Aux)
+        //
+        // Bank2 uses the $D000 offset directly; Bank1 subtracts $1000 so that
+        // $D000 maps to the $C000 region (both in main_ram and aux_ram).
         for page in 0xD0u16..=0xDF {
             let base = page << 8;
+            let lc_base = if bank2 { base } else { base - 0x1000 };
             if highram {
-                // LC RAM active — choose bank via MF_BANK2
-                let lc_base = if bank2 { base } else { base - 0x1000 };
-                self.pages_r[page as usize] = PageSrc::Aux(lc_base);
+                if altzp {
+                    self.pages_r[page as usize] = PageSrc::Aux(lc_base);
+                } else {
+                    self.pages_r[page as usize] = PageSrc::Main(lc_base);
+                }
                 self.pages_w[page as usize] = if writeram {
-                    PageDst::Aux(lc_base)
+                    if altzp {
+                        PageDst::Aux(lc_base)
+                    } else {
+                        PageDst::Main(lc_base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
                 self.pages_w[page as usize] = if writeram {
-                    // Write to LC RAM even while ROM is being read (pre-condition for $C083 sequence)
-                    let lc_base = if bank2 { base } else { base - 0x1000 };
-                    PageDst::Aux(lc_base)
+                    if altzp {
+                        PageDst::Aux(lc_base)
+                    } else {
+                        PageDst::Main(lc_base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
@@ -470,20 +511,32 @@ impl Bus {
         }
 
         // Pages 0xE0–0xFF: upper ROM or LC RAM
+        // Same ALTZP-based routing as $D0–$DF but without the bank offset.
         for page in 0xE0u16..=0xFF {
             let base = page << 8;
             if highram {
-                self.pages_r[page as usize] = PageSrc::Aux(base);
+                if altzp {
+                    self.pages_r[page as usize] = PageSrc::Aux(base);
+                } else {
+                    self.pages_r[page as usize] = PageSrc::Main(base);
+                }
                 self.pages_w[page as usize] = if writeram {
-                    PageDst::Aux(base)
+                    if altzp {
+                        PageDst::Aux(base)
+                    } else {
+                        PageDst::Main(base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
             } else {
                 self.pages_r[page as usize] = PageSrc::Rom(base);
-                // Write to LC RAM even while ROM is being read (same as $D000–$DFFF)
                 self.pages_w[page as usize] = if writeram {
-                    PageDst::Aux(base)
+                    if altzp {
+                        PageDst::Aux(base)
+                    } else {
+                        PageDst::Main(base)
+                    }
                 } else {
                     PageDst::Inhibit
                 };
@@ -524,16 +577,11 @@ impl Bus {
         let val = match self.pages_r[page] {
             PageSrc::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize],
             PageSrc::Aux(base) => self.aux_read((base | (addr & 0xFF)) as usize),
-            PageSrc::Rom(base) => {
-                let rom_off = (base | (addr & 0xFF)) as usize;
-                // ROM is mapped starting at $C000; offset accordingly
-                let index = rom_off.saturating_sub(0xC000);
-                self.rom.get(index).copied().unwrap_or(0)
-            }
+            PageSrc::Rom(base) => self.rom_read(base, addr),
             PageSrc::Io => self.io_read(addr, cycles),
             PageSrc::FloatingBus => self.floating_bus,
         };
-        if self.mem_trace_enabled {
+        if self.mem_trace_enabled && self.mem_trace.len() < MEM_TRACE_MAX {
             self.mem_trace.push((addr, val, false));
         }
         val
@@ -542,7 +590,7 @@ impl Bus {
     /// Write a byte, triggering I/O side-effects.
     #[inline]
     pub fn write(&mut self, addr: u16, val: u8, cycles: u64) {
-        if self.mem_trace_enabled {
+        if self.mem_trace_enabled && self.mem_trace.len() < MEM_TRACE_MAX {
             self.mem_trace.push((addr, val, true));
         }
         let page = (addr >> 8) as usize;
@@ -570,10 +618,7 @@ impl Bus {
         match self.pages_r[page] {
             PageSrc::Main(base) => self.main_ram[(base | (addr & 0xFF)) as usize],
             PageSrc::Aux(base) => self.aux_read((base | (addr & 0xFF)) as usize),
-            PageSrc::Rom(base) => {
-                let index = ((base | (addr & 0xFF)) as usize).saturating_sub(0xC000);
-                self.rom.get(index).copied().unwrap_or(0)
-            }
+            PageSrc::Rom(base) => self.rom_read(base, addr),
             PageSrc::Io | PageSrc::FloatingBus => self.floating_bus,
         }
     }
@@ -591,12 +636,35 @@ impl Bus {
         }
     }
 
+    /// Read a byte from the system ROM, handling 32KB bank switching for IIc.
+    ///
+    /// 32KB ROM layout: lower 16KB (offset 0x0000) = standard bank (active at
+    /// power-on), upper 16KB (offset 0x4000) = alternate bank (selected when
+    /// MF_ALTROM0 is set via $C028 toggle).
+    #[inline]
+    fn rom_read(&self, base: u16, addr: u16) -> u8 {
+        let rom_off = (base | (addr & 0xFF)) as usize;
+        let index = rom_off.saturating_sub(0xC000);
+        if self.rom.len() > 16384 {
+            // 32KB ROM (IIc): lower 16KB = standard bank, upper 16KB = alternate bank.
+            let bank_offset = if self.mode.contains(MemMode::MF_ALTROM0) {
+                0x4000 // alternate bank (upper 16KB of file)
+            } else {
+                0 // standard bank (lower 16KB of file)
+            };
+            self.rom.get(bank_offset + index).copied().unwrap_or(0)
+        } else {
+            self.rom.get(index).copied().unwrap_or(0)
+        }
+    }
+
     // ── I/O dispatch ($C000–$CFFF) ───────────────────────────────────────────
 
+    #[inline]
     fn io_read(&mut self, addr: u16, cycles: u64) -> u8 {
         let lo = addr & 0xFF;
         if addr < 0xC100 {
-            // $C000–$C0FF: soft switches
+            // $C000–$C0FF: soft switches — the very hot path.
             self.soft_switch_read(lo as u8, cycles)
         } else {
             // $C100–$CFFF: peripheral slot ROM
@@ -609,6 +677,7 @@ impl Bus {
         }
     }
 
+    #[inline]
     fn io_write(&mut self, addr: u16, val: u8, cycles: u64) {
         let lo = addr & 0xFF;
         if addr < 0xC100 {
@@ -632,9 +701,18 @@ impl Bus {
                 self.keyboard_data &= 0x7F;
                 old
             }
+            // $C028: ROMSWITCH — toggle ROM bank on Apple IIc (read-strobe).
+            0x28 => {
+                if self.model.is_iic() {
+                    self.mode.toggle(MemMode::MF_ALTROM0);
+                }
+                self.floating_bus
+            }
             0x30 => {
                 self.speaker_state = !self.speaker_state;
-                self.speaker_toggles.push(cycles);
+                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
+                    self.speaker_toggles.push(cycles);
+                }
                 self.floating_bus
             }
             0x11 => self.flag_byte(MemMode::MF_BANK2),
@@ -797,12 +875,17 @@ impl Bus {
                 self.floating_bus
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF — read also acts as write (same as $C050-$C057)
+            // On the IIc, these only control DHIRES when IOUDIS is set.
             0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.insert(MemMode::MF_DHIRES);
+                }
                 self.floating_bus
             }
             0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.remove(MemMode::MF_DHIRES);
+                }
                 self.floating_bus
             }
             // $C060: cassette input — bit 7 reflects the cassette audio waveform.
@@ -883,12 +966,16 @@ impl Bus {
                 self.rebuild_page_tables();
             }
             0x06 => {
-                self.mode.remove(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.remove(MemMode::MF_INTCXROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x07 => {
-                self.mode.insert(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.insert(MemMode::MF_INTCXROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x08 => {
                 self.mode.remove(MemMode::MF_ALTZP);
@@ -899,12 +986,16 @@ impl Bus {
                 self.rebuild_page_tables();
             }
             0x0A => {
-                self.mode.remove(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.remove(MemMode::MF_SLOTC3ROM);
+                    self.rebuild_page_tables();
+                }
             }
             0x0B => {
-                self.mode.insert(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
+                if !self.model.is_iic() {
+                    self.mode.insert(MemMode::MF_SLOTC3ROM);
+                    self.rebuild_page_tables();
+                }
             }
             // $C00C/$C00D: CLR/SET80VID — 80-column display mode
             0x0C => {
@@ -920,6 +1011,12 @@ impl Bus {
             0x0F => {
                 self.mode.insert(MemMode::MF_ALTCHAR);
             }
+            // $C028: ROMSWITCH — toggle ROM bank on Apple IIc.
+            0x28 => {
+                if self.model.is_iic() {
+                    self.mode.toggle(MemMode::MF_ALTROM0);
+                }
+            }
             // $C070: paddle strobe — reset one-shot timers
             0x70 => {
                 self.gamepad.strobe(cycles);
@@ -930,7 +1027,9 @@ impl Bus {
             }
             0x30 => {
                 self.speaker_state = !self.speaker_state;
-                self.speaker_toggles.push(cycles);
+                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
+                    self.speaker_toggles.push(cycles);
+                }
             }
             // Text/graphics + mixed mode soft switches — video-only, no paging side-effects
             0x50 => {
@@ -989,11 +1088,16 @@ impl Bus {
                 self.ann[2] = true;
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF
+            // On the IIc, these only control DHIRES when IOUDIS is set.
             0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.insert(MemMode::MF_DHIRES);
+                }
             }
             0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
+                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
+                    self.mode.remove(MemMode::MF_DHIRES);
+                }
             }
             // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)
             0x7E => {
@@ -1063,7 +1167,9 @@ impl Bus {
     /// Perform a pending Saturn-style language card bank swap for `slot`.
     ///
     /// If the card in `slot` has a pending swap, the bus copies the new bank
-    /// data into `aux_ram[$C000..]` and gives the displaced data back to the card.
+    /// data into the current LC RAM area and gives the displaced data back to
+    /// the card.  The LC RAM area is determined by ALTZP: main_ram when
+    /// ALTZP=0, aux_ram when ALTZP=1.
     fn process_lc_bank_swap(&mut self, slot: usize) {
         let new_data = match self
             .cards
@@ -1073,11 +1179,17 @@ impl Bus {
             Some(d) => d,
             None => return,
         };
+        let altzp = self.mode.contains(MemMode::MF_ALTZP);
+        let ram = if altzp {
+            &mut *self.aux_ram
+        } else {
+            &mut *self.main_ram
+        };
         // Save displaced bank into pre-allocated scratch buffer (no heap allocation).
         self.lc_swap_buf
-            .copy_from_slice(&self.aux_ram[0xC000..0xC000 + 16384]);
+            .copy_from_slice(&ram[0xC000..0xC000 + 16384]);
         // Install the incoming bank.
-        self.aux_ram[0xC000..0xC000 + 16384].copy_from_slice(&*new_data);
+        ram[0xC000..0xC000 + 16384].copy_from_slice(&*new_data);
         // Return the displaced data to the card via a reference — the card copies
         // what it needs into its own storage, so no Box allocation is required here.
         if let Some(card) = self.cards.slot_mut(slot) {

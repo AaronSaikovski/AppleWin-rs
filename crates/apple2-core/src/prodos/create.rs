@@ -14,12 +14,12 @@ use super::types::{Access, ProDosError, pack_date, pack_time};
 
 // ── Embedded firmware binaries ────────────────────────────────────────────────
 
-const PRODOS_BIN: &[u8] = include_bytes!("../../roms/firmware/prodos243.bin");
-const BOOT_BIN: &[u8] = include_bytes!("../../roms/firmware/bootsector_prodos243.bin");
-const BASIC_BIN: &[u8] = include_bytes!("../../roms/firmware/basic17.system.bin");
-const BITSY_BOOT_BIN: &[u8] = include_bytes!("../../roms/firmware/bitsy.boot.bin");
-const QUIT_BIN: &[u8] = include_bytes!("../../roms/firmware/quit.system.bin");
-const DOS33_BIN: &[u8] = include_bytes!("../../roms/firmware/dos33c.bin");
+const PRODOS_BIN: &[u8] = include_bytes!("../../../../roms/firmware/prodos243.bin");
+const BOOT_BIN: &[u8] = include_bytes!("../../../../roms/firmware/bootsector_prodos243.bin");
+const BASIC_BIN: &[u8] = include_bytes!("../../../../roms/firmware/basic17.system.bin");
+const BITSY_BOOT_BIN: &[u8] = include_bytes!("../../../../roms/firmware/bitsy.boot.bin");
+const QUIT_BIN: &[u8] = include_bytes!("../../../../roms/firmware/quit.system.bin");
+const DOS33_BIN: &[u8] = include_bytes!("../../../../roms/firmware/dos33c.bin");
 
 // ── DOS 3.3 disk size constraints ─────────────────────────────────────────────
 

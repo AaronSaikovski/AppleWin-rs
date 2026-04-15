@@ -36,7 +36,7 @@ impl Emulator {
     pub fn new(rom: Vec<u8>, model: Apple2Model, cpu_type: CpuType) -> Self {
         let is_65c02 = cpu_type == CpuType::Cpu65C02;
         let mut cpu = Cpu::new(is_65c02);
-        let mut bus = Bus::new(rom);
+        let mut bus = Bus::new(rom, model);
         cpu.reset(&mut bus);
         Self {
             cpu,
@@ -58,6 +58,16 @@ impl Emulator {
         let start = self.cpu.cycles;
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
+
+        // Pick the dispatch table once rather than re-branching on is_65c02
+        // for every instruction — the CPU variant is effectively static for
+        // the duration of this execute() call.
+        let table: &[dispatch::OpFn; 256] = if self.cpu.is_65c02 {
+            &dispatch::DISPATCH_65C02
+        } else {
+            &dispatch::DISPATCH_6502
+        };
+
         while self.cpu.cycles < target {
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
@@ -97,7 +107,7 @@ impl Emulator {
                 self.cpu.irq_defer = false;
             }
 
-            dispatch::step(&mut self.cpu, &mut self.bus);
+            dispatch::step_with_table(&mut self.cpu, &mut self.bus, table);
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
             // the last cycle of this opcode → defer by one opcode (if I flag is clear).
@@ -146,6 +156,9 @@ impl Emulator {
         // reading the reset vector.  On real hardware the ROM is always accessible
         // during the vector fetch regardless of language-card state.
         self.bus.mode = crate::bus::MemMode::empty();
+        if self.model.is_iic() {
+            self.bus.mode.insert(crate::bus::MemMode::MF_INTCXROM);
+        }
         self.bus.rebuild_page_tables();
         self.bus.cards.reset_all(power_cycle);
         self.bus.speaker_toggles.clear();

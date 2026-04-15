@@ -4,10 +4,22 @@ use apple2_core::{
 };
 
 /// Apple IIe Enhanced 16KB ROM embedded at compile time.
-static APPLE2E_ROM: &[u8] = include_bytes!("../roms/apple2e_enhanced.rom");
+static APPLE2E_ROM: &[u8] = include_bytes!("../../../roms/apple2e_enhanced.rom");
+
+/// Apple IIc 32KB ROM (ROM version 04, 341-0445-B) embedded at compile time.
+static APPLE2C_ROM: &[u8] = include_bytes!("../../../roms/apple2c.rom");
 
 #[cfg(feature = "gui")]
 mod config;
+
+/// Wrapper enum for either the Apple IIe or Apple IIgs emulator core.
+#[allow(clippy::large_enum_variant)]
+enum EmuCore {
+    /// Apple II / IIe / IIe Enhanced / IIc emulation (6502/65C02).
+    IIe(Emulator),
+    /// Apple IIgs emulation (65C816).
+    IIgs(Box<apple2_iigs::emulator::IIgsEmulator>),
+}
 
 fn make_emulator(
     machine: Apple2Model,
@@ -15,9 +27,23 @@ fn make_emulator(
     custom_rom: &Option<String>,
     custom_f8_rom: &Option<String>,
 ) -> Emulator {
+    // Apple IIc always uses a 65C02.
+    let cpu = if machine.is_iic() {
+        CpuType::Cpu65C02
+    } else {
+        cpu
+    };
+
+    // Select the correct default ROM for the machine model.
+    let default_rom: &[u8] = if machine.is_iic() {
+        APPLE2C_ROM
+    } else {
+        APPLE2E_ROM
+    };
+
     let mut rom = if let Some(path) = custom_rom {
         match std::fs::read(path) {
-            Ok(data) if data.len() == 16384 || data.len() == 12288 => {
+            Ok(data) if data.len() == 16384 || data.len() == 12288 || data.len() == 32768 => {
                 // Pad 12K ROMs to 16K (add 4K of 0xFF at the start).
                 if data.len() == 12288 {
                     let mut padded = vec![0xFF; 4096];
@@ -29,19 +55,30 @@ fn make_emulator(
             }
             Ok(data) => {
                 eprintln!(
-                    "Custom ROM wrong size ({} bytes, expected 12K or 16K), using default",
+                    "Custom ROM wrong size ({} bytes, expected 12K, 16K, or 32K), using default",
                     data.len()
                 );
-                APPLE2E_ROM.to_vec()
+                default_rom.to_vec()
             }
             Err(e) => {
                 eprintln!("Failed to load custom ROM '{}': {}, using default", path, e);
-                APPLE2E_ROM.to_vec()
+                default_rom.to_vec()
             }
         }
     } else {
-        APPLE2E_ROM.to_vec()
+        default_rom.to_vec()
     };
+
+    // IIc 32K ROM: if the alternate bank (upper 16K) is empty, mirror the
+    // standard bank (lower 16K) into it.  Some ROM dumps are 16K padded to
+    // 32K; without mirroring, the $C028 ROM bank switch jumps into zeros.
+    if machine.is_iic() && rom.len() == 32768 {
+        let upper_empty = rom[0x4000..].iter().all(|&b| b == 0);
+        if upper_empty {
+            let lower: Vec<u8> = rom[..0x4000].to_vec();
+            rom[0x4000..].copy_from_slice(&lower);
+        }
+    }
 
     // Patch $F800–$FFFF with a custom F8 ROM (2K) if configured.
     if let Some(path) = custom_f8_rom {
@@ -49,7 +86,8 @@ fn make_emulator(
             Ok(data) if data.len() == 2048 => {
                 // F8 ROM goes at offset 0x3800 in the 16K ROM image
                 // ($F800 - $C000 = $3800 = 14336).
-                let offset = 0x3800;
+                // For 32K IIc ROMs, patch the standard bank (upper 16K).
+                let offset = if rom.len() > 16384 { 0x7800 } else { 0x3800 };
                 if rom.len() >= offset + 2048 {
                     rom[offset..offset + 2048].copy_from_slice(&data);
                 }
@@ -70,25 +108,128 @@ fn make_emulator(
     // Card insertion is handled by apply_slot_cards() in the gui module.
 }
 
+/// Default IIgs ROM search paths (checked in order).
+/// The latest ROM (ROM 03, 256KB) is preferred.
+fn find_iigs_rom(configured_path: &Option<String>) -> Option<Vec<u8>> {
+    // If user configured an explicit path, try that first
+    if let Some(path) = configured_path {
+        match std::fs::read(path) {
+            Ok(data) if data.len() == 131072 || data.len() == 262144 => return Some(data),
+            Ok(data) => {
+                eprintln!(
+                    "IIgs ROM wrong size ({} bytes, expected 128K or 256K): {}",
+                    data.len(),
+                    path
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to load IIgs ROM '{}': {}", path, e);
+            }
+        }
+    }
+
+    // Search common locations for IIgs ROMs (prefer ROM 03, then ROM 01)
+    let search_names = [
+        // ROM 03 (256KB) — latest and most compatible
+        "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v25.bin",
+        "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v16.bin",
+        // ROM 01 (128KB) — widely available
+        "Apple IIGS ROM 01 - 342-0077-B.bin",
+        "Apple IIgs ROM1 - 342-0077-B -  27C1001.bin",
+        // ROM 00 (128KB) — original
+        "Apple IIGS ROM 00 - 342-0077-A.bin",
+    ];
+
+    // Search directories relative to the executable and in common locations
+    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Next to the executable
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        search_dirs.push(dir.join("roms"));
+        search_dirs.push(dir.join("roms/Apple_IIgs"));
+        search_dirs.push(dir.to_path_buf());
+    }
+
+    // Current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        search_dirs.push(cwd.join("roms"));
+        search_dirs.push(cwd.join("roms/Apple_IIgs"));
+        search_dirs.push(cwd.clone());
+    }
+
+    for dir in &search_dirs {
+        for name in &search_names {
+            let path = dir.join(name);
+            if let Ok(data) = std::fs::read(&path)
+                && (data.len() == 131072 || data.len() == 262144)
+            {
+                println!("Found IIgs ROM: {}", path.display());
+                return Some(data);
+            }
+        }
+    }
+
+    None
+}
+
+/// Create an IIgs emulator, loading the ROM from file.
+fn make_iigs_emulator(
+    iigs_rom_path: &Option<String>,
+    iigs_ram_kb: u32,
+) -> Result<apple2_iigs::emulator::IIgsEmulator, String> {
+    let rom_data = find_iigs_rom(iigs_rom_path).ok_or_else(|| {
+        "Apple IIgs ROM not found. Place a ROM file (ROM 01 or ROM 03) in the \
+         'roms/Apple_IIgs/' directory next to the executable, or set the \
+         'iigs_rom_path' in config.toml."
+            .to_string()
+    })?;
+
+    apple2_iigs::emulator::IIgsEmulator::new(iigs_ram_kb as usize, rom_data)
+}
+
 fn main() {
     println!("AppleWin-rs v{}", env!("CARGO_PKG_VERSION"));
 
     #[cfg(feature = "gui")]
     {
         let cfg = config::Config::load();
-        let emu = make_emulator(
-            cfg.machine_type,
-            cfg.cpu_type,
-            &cfg.custom_rom_path,
-            &cfg.custom_f8_rom_path,
-        );
-        // Mode stays as AppMode::Logo — the GUI will show the logo screen
-        // and switch to Running on the first key press.
-        println!(
-            "Emulator initialised — model={:?}  PC=${:04X}",
-            emu.model, emu.cpu.pc
-        );
-        gui::run(emu, cfg);
+
+        if cfg.machine_type == Apple2Model::AppleIIgs {
+            // Apple IIgs mode
+            match make_iigs_emulator(&cfg.iigs_rom_path, cfg.iigs_ram_kb) {
+                Ok(iigs_emu) => {
+                    println!(
+                        "IIgs emulator initialised — ROM {:?}  PC=${:04X}  PBR=${:02X}",
+                        iigs_emu.bus.mem.rom_version, iigs_emu.cpu.pc, iigs_emu.cpu.pbr
+                    );
+                    let core = EmuCore::IIgs(Box::new(iigs_emu));
+                    gui::run_with_core(core, cfg);
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    eprintln!("Falling back to Apple IIe Enhanced");
+                    let emu =
+                        make_emulator(Apple2Model::AppleIIeEnh, CpuType::Cpu65C02, &None, &None);
+                    let core = EmuCore::IIe(emu);
+                    gui::run_with_core(core, cfg);
+                }
+            }
+        } else {
+            let emu = make_emulator(
+                cfg.machine_type,
+                cfg.cpu_type,
+                &cfg.custom_rom_path,
+                &cfg.custom_f8_rom_path,
+            );
+            println!(
+                "Emulator initialised — model={:?}  PC=${:04X}",
+                emu.model, emu.cpu.pc
+            );
+            let core = EmuCore::IIe(emu);
+            gui::run_with_core(core, cfg);
+        }
     }
 
     #[cfg(not(feature = "gui"))]
@@ -131,6 +272,7 @@ mod gui {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
+    use crate::EmuCore;
     use crate::config::{
         ALL_JOYSTICK_TYPES, ALL_VIDEO_TYPES, Config, IMPLEMENTED_CARDS, VideoType, card_name,
         cpu_name, joystick_type_name, model_name, video_type_name,
@@ -144,6 +286,33 @@ mod gui {
 
     const SCREEN_W: usize = 560;
     const SCREEN_H: usize = 384;
+
+    /// Precomputed source-column table mapping each dst x (0..560) to a src x
+    /// in the 640-wide IIgs SHR buffer. Avoids per-pixel division/modulo in the
+    /// scaling hot loop (≈215 K pixels per frame).
+    const SHR_SRC_X: [u16; SCREEN_W] = {
+        let mut t = [0u16; SCREEN_W];
+        let mut i = 0;
+        while i < SCREEN_W {
+            let v = i * 640 / SCREEN_W;
+            t[i] = if v >= 640 { 639 } else { v as u16 };
+            i += 1;
+        }
+        t
+    };
+
+    /// Precomputed source-row table mapping each dst y (0..384) to a src y
+    /// in the 400-tall IIgs SHR buffer.
+    const SHR_SRC_Y: [u16; SCREEN_H] = {
+        let mut t = [0u16; SCREEN_H];
+        let mut i = 0;
+        while i < SCREEN_H {
+            let v = i * 400 / SCREEN_H;
+            t[i] = if v >= 400 { 399 } else { v as u16 };
+            i += 1;
+        }
+        t
+    };
     /// 3D bevel around the Apple II screen (2 layers × 2 px each)
     const BEVEL: f32 = 4.0;
     /// Width of the right-side button strip
@@ -411,9 +580,11 @@ mod gui {
 
     struct EmulatorApp {
         emu: Emulator,
+        /// Optional IIgs emulator — when `Some`, execution and rendering use
+        /// this instead of the IIe `emu` field.
+        iigs: Option<apple2_iigs::emulator::IIgsEmulator>,
         renderer: NtscRenderer,
         fb: Framebuffer,
-        pixel_buf: Vec<u8>,
         texture: Option<egui::TextureHandle>,
         logo_texture: Option<egui::TextureHandle>,
         icons: Option<Icons>,
@@ -467,12 +638,48 @@ mod gui {
         gilrs: Option<gilrs::Gilrs>,
         /// The active gamepad ID (first connected pad, or None).
         active_gamepad: Option<gilrs::GamepadId>,
+        /// Reusable 640x400 scratch buffer for SHR rendering (IIgs).
+        /// Allocated once to avoid per-frame 1MB allocations.
+        shr_scratch: Vec<u32>,
+        /// Reusable scratch for WAV recorder sample chunks.
+        wav_scratch: Vec<f32>,
+        /// Reusable scratch for draining speaker_toggles without dropping
+        /// the Vec's preallocated capacity every frame.
+        speaker_toggles_scratch: Vec<u64>,
+        /// Reusable scratch for speaker PCM samples — synthesized without the
+        /// ring-buffer mutex held, then bulk-pushed under a single lock.
+        speaker_scratch: Vec<f32>,
+        /// Reusable scratch for Ensoniq DOC PCM samples (IIgs).
+        ensoniq_scratch: Vec<f32>,
     }
 
     impl EmulatorApp {
-        fn new(mut emu: Emulator, config: Config) -> Self {
-            // Install cards according to slot configuration
-            apply_slot_cards(&mut emu, &config);
+        fn new_with_core(core: EmuCore, config: Config) -> Self {
+            let (emu, iigs) = match core {
+                EmuCore::IIe(e) => (e, None),
+                EmuCore::IIgs(g) => {
+                    // Create a dummy IIe emulator for the GUI framework (rendering, etc.)
+                    // The actual execution goes through the IIgs emulator.
+                    let dummy = Emulator::new(
+                        crate::APPLE2E_ROM.to_vec(),
+                        Apple2Model::AppleIIgs,
+                        CpuType::Cpu65C02,
+                    );
+                    (dummy, Some(*g))
+                }
+            };
+            Self::new_inner(emu, iigs, config)
+        }
+
+        fn new_inner(
+            mut emu: Emulator,
+            mut iigs: Option<apple2_iigs::emulator::IIgsEmulator>,
+            config: Config,
+        ) -> Self {
+            // Install cards according to slot configuration (IIe only)
+            if iigs.is_none() {
+                apply_slot_cards(&mut emu, &config);
+            }
 
             // Build CharRom from the embedded Apple IIe video ROM
             let font_data = build_font_from_rom(VIDEO_ROM);
@@ -499,7 +706,11 @@ mod gui {
             let mut disk2: Option<PathBuf> = None;
             if let Some(ref p) = config.last_disk1 {
                 let path = PathBuf::from(p);
-                if let Ok(data) = std::fs::read(&path) {
+                if let Some(ref mut iigs_emu) = iigs {
+                    if Self::load_iigs_disk(iigs_emu, 0, &path) {
+                        disk1 = Some(path);
+                    }
+                } else if let Ok(data) = std::fs::read(&path) {
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
@@ -512,7 +723,11 @@ mod gui {
             }
             if let Some(ref p) = config.last_disk2 {
                 let path = PathBuf::from(p);
-                if let Ok(data) = std::fs::read(&path) {
+                if let Some(ref mut iigs_emu) = iigs {
+                    if Self::load_iigs_disk(iigs_emu, 1, &path) {
+                        disk2 = Some(path);
+                    }
+                } else if let Ok(data) = std::fs::read(&path) {
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
@@ -558,11 +773,16 @@ mod gui {
             let initial_cycle = emu.cpu.cycles;
             let pending_config = config.clone();
 
+            // If IIgs mode, go straight to Running (no logo screen)
+            if iigs.is_some() {
+                emu.mode = apple2_core::emulator::AppMode::Running;
+            }
+
             Self {
                 emu,
+                iigs,
                 renderer,
                 fb: Framebuffer::new(),
-                pixel_buf: vec![0u8; SCREEN_W * SCREEN_H * 4],
                 texture: None,
                 logo_texture: None,
                 icons: None,
@@ -600,19 +820,29 @@ mod gui {
                 status_msg: None,
                 gilrs: gilrs_inst,
                 active_gamepad,
+                shr_scratch: vec![0u32; 640 * 400],
+                wav_scratch: Vec::with_capacity(1024),
+                speaker_toggles_scratch: Vec::with_capacity(65536),
+                speaker_scratch: Vec::with_capacity(2048),
+                ensoniq_scratch: Vec::with_capacity(2048),
             }
         }
 
         /// Reset the emulator and clear all audio state so no stale signal leaks through.
         fn reset(&mut self, power_cycle: bool) {
-            self.emu
-                .reset_with_pattern(power_cycle, self.config.memory_init_pattern);
+            if let Some(ref mut iigs) = self.iigs {
+                iigs.reset(power_cycle);
+                self.last_audio_cycle = iigs.cpu.cycles;
+            } else {
+                self.emu
+                    .reset_with_pattern(power_cycle, self.config.memory_init_pattern);
+                self.last_audio_cycle = self.emu.cpu.cycles;
+            }
             // Silence the speaker: discard any pending toggles and reset the DC
             // filter so we don't output a fading ±0.5 hiss after the reset.
             self.speaker_state = false;
             self.dc_filter_ctr = 0;
             self.spkr_cycle_rem = 0.0;
-            self.last_audio_cycle = self.emu.cpu.cycles;
             self.last_frame_time = std::time::Instant::now();
         }
 
@@ -632,6 +862,52 @@ mod gui {
             }
         }
 
+        /// Load a SmartPort disk image into the IIgs emulator.
+        /// Handles .2mg/.2img (with header) and .po/.hdv (raw ProDOS order).
+        /// Returns true on success.
+        fn load_iigs_disk(
+            iigs: &mut apple2_iigs::emulator::IIgsEmulator,
+            drive: usize,
+            path: &std::path::Path,
+        ) -> bool {
+            use apple2_iigs::smartport::SmartPortDisk;
+            let Ok(data) = std::fs::read(path) else {
+                eprintln!("Failed to read disk image: {}", path.display());
+                return false;
+            };
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let path_str = path.to_string_lossy().to_string();
+            let disk = match ext.as_str() {
+                "2mg" | "2img" => SmartPortDisk::from_2mg(&data, Some(path_str)),
+                "po" | "hdv" => Some(SmartPortDisk::from_raw(data, Some(path_str))),
+                _ => {
+                    // Try raw first (many .dsk files are actually ProDOS order)
+                    if data.len() % 512 == 0 {
+                        Some(SmartPortDisk::from_raw(data, Some(path_str)))
+                    } else {
+                        None
+                    }
+                }
+            };
+            match disk {
+                Some(d) => {
+                    iigs.bus.smartport.insert(drive, d);
+                    true
+                }
+                None => {
+                    eprintln!(
+                        "Unsupported disk format for IIgs SmartPort: {}",
+                        path.display()
+                    );
+                    false
+                }
+            }
+        }
+
         fn disk_display_name(path: &Option<PathBuf>) -> &str {
             path.as_ref()
                 .and_then(|p| p.file_name())
@@ -641,6 +917,38 @@ mod gui {
 
         /// Render the Apple II screen into `self.pixel_buf` via `NtscRenderer`.
         fn render_apple2(&mut self) {
+            if let Some(ref iigs) = self.iigs {
+                // Check if SHR mode is enabled (NEWVIDEO bit 7)
+                if iigs.bus.mega2.is_shr_enabled() {
+                    // SHR rendering: use bank $E1 fast RAM
+                    let fast = &iigs.bus.mem.fast_ram;
+                    if fast.len() >= 0x20000 {
+                        let bank_e1 = &fast[0x10000..0x20000];
+                        // Render SHR into the reusable scratch buffer (640x400 → scale to 560x384).
+                        apple2_iigs::shr::render_shr(bank_e1, &mut self.shr_scratch);
+                        // Scale SHR (640x400) to the display framebuffer (560x384).
+                        // Move scratch out to satisfy the borrow checker (scale_shr_to_framebuffer
+                        // takes &mut self), then put it back — no allocation.
+                        let shr = std::mem::take(&mut self.shr_scratch);
+                        self.scale_shr_to_framebuffer(&shr);
+                        self.shr_scratch = shr;
+                    }
+                    return;
+                }
+
+                // IIe-compatible mode: copy fast RAM to dummy emulator for rendering
+                let fast = &iigs.bus.mem.fast_ram;
+                let main_end = 0x10000.min(fast.len());
+                self.emu.bus.main_ram[..main_end].copy_from_slice(&fast[..main_end]);
+                if fast.len() >= 0x20000 {
+                    self.emu
+                        .bus
+                        .aux_ram
+                        .copy_from_slice(&fast[0x10000..0x20000]);
+                }
+                self.emu.bus.mode = iigs.bus.mega2.mem_mode;
+            }
+
             if self.config.video_type == crate::config::VideoType::ColorRGB {
                 self.rgb_renderer.render(
                     &self.emu.bus.main_ram,
@@ -658,36 +966,79 @@ mod gui {
                     &mut self.fb,
                 );
             }
-            // The framebuffer stores pixels as ABGR u32; on little-endian the
-            // in-memory byte order is [R, G, B, A] = RGBA, which egui consumes
-            // directly — no channel-swap loop needed.
-            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
+        }
+
+        /// Scale a 640×400 SHR pixel buffer down to the 560×384 framebuffer.
+        ///
+        /// Uses precomputed source-coordinate lookup tables
+        /// (`SHR_SRC_X` / `SHR_SRC_Y`) to avoid per-pixel division.
+        fn scale_shr_to_framebuffer(&mut self, shr_pixels: &[u32]) {
+            const SRC_W: usize = 640;
+            let fb_pixels = self.fb.pixels_mut();
+            for (dst_y, &src_y) in SHR_SRC_Y.iter().enumerate() {
+                let src_row_base = src_y as usize * SRC_W;
+                let dst_row_base = dst_y * SCREEN_W;
+                for (dst_x, &src_x) in SHR_SRC_X.iter().enumerate() {
+                    fb_pixels[dst_row_base + dst_x] = shr_pixels[src_row_base + src_x as usize];
+                }
+            }
         }
 
         /// Render the debugger display into the framebuffer, replacing the
         /// Apple II screen — matching the original AppleWin behaviour.
         fn render_debugger(&mut self) {
             use apple2_debugger::display::{self, CpuSnapshot};
-            let cpu = CpuSnapshot {
-                pc: self.emu.cpu.pc,
-                a: self.emu.cpu.a,
-                x: self.emu.cpu.x,
-                y: self.emu.cpu.y,
-                sp: self.emu.cpu.sp,
-                flags: self.emu.cpu.flags.bits(),
-                cycles: self.emu.cpu.cycles,
+
+            let (cpu, mode_bits) = if let Some(ref iigs) = self.iigs {
+                (
+                    CpuSnapshot {
+                        pc: iigs.cpu.pc,
+                        a: (iigs.cpu.c & 0xFF) as u8,
+                        x: (iigs.cpu.x & 0xFF) as u8,
+                        y: (iigs.cpu.y & 0xFF) as u8,
+                        sp: (iigs.cpu.sp & 0xFF) as u8,
+                        flags: iigs.cpu.flags.bits(),
+                        cycles: iigs.cpu.cycles,
+                    },
+                    iigs.bus.mega2.mem_mode.bits(),
+                )
+            } else {
+                (
+                    CpuSnapshot {
+                        pc: self.emu.cpu.pc,
+                        a: self.emu.cpu.a,
+                        x: self.emu.cpu.x,
+                        y: self.emu.cpu.y,
+                        sp: self.emu.cpu.sp,
+                        flags: self.emu.cpu.flags.bits(),
+                        cycles: self.emu.cpu.cycles,
+                    },
+                    self.emu.bus.mode.bits(),
+                )
             };
-            let mode_bits = self.emu.bus.mode.bits();
+
             let cmd_input = self.debugger_cmd_input.clone();
-            display::render(
-                self.fb.pixels_mut(),
-                &self.debugger,
-                &cpu,
-                mode_bits,
-                &cmd_input,
-                |a| self.emu.bus.read_raw(a),
-            );
-            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
+
+            if let Some(ref iigs) = self.iigs {
+                let iigs_ref = iigs;
+                display::render(
+                    self.fb.pixels_mut(),
+                    &self.debugger,
+                    &cpu,
+                    mode_bits,
+                    &cmd_input,
+                    |a| iigs_ref.bus.mem.ram_read(0, a),
+                );
+            } else {
+                display::render(
+                    self.fb.pixels_mut(),
+                    &self.debugger,
+                    &cpu,
+                    mode_bits,
+                    &cmd_input,
+                    |a| self.emu.bus.read_raw(a),
+                );
+            }
         }
     }
 
@@ -746,6 +1097,20 @@ mod gui {
 
                 if debugger_paused {
                     // Debugger is paused — do not execute any cycles
+                } else if let Some(ref mut iigs) = self.iigs {
+                    // ── IIgs execution path ──────────────────────────────────
+                    // IIgs runs at 2.8 MHz fast or 1.023 MHz slow.
+                    // Use 2.8 MHz as the base for fast mode.
+                    let iigs_hz = if iigs.bus.mega2.is_fast_mode() {
+                        2_800_000.0
+                    } else {
+                        1_023_000.0
+                    };
+                    let hz = self.config.emulation_speed.max(1) as f64 * iigs_hz / 10.0;
+                    let cycles = (elapsed_secs * hz) as u64;
+                    if cycles > 0 {
+                        iigs.execute(cycles);
+                    }
                 } else if self.config.enhanced_disk_speed && self.emu.bus.disk_motor_on() {
                     // Full-speed mode — matches AppleWin's g_bFullSpeed behaviour
                     // (IsConditionForFullSpeed: motor on + enhanced disk enabled).
@@ -790,19 +1155,31 @@ mod gui {
             // ── Speaker audio synthesis ───────────────────────────────────────
             // Mirrors AppleWin's UpdateSpkr() / DCFilter() logic from Speaker.cpp.
             {
-                let end_cycle = self.emu.cpu.cycles;
+                // Swap speaker_toggles into our reusable scratch vec; this preserves
+                // the bus's preallocated capacity across frames instead of resetting it
+                // to 0 as std::mem::take would.
+                self.speaker_toggles_scratch.clear();
+                let end_cycle = if let Some(ref mut iigs) = self.iigs {
+                    std::mem::swap(
+                        &mut iigs.bus.mega2.speaker_toggles,
+                        &mut self.speaker_toggles_scratch,
+                    );
+                    iigs.cpu.cycles
+                } else {
+                    std::mem::swap(
+                        &mut self.emu.bus.speaker_toggles,
+                        &mut self.speaker_toggles_scratch,
+                    );
+                    self.emu.cpu.cycles
+                };
+                let toggles = &self.speaker_toggles_scratch;
                 let start_cycle = self.last_audio_cycle;
                 self.last_audio_cycle = end_cycle;
 
-                let toggles = std::mem::take(&mut self.emu.bus.speaker_toggles);
-
                 if let Some(buf) = &self.audio_buf {
                     let sr = self.audio_sample_rate as f64;
-                    // Cycles per audio sample (truncated to integer, matching the C++
-                    // "Use integer value: Better for MJ Mahon's RT.SYNTH" comment).
                     let clks_per_sample = (CPU_HZ / sr).floor().max(1.0);
 
-                    // Total cycles this frame including any fractional carry-over.
                     let delta = end_cycle.saturating_sub(start_cycle) as f64 + self.spkr_cycle_rem;
                     let n_samples = (delta / clks_per_sample) as usize;
                     self.spkr_cycle_rem = delta - n_samples as f64 * clks_per_sample;
@@ -810,16 +1187,19 @@ mod gui {
                     if n_samples > 0 {
                         let cycles_per_sample = delta / n_samples as f64;
                         let mut toggle_idx = 0usize;
-                        // Hoist volume scale out of the per-sample loop.
                         let volume_scale = self.config.master_volume as f32 / 100.0;
-                        let mut locked = buf.lock().unwrap();
+
+                        // Synthesize samples into a lock-free scratch buffer first,
+                        // then push them to the ring buffer under a single lock.
+                        // Keeps the audio callback thread from waiting through a
+                        // long sample loop (~735 iterations at 44.1 kHz / 60 fps).
+                        self.speaker_scratch.clear();
+                        self.speaker_scratch.reserve(n_samples);
 
                         for i in 0..n_samples {
                             let sample_end =
                                 start_cycle as f64 + (i + 1) as f64 * cycles_per_sample;
 
-                            // Apply every toggle whose cycle falls within this sample.
-                            // On each toggle: reset the DC filter (matches ResetDCFilter()).
                             while toggle_idx < toggles.len()
                                 && (toggles[toggle_idx] as f64) <= sample_end
                             {
@@ -828,12 +1208,8 @@ mod gui {
                                 toggle_idx += 1;
                             }
 
-                            // Raw square wave ±0.5
                             let raw = if self.speaker_state { 0.5f32 } else { -0.5f32 };
 
-                            // DC filter: mirrors DCFilter() in Speaker.cpp.
-                            // Passes full amplitude for ~250 ms after last toggle,
-                            // then linearly fades to zero over ~744 ms.
                             let out = if self.dc_filter_ctr == 0 {
                                 0.0f32
                             } else if self.dc_filter_ctr >= 32_768 {
@@ -845,9 +1221,39 @@ mod gui {
                                 raw * gain
                             };
 
+                            self.speaker_scratch.push(out * volume_scale);
+                        }
+
+                        let mut locked = buf.lock().unwrap();
+                        for s in &self.speaker_scratch {
                             if locked.len() < AUDIO_BUF_MAX {
-                                locked.push_back(out * volume_scale);
+                                locked.push_back(*s);
                             }
+                        }
+                    }
+                }
+            }
+
+            // ── Ensoniq DOC audio (IIgs only) ─────────────────────────────────
+            if let Some(ref mut iigs) = self.iigs
+                && let Some(buf) = &self.audio_buf
+            {
+                let sr = self.audio_sample_rate;
+                let volume_scale = self.config.master_volume as f32 / 100.0;
+                let delta_cycles =
+                    (self.config.emulation_speed.max(1) as f64 * 102_300.0 / 60.0) as u64;
+                let n_samples = (sr as usize) / 60;
+                if n_samples > 0 {
+                    self.ensoniq_scratch.clear();
+                    self.ensoniq_scratch.resize(n_samples, 0.0f32);
+                    iigs.bus
+                        .ensoniq
+                        .fill_audio(&mut self.ensoniq_scratch, sr, delta_cycles);
+
+                    let mut locked = buf.lock().unwrap();
+                    for &sample in &self.ensoniq_scratch {
+                        if locked.len() < AUDIO_BUF_MAX {
+                            locked.push_back(sample * volume_scale * 0.5);
                         }
                     }
                 }
@@ -898,9 +1304,10 @@ mod gui {
                 // Record the last N samples (approximate frame's worth).
                 let n = (self.audio_sample_rate as usize / 60).min(locked.len());
                 let start = locked.len().saturating_sub(n);
-                let chunk: Vec<f32> = locked.range(start..).copied().collect();
+                self.wav_scratch.clear();
+                self.wav_scratch.extend(locked.range(start..).copied());
                 drop(locked);
-                let _ = rec.write_samples(&chunk);
+                let _ = rec.write_samples(&self.wav_scratch);
             }
 
             // ── Collect input events ──────────────────────────────────────────
@@ -1110,16 +1517,27 @@ mod gui {
 
             if !in_logo_mode {
                 for k in key_queue {
-                    self.emu.bus.key_press(k);
+                    if let Some(ref mut iigs) = self.iigs {
+                        iigs.key_press(k);
+                    } else {
+                        self.emu.bus.key_press(k);
+                    }
                 }
 
                 // Drain one character per frame from the paste buffer.
                 // Only inject when the keyboard strobe has been cleared (bit 7 == 0),
                 // which means the previous key has been read by the Apple II.
-                if self.emu.bus.keyboard_data & 0x80 == 0
-                    && let Some(k) = self.paste_buf.pop_front()
-                {
-                    self.emu.bus.key_press(k);
+                let key_available = if let Some(ref iigs) = self.iigs {
+                    !iigs.bus.mega2.key_strobe
+                } else {
+                    self.emu.bus.keyboard_data & 0x80 == 0
+                };
+                if key_available && let Some(k) = self.paste_buf.pop_front() {
+                    if let Some(ref mut iigs) = self.iigs {
+                        iigs.key_press(k);
+                    } else {
+                        self.emu.bus.key_press(k);
+                    }
                 }
 
                 // ── Joystick / paddle emulation ──────────────────────────────
@@ -1470,28 +1888,33 @@ mod gui {
             // Screenshot: save framebuffer as BMP (triggered by F12).
             if take_screenshot && !in_logo_mode {
                 self.render_apple2(); // ensure latest frame
-                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+                save_screenshot(self.fb.pixels_as_bytes(), SCREEN_W, SCREEN_H);
             }
 
             // Save / load emulator state (F11 / Shift+F11).
-            if do_save_state
-                && !in_logo_mode
-                && let Some(path) = self.config.save_state_path()
-            {
-                let snap = self.emu.take_snapshot();
-                if let Ok(yaml) = serde_yaml::to_string(&snap) {
-                    let _ = std::fs::write(&path, yaml);
-                    self.status_msg = Some(format!("State saved to {}", path.display()));
+            if do_save_state && !in_logo_mode {
+                if self.iigs.is_some() {
+                    self.status_msg =
+                        Some("Save state not yet available for Apple IIgs".to_string());
+                } else if let Some(path) = self.config.save_state_path() {
+                    let snap = self.emu.take_snapshot();
+                    if let Ok(yaml) = serde_yaml::to_string(&snap) {
+                        let _ = std::fs::write(&path, yaml);
+                        self.status_msg = Some(format!("State saved to {}", path.display()));
+                    }
                 }
             }
-            if do_load_state
-                && !in_logo_mode
-                && let Some(path) = self.config.save_state_path()
-                && let Ok(yaml) = std::fs::read_to_string(&path)
-                && let Ok(snap) = serde_yaml::from_str(&yaml)
-            {
-                self.emu.restore_snapshot(&snap);
-                self.status_msg = Some("State loaded".to_string());
+            if do_load_state && !in_logo_mode {
+                if self.iigs.is_some() {
+                    self.status_msg =
+                        Some("Load state not yet available for Apple IIgs".to_string());
+                } else if let Some(path) = self.config.save_state_path()
+                    && let Ok(yaml) = std::fs::read_to_string(&path)
+                    && let Ok(snap) = serde_yaml::from_str(&yaml)
+                {
+                    self.emu.restore_snapshot(&snap);
+                    self.status_msg = Some("State loaded".to_string());
+                }
             }
 
             // Speed control shortcuts (Ctrl+0/1/3).
@@ -1568,8 +1991,10 @@ mod gui {
                     magnification: egui::TextureFilter::Nearest,
                     minification: egui::TextureFilter::Nearest,
                 };
-                let image =
-                    ColorImage::from_rgba_unmultiplied([SCREEN_W, SCREEN_H], &self.pixel_buf);
+                let image = ColorImage::from_rgba_unmultiplied(
+                    [SCREEN_W, SCREEN_H],
+                    self.fb.pixels_as_bytes(),
+                );
                 if let Some(t) = &mut self.texture {
                     t.set(image, tex_opts);
                 } else {
@@ -2378,6 +2803,8 @@ mod gui {
                                                     Apple2Model::AppleIIe,
                                                     Apple2Model::AppleIIeEnh,
                                                     Apple2Model::AppleIIc,
+                                                    // Apple IIgs support temporarily disabled in UI.
+                                                    // Apple2Model::AppleIIgs,
                                                 ] {
                                                     ui.selectable_value(
                                                         &mut self.pending_config.machine_type,
@@ -2388,18 +2815,69 @@ mod gui {
                                             });
                                         ui.end_row();
                                         ui.label("CPU type:");
-                                        egui::ComboBox::from_id_source("cpu_type")
-                                            .selected_text(cpu_name(self.pending_config.cpu_type))
-                                            .show_ui(ui, |ui| {
-                                                for c in [CpuType::Cpu6502, CpuType::Cpu65C02, CpuType::CpuZ80] {
-                                                    ui.selectable_value(
-                                                        &mut self.pending_config.cpu_type,
-                                                        c,
-                                                        cpu_name(c),
-                                                    );
-                                                }
-                                            });
+                                        if self.pending_config.machine_type == Apple2Model::AppleIIgs {
+                                            // IIgs always uses 65C816
+                                            self.pending_config.cpu_type = CpuType::Cpu65C816;
+                                            ui.label("65C816 (built-in)");
+                                        } else {
+                                            // Apple IIc always uses 65C02.
+                                            if self.pending_config.machine_type.is_iic() {
+                                                self.pending_config.cpu_type = CpuType::Cpu65C02;
+                                            }
+                                            let cpu_enabled = !self.pending_config.machine_type.is_iic();
+                                            ui.add_enabled_ui(cpu_enabled, |ui| {
+                                                egui::ComboBox::from_id_source("cpu_type")
+                                                    .selected_text(cpu_name(self.pending_config.cpu_type))
+                                                    .show_ui(ui, |ui| {
+                                                        for c in [CpuType::Cpu6502, CpuType::Cpu65C02, CpuType::CpuZ80] {
+                                                            ui.selectable_value(
+                                                                &mut self.pending_config.cpu_type,
+                                                                c,
+                                                                cpu_name(c),
+                                                            );
+                                                        }
+                                                    });
+                                            }); // add_enabled_ui
+                                        }
                                         ui.end_row();
+
+                                        // IIgs-specific settings
+                                        if self.pending_config.machine_type == Apple2Model::AppleIIgs {
+                                            ui.label("IIgs RAM:");
+                                            egui::ComboBox::from_id_source("iigs_ram")
+                                                .selected_text(format!("{} KB", self.pending_config.iigs_ram_kb))
+                                                .show_ui(ui, |ui| {
+                                                    for &kb in &[256u32, 512, 1024, 2048, 4096, 8192] {
+                                                        let label = if kb >= 1024 {
+                                                            format!("{} MB", kb / 1024)
+                                                        } else {
+                                                            format!("{} KB", kb)
+                                                        };
+                                                        ui.selectable_value(
+                                                            &mut self.pending_config.iigs_ram_kb,
+                                                            kb,
+                                                            label,
+                                                        );
+                                                    }
+                                                });
+                                            ui.end_row();
+
+                                            ui.label("IIgs ROM:");
+                                            let rom_label = self.pending_config.iigs_rom_path
+                                                .as_deref()
+                                                .and_then(|p| std::path::Path::new(p).file_name())
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("(auto-detect)");
+                                            if ui.button(rom_label).clicked()
+                                                && let Some(path) = rfd::FileDialog::new()
+                                                    .add_filter("ROM files", &["bin", "rom", "ROM"])
+                                                    .pick_file()
+                                            {
+                                                self.pending_config.iigs_rom_path =
+                                                    Some(path.to_string_lossy().to_string());
+                                            }
+                                            ui.end_row();
+                                        }
                                     });
                                 if self.pending_config.machine_type != self.config.machine_type
                                     || self.pending_config.cpu_type != self.config.cpu_type
@@ -2581,6 +3059,29 @@ mod gui {
                                     .spacing([12.0, 4.0])
                                     .striped(true)
                                     .show(ui, |ui| {
+                                        if self.pending_config.machine_type.is_iic() {
+                                            // Apple IIc: fixed built-in peripherals (read-only)
+                                            let iic_slots = [
+                                                "(empty)",            // slot 0
+                                                "Serial (modem)",     // slot 1
+                                                "Serial (printer)",   // slot 2
+                                                "80-column (built-in)", // slot 3
+                                                "Mouse",              // slot 4
+                                                "(empty)",            // slot 5
+                                                "Disk II",            // slot 6
+                                                "(empty)",            // slot 7
+                                            ];
+                                            for (slot, name) in iic_slots.iter().enumerate() {
+                                                ui.label(format!("Slot {slot}:"));
+                                                ui.label(*name);
+                                                ui.label(""); // spacer
+                                                ui.end_row();
+                                            }
+                                            // No aux slot for IIc (128KB built-in)
+                                            ui.label("Aux:");
+                                            ui.label("128KB built-in");
+                                            ui.label("");
+                                        } else {
                                         for slot in 0..8usize {
                                             ui.label(format!("Slot {slot}:"));
                                             let current = self.pending_config.slot_cards[slot];
@@ -2632,6 +3133,7 @@ mod gui {
                                                 }
                                             });
                                         ui.label(""); // spacer (no options button for aux)
+                                        } // else (non-IIc)
                                         ui.end_row();
                                     });
                                 ui.add_space(4.0);
@@ -3028,48 +3530,64 @@ mod gui {
             }
             if act_load_disk1 {
                 let start_dir = self.config.last_disk_dir.as_deref();
-                if let Some(path) = open_disk_dialog("Load Disk 1", start_dir)
-                    && let Ok(data) = std::fs::read(&path)
-                {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext);
-                    let path_str = path.to_string_lossy().into_owned();
-                    self.config.add_recent_disk(&path_str);
-                    self.config.last_disk1 = Some(path_str);
-                    self.config.last_disk_dir =
-                        path.parent().map(|p| p.to_string_lossy().into_owned());
-                    self.disk1 = Some(path);
-                    self.config.save();
+                if let Some(path) = open_disk_dialog("Load Disk 1", start_dir) {
+                    let loaded = if let Some(ref mut iigs) = self.iigs {
+                        Self::load_iigs_disk(iigs, 0, &path)
+                    } else if let Ok(data) = std::fs::read(&path) {
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext);
+                        true
+                    } else {
+                        false
+                    };
+                    if loaded {
+                        let path_str = path.to_string_lossy().into_owned();
+                        self.config.add_recent_disk(&path_str);
+                        self.config.last_disk1 = Some(path_str);
+                        self.config.last_disk_dir =
+                            path.parent().map(|p| p.to_string_lossy().into_owned());
+                        self.disk1 = Some(path);
+                        self.config.save();
+                    }
                 }
             }
             if act_load_disk2 {
                 let start_dir = self.config.last_disk_dir.as_deref();
-                if let Some(path) = open_disk_dialog("Load Disk 2", start_dir)
-                    && let Ok(data) = std::fs::read(&path)
-                {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext);
-                    let path_str = path.to_string_lossy().into_owned();
-                    self.config.add_recent_disk(&path_str);
-                    self.config.last_disk2 = Some(path_str);
-                    self.config.last_disk_dir =
-                        path.parent().map(|p| p.to_string_lossy().into_owned());
-                    self.disk2 = Some(path);
-                    self.config.save();
+                if let Some(path) = open_disk_dialog("Load Disk 2", start_dir) {
+                    let loaded = if let Some(ref mut iigs) = self.iigs {
+                        Self::load_iigs_disk(iigs, 1, &path)
+                    } else if let Ok(data) = std::fs::read(&path) {
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext);
+                        true
+                    } else {
+                        false
+                    };
+                    if loaded {
+                        let path_str = path.to_string_lossy().into_owned();
+                        self.config.add_recent_disk(&path_str);
+                        self.config.last_disk2 = Some(path_str);
+                        self.config.last_disk_dir =
+                            path.parent().map(|p| p.to_string_lossy().into_owned());
+                        self.disk2 = Some(path);
+                        self.config.save();
+                    }
                 }
             }
             // Load disk from recent list into drive 1
             if let Some(path_str) = act_recent_disk {
                 let path = PathBuf::from(&path_str);
-                if let Ok(data) = std::fs::read(&path) {
+                let loaded = if let Some(ref mut iigs) = self.iigs {
+                    Self::load_iigs_disk(iigs, 0, &path)
+                } else if let Ok(data) = std::fs::read(&path) {
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
@@ -3077,6 +3595,11 @@ mod gui {
                         .to_lowercase();
                     self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext);
                     self.emu.bus.set_disk_path(self.disk_slot, 0, path.clone());
+                    true
+                } else {
+                    false
+                };
+                if loaded {
                     self.config.add_recent_disk(&path_str);
                     self.config.last_disk1 = Some(path_str);
                     self.config.last_disk_dir =
@@ -3174,7 +3697,7 @@ mod gui {
             // Screenshot from menu or F12 key
             if act_screenshot && !in_logo_mode {
                 self.render_apple2();
-                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+                save_screenshot(self.fb.pixels_as_bytes(), SCREEN_W, SCREEN_H);
             }
 
             // ── Drag-and-drop disk insertion ─────────────────────────────
@@ -3193,11 +3716,18 @@ mod gui {
                             .to_lowercase();
                         if disk_exts.iter().any(|&e| e == ext) {
                             let drive = i.min(1); // 0 or 1
-                            if let Ok(data) = std::fs::read(path) {
+                            let loaded = if let Some(ref mut iigs) = self.iigs {
+                                Self::load_iigs_disk(iigs, drive, path)
+                            } else if let Ok(data) = std::fs::read(path) {
                                 self.emu.bus.load_disk(self.disk_slot, drive, &data, &ext);
                                 self.emu
                                     .bus
                                     .set_disk_path(self.disk_slot, drive, path.clone());
+                                true
+                            } else {
+                                false
+                            };
+                            if loaded {
                                 let path_str = path.to_string_lossy().into_owned();
                                 self.config.add_recent_disk(&path_str);
                                 if drive == 0 {
@@ -3236,13 +3766,23 @@ mod gui {
                 self.config.window_y = Some(pos.y as i32);
             }
 
-            // Drive continuous animation at the display refresh rate
-            ctx.request_repaint();
+            // Drive continuous animation at the display refresh rate — but skip
+            // when the debugger has halted execution (Stepping). In that state
+            // nothing is advancing on-screen, so egui can rely on input-driven
+            // repaints, saving CPU while the user inspects state.
+            let needs_repaint = self.emu.mode != apple2_core::emulator::AppMode::Stepping
+                || self.show_settings
+                || self.show_about
+                || self.show_debugger;
+            if needs_repaint {
+                ctx.request_repaint();
+            }
         }
 
         fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-            // Save snapshot if configured to do so
+            // Save snapshot if configured to do so (not available for IIgs yet)
             if self.config.save_state_on_exit
+                && self.iigs.is_none()
                 && let Some(path) = self.config.save_state_path()
             {
                 let snap = self.emu.take_snapshot();
@@ -3287,6 +3827,20 @@ mod gui {
         for slot in 0..apple2_core::card::NUM_SLOTS {
             emu.bus.cards.remove(slot);
         }
+
+        // Apple IIc: install built-in peripherals (no user-configurable slots).
+        if emu.model.is_iic() {
+            emu.bus.cards.insert(Box::new(SscCard::new(1))); // modem port
+            emu.bus.cards.insert(Box::new(SscCard::new(2))); // printer port
+            // Slot 3: 80-col handled by ROM + bus soft-switches
+            emu.bus.cards.insert(Box::new(MouseCard::new(4)));
+            // Slot 5: empty
+            emu.bus.cards.insert(Box::new(Disk2Card::new(6)));
+            // Slot 7: empty
+            // No aux card — IIc has 128KB built-in (aux_ram is always present)
+            return;
+        }
+
         // Re-insert according to config
         for (slot, &card_type) in config.slot_cards.iter().enumerate() {
             match card_type {
@@ -3739,26 +4293,13 @@ mod gui {
         Some(c)
     }
 
-    pub fn run(emu: Emulator, config: Config) {
-        // Always open at 2× scale on startup, matching AppleWin's
-        // kDEFAULT_VIEWPORT_SCALE = 2.  AppleWin does not restore a
-        // saved scale; it always starts at 2× (falling back to 1× only
-        // if the monitor is too small).
-        //
-        // Width overhead:  BEVEL×2 (8) + BTN_PANEL_W (55) + inner margins (16)
-        //                = 79 px  →  round up to 80 for a clean number.
-        // Height overhead: BEVEL×2 (8) + menu-bar (≈26) + status-bar (≈26)
-        //                + inner margins (16) = 76 px  →  round up to 80.
-        // Both match AppleWin's VIEWPORTX×2+BUTTONCX (55) plus our extra chrome.
+    pub fn run_with_core(core: EmuCore, config: Config) {
         const W_OVERHEAD: f32 = 80.0;
         const H_OVERHEAD: f32 = 80.0;
 
         let win_w = SCREEN_W as f32 * 2.0 + W_OVERHEAD;
         let win_h = SCREEN_H as f32 * 2.0 + H_OVERHEAD;
 
-        // When the window was last closed maximized, start maximized again and
-        // skip the saved pos/size (they're irrelevant in maximized state).
-        // We disable eframe's own persist_window so it doesn't fight our config.
         let (initial_size, initial_pos) = if config.window_maximized {
             (None, None)
         } else {
@@ -3777,19 +4318,19 @@ mod gui {
                 SCREEN_W as f32 + W_OVERHEAD,
                 SCREEN_H as f32 + H_OVERHEAD,
             )),
-            // Disable eframe's built-in window-state persistence — we handle
-            // position, size, and maximized state ourselves via config.toml.
-            // Leaving persist_window: true (the default) causes eframe to save
-            // a fixed pixel size and restore it via set_inner_size() on startup,
-            // which fights our own initial_window_size and prevents the window
-            // from starting in the correct maximized state.
             persist_window: false,
             ..Default::default()
         };
+
+        let title = match &core {
+            EmuCore::IIgs(_) => "AppleWin-rs — Apple IIgs",
+            EmuCore::IIe(_) => "AppleWin-rs",
+        };
+
         eframe::run_native(
-            "AppleWin-rs",
+            title,
             options,
-            Box::new(move |_cc| Box::new(EmulatorApp::new(emu, config))),
+            Box::new(move |_cc| Box::new(EmulatorApp::new_with_core(core, config))),
         )
         .expect("eframe failed");
     }
@@ -3801,7 +4342,7 @@ mod gui {
     // Per UTAIIe §8-30, the ROM bit order is also reversed: bit 0 = leftmost pixel.
     // We XOR-invert then bit-reverse bits [6:0] and shift left by 1 to produce our
     // MSB-first format (bit 7 = leftmost pixel).
-    static VIDEO_ROM: &[u8] = include_bytes!("../roms/Apple2e_Enhanced_Video.rom");
+    static VIDEO_ROM: &[u8] = include_bytes!("../../../roms/Apple2e_Enhanced_Video.rom");
 
     fn build_font_from_rom(rom: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(128 * 8);

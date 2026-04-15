@@ -1,10 +1,11 @@
 //! Unit tests for the Apple II memory bus (soft switches, language card, page tables).
 
 use crate::bus::{Bus, MemMode, PageDst, PageSrc};
+use crate::model::Apple2Model;
 
 /// Create a minimal Bus with a 16K zero-filled ROM.
 fn make_bus() -> Bus {
-    Bus::new(vec![0u8; 16384])
+    Bus::new(vec![0u8; 16384], Apple2Model::AppleIIeEnh)
 }
 
 /// Write a byte through raw write (bypasses I/O side-effects).
@@ -278,10 +279,10 @@ fn page_table_highram_on() {
     let mut bus = make_bus();
     // Enable LC RAM reading
     bus.read(0xC080, 0); // HIGHRAM on, bank 2
-    // $D0-$FF should now read from aux RAM (language card)
-    assert!(matches!(bus.pages_r[0xD0], PageSrc::Aux(_)));
-    assert!(matches!(bus.pages_r[0xE0], PageSrc::Aux(_)));
-    assert!(matches!(bus.pages_r[0xFF], PageSrc::Aux(_)));
+    // $D0-$FF should now read from main RAM (language card, ALTZP=0 default)
+    assert!(matches!(bus.pages_r[0xD0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xE0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xFF], PageSrc::Main(_)));
 }
 
 #[test]
@@ -291,9 +292,9 @@ fn page_table_writeram_on() {
     // WRITERAM requires two consecutive reads of the same odd address
     bus.read(0xC081, 0);
     bus.read(0xC081, 0); // HIGHRAM off, WRITERAM on, bank 2
-    // $D0-$FF should read ROM but write to aux
+    // $D0-$FF should read ROM but write to main (language card, ALTZP=0 default)
     assert!(matches!(bus.pages_r[0xD0], PageSrc::Rom(_)));
-    assert!(matches!(bus.pages_w[0xD0], PageDst::Aux(_)));
+    assert!(matches!(bus.pages_w[0xD0], PageDst::Main(_)));
 }
 
 #[test]
@@ -394,6 +395,22 @@ fn speaker_toggle_on_write_c030() {
     assert_eq!(bus.speaker_toggles[0], 50);
 }
 
+/// The speaker-toggle cap prevents pathological unbounded growth.  Toggles
+/// past the 65 536-entry ceiling are dropped; the speaker_state still
+/// flips so audio behaviour is preserved.
+#[test]
+fn speaker_toggles_capped_at_65536() {
+    let mut bus = make_bus();
+    // Push well past the cap.
+    for i in 0..70_000u64 {
+        bus.read(0xC030, i);
+    }
+    assert_eq!(bus.speaker_toggles.len(), 65_536);
+    // speaker_state is the XOR of the number of toggles attempted (all flips
+    // still happen even after the buffer stops accepting new timestamps).
+    assert!(!bus.speaker_state); // 70 000 toggles = even count → back to false
+}
+
 // ===========================================================================
 // Video mode switches
 // ===========================================================================
@@ -433,6 +450,85 @@ fn dhires_switch() {
 }
 
 // ===========================================================================
+// Language card ALTZP routing
+// ===========================================================================
+
+#[test]
+fn lc_altzp_off_routes_to_main_ram() {
+    let mut bus = make_bus();
+    // ALTZP=0 (default), enable LC RAM read+write
+    bus.read(0xC083, 0);
+    bus.read(0xC083, 0); // HIGHRAM on, WRITERAM on, bank 2
+    // LC pages should route through main RAM when ALTZP is off
+    assert!(matches!(bus.pages_r[0xD0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xE0], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_r[0xFF], PageSrc::Main(_)));
+    assert!(matches!(bus.pages_w[0xD0], PageDst::Main(_)));
+    assert!(matches!(bus.pages_w[0xE0], PageDst::Main(_)));
+    assert!(matches!(bus.pages_w[0xFF], PageDst::Main(_)));
+}
+
+#[test]
+fn lc_altzp_on_routes_to_aux_ram() {
+    let mut bus = make_bus();
+    // Enable ALTZP first, then enable LC RAM
+    bus.write(0xC009, 0, 0); // ALTZP on
+    bus.read(0xC083, 0);
+    bus.read(0xC083, 0); // HIGHRAM on, WRITERAM on, bank 2
+    // LC pages should route through aux RAM when ALTZP is on
+    assert!(matches!(bus.pages_r[0xD0], PageSrc::Aux(_)));
+    assert!(matches!(bus.pages_r[0xE0], PageSrc::Aux(_)));
+    assert!(matches!(bus.pages_r[0xFF], PageSrc::Aux(_)));
+    assert!(matches!(bus.pages_w[0xD0], PageDst::Aux(_)));
+    assert!(matches!(bus.pages_w[0xE0], PageDst::Aux(_)));
+    assert!(matches!(bus.pages_w[0xFF], PageDst::Aux(_)));
+}
+
+#[test]
+fn lc_main_and_aux_banks_are_independent() {
+    let mut bus = make_bus();
+    // Enable LC RAM read+write with ALTZP=0 (main bank)
+    bus.read(0xC083, 0);
+    bus.read(0xC083, 0);
+
+    // Write a value to LC RAM in the main bank
+    bus.write(0xE000, 0x42, 0);
+    assert_eq!(bus.read(0xE000, 0), 0x42);
+
+    // Switch to ALTZP=1 (aux bank) — LC RAM should be independent
+    bus.write(0xC009, 0, 0); // ALTZP on
+    // The aux bank's LC RAM should still be zero (never written)
+    assert_eq!(bus.read(0xE000, 0), 0x00);
+
+    // Write a different value to the aux bank's LC
+    bus.write(0xE000, 0x99, 0);
+    assert_eq!(bus.read(0xE000, 0), 0x99);
+
+    // Switch back to ALTZP=0 — main bank LC should be preserved
+    bus.write(0xC008, 0, 0); // ALTZP off
+    assert_eq!(bus.read(0xE000, 0), 0x42);
+}
+
+#[test]
+fn lc_write_through_rom_respects_altzp() {
+    let mut bus = make_bus();
+    // HIGHRAM=off, WRITERAM=on: reads come from ROM, writes go to LC RAM
+    bus.read(0xC081, 0);
+    bus.read(0xC081, 0);
+
+    // With ALTZP=0, writes should go to main_ram
+    bus.write(0xE000, 0xAB, 0);
+    assert_eq!(bus.main_ram[0xE000], 0xAB);
+    assert_eq!(bus.aux_ram[0xE000], 0x00); // aux untouched
+
+    // With ALTZP=1, writes should go to aux_ram
+    bus.write(0xC009, 0, 0); // ALTZP on
+    bus.write(0xE000, 0xCD, 0);
+    assert_eq!(bus.aux_ram[0xE000], 0xCD);
+    assert_eq!(bus.main_ram[0xE000], 0xAB); // main untouched
+}
+
+// ===========================================================================
 // Raw read/write bypass I/O
 // ===========================================================================
 
@@ -444,4 +540,164 @@ fn raw_read_write_bypass_io() {
 
     bus.write_raw(0x0500, 0xAD);
     assert_eq!(bus.main_ram[0x0500], 0xAD);
+}
+
+// ===========================================================================
+// Apple IIc model-specific tests
+// ===========================================================================
+
+/// Create a minimal IIc Bus with a 32K ROM (standard bank in lower 16K).
+fn make_iic_bus() -> Bus {
+    let mut rom = vec![0x00u8; 32768];
+    // Put a marker byte in the standard bank (lower 16K, offset 0x0000+)
+    // at ROM address $D000 (offset 0x1000 in file)
+    rom[0x1000] = 0xAA;
+    // Put a different marker in the alternate bank (upper 16K, offset 0x4000+)
+    // at ROM address $D000 (offset 0x4000 + 0x1000 = 0x5000 in file)
+    rom[0x5000] = 0xBB;
+    Bus::new(rom, Apple2Model::AppleIIc)
+}
+
+#[test]
+fn iic_intcxrom_always_on() {
+    let bus = make_iic_bus();
+    // IIc should have INTCXROM set at power-on
+    assert!(bus.mode.contains(MemMode::MF_INTCXROM));
+    // All $C1-$CF pages should route to ROM (not I/O)
+    for page in 0xC1..=0xCF {
+        assert!(
+            matches!(bus.pages_r[page], PageSrc::Rom(_)),
+            "page 0x{page:02X} should be Rom, got {:?}",
+            bus.pages_r[page]
+        );
+    }
+}
+
+#[test]
+fn iic_intcxrom_write_ignored() {
+    let mut bus = make_iic_bus();
+    // Writing to $C006 (INTCXROM off) should be ignored on IIc
+    bus.write(0xC006, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_INTCXROM));
+    // Pages should still route to ROM
+    assert!(matches!(bus.pages_r[0xC1], PageSrc::Rom(_)));
+}
+
+#[test]
+fn iic_slotc3rom_write_ignored() {
+    let mut bus = make_iic_bus();
+    // Writing to $C00B (SLOTC3ROM on) should be ignored on IIc
+    bus.write(0xC00B, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_SLOTC3ROM));
+}
+
+#[test]
+fn iic_rom_bank_switching_via_c028() {
+    let mut bus = make_iic_bus();
+    // Default: ALTROM0 is clear → standard bank (lower 16K)
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+
+    // Read from ROM at $D000 — should get the standard bank marker
+    let val = bus.read_raw(0xD000);
+    assert_eq!(val, 0xAA, "expected standard bank marker");
+
+    // Toggle ROM bank via $C028 write
+    bus.write(0xC028, 0, 0);
+    assert!(bus.mode.contains(MemMode::MF_ALTROM0));
+
+    // Now reading $D000 should return the alternate bank marker
+    let val = bus.read_raw(0xD000);
+    assert_eq!(val, 0xBB, "expected alternate bank marker");
+
+    // Toggle back
+    bus.write(0xC028, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+    let val = bus.read_raw(0xD000);
+    assert_eq!(val, 0xAA, "expected standard bank marker after toggle back");
+}
+
+#[test]
+fn iic_rom_bank_switching_via_c028_read() {
+    let mut bus = make_iic_bus();
+    // $C028 read should also toggle ALTROM0 (read-strobe)
+    bus.read(0xC028, 0);
+    assert!(bus.mode.contains(MemMode::MF_ALTROM0));
+    bus.read(0xC028, 0);
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+}
+
+#[test]
+fn iic_dhires_gated_by_ioudis() {
+    let mut bus = make_iic_bus();
+    // On IIc, DHIRES should NOT toggle when IOUDIS is clear
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC05E, 0, 0); // attempt DHIRESON
+    assert!(
+        !bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should not activate when IOUDIS is clear on IIc"
+    );
+
+    // Set IOUDIS, then DHIRES should work
+    bus.write(0xC07E, 0, 0); // IOUDIS on
+    assert!(bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC05E, 0, 0); // DHIRESON
+    assert!(bus.mode.contains(MemMode::MF_DHIRES));
+
+    // Clear DHIRES with IOUDIS still set
+    bus.write(0xC05F, 0, 0); // DHIRESOFF
+    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
+}
+
+#[test]
+fn iic_dhires_read_strobe_gated_by_ioudis() {
+    let mut bus = make_iic_bus();
+    // Read-strobe at $C05E should also be gated
+    bus.read(0xC05E, 0);
+    assert!(
+        !bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES read-strobe should be gated by IOUDIS on IIc"
+    );
+
+    bus.write(0xC07E, 0, 0); // IOUDIS on
+    bus.read(0xC05E, 0);
+    assert!(bus.mode.contains(MemMode::MF_DHIRES));
+}
+
+#[test]
+fn iic_c028_noop_on_iie() {
+    let mut bus = make_bus(); // IIe Enhanced
+    // $C028 should NOT toggle ALTROM0 on a non-IIc model
+    bus.write(0xC028, 0, 0);
+    assert!(!bus.mode.contains(MemMode::MF_ALTROM0));
+}
+
+#[test]
+fn iie_dhires_not_gated_by_ioudis() {
+    let mut bus = make_bus(); // IIe Enhanced
+    // On IIe, DHIRES should toggle regardless of IOUDIS state
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC05E, 0, 0);
+    assert!(
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should work on IIe even without IOUDIS"
+    );
+}
+
+#[test]
+fn iic_32k_rom_reads_standard_bank_by_default() {
+    let mut bus = make_iic_bus();
+    // Place distinct values in both banks at $F000
+    let f000_std_offset = 0xF000 - 0xC000; // 0x3000 (lower 16K = standard)
+    let f000_alt_offset = 0x4000 + (0xF000 - 0xC000); // 0x7000 (upper 16K = alternate)
+    bus.rom[f000_std_offset] = 0x11;
+    bus.rom[f000_alt_offset] = 0x22;
+
+    // Default (ALTROM0 clear) → standard bank (lower 16K)
+    let val = bus.read_raw(0xF000);
+    assert_eq!(val, 0x11);
+
+    // Switch to alternate bank (upper 16K)
+    bus.write(0xC028, 0, 0);
+    let val = bus.read_raw(0xF000);
+    assert_eq!(val, 0x22);
 }

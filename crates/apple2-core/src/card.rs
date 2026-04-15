@@ -254,13 +254,25 @@ impl CardManager {
     }
 
     /// Immutable access to a slot.
+    #[inline]
     pub fn slot(&self, slot: usize) -> Option<&dyn Card> {
-        self.slots.get(slot)?.as_deref()
+        // Explicit range check lets the branch predictor learn the common
+        // in-range path and allows the indexing below to elide its own check.
+        if slot < NUM_SLOTS {
+            self.slots[slot].as_deref()
+        } else {
+            None
+        }
     }
 
     /// Mutable access to a slot.
+    #[inline]
     pub fn slot_mut(&mut self, slot: usize) -> Option<&mut dyn Card> {
-        self.slots.get_mut(slot)?.as_deref_mut()
+        if slot < NUM_SLOTS {
+            self.slots[slot].as_deref_mut()
+        } else {
+            None
+        }
     }
 
     /// Mutable access to the aux slot.
@@ -301,5 +313,37 @@ impl CardManager {
 impl Default for CardManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phase 2.3: slot / slot_mut take an explicit `slot < NUM_SLOTS` check
+    /// rather than `get(slot)?`.  Verify the out-of-range path still returns
+    /// None instead of panicking on the inner index.
+    #[test]
+    fn slot_out_of_range_returns_none() {
+        let cards = CardManager::new();
+        assert!(cards.slot(NUM_SLOTS).is_none());
+        assert!(cards.slot(NUM_SLOTS + 5).is_none());
+        assert!(cards.slot(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn slot_mut_out_of_range_returns_none() {
+        let mut cards = CardManager::new();
+        assert!(cards.slot_mut(NUM_SLOTS).is_none());
+        assert!(cards.slot_mut(NUM_SLOTS + 5).is_none());
+        assert!(cards.slot_mut(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn slot_empty_in_range_returns_none() {
+        let cards = CardManager::new();
+        for slot in 0..NUM_SLOTS {
+            assert!(cards.slot(slot).is_none(), "slot {slot} should start empty");
+        }
     }
 }
