@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Apple IIgs disabled in Settings UI:** The Apple IIgs option is temporarily
+  hidden from the Settings → Machine → Computer type dropdown while IIgs support
+  stabilises. The underlying emulation code (`apple2-iigs` crate and all IIgs
+  integration in `applewin`) remains intact and can be re-enabled by uncommenting
+  `Apple2Model::AppleIIgs` in the machine selector in `crates/applewin/src/main.rs`.
+
 ### Added
 
 - **Apple IIgs disk loading (SmartPort):** The GUI now routes IIgs disk image

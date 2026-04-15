@@ -2803,7 +2803,8 @@ mod gui {
                                                     Apple2Model::AppleIIe,
                                                     Apple2Model::AppleIIeEnh,
                                                     Apple2Model::AppleIIc,
-                                                    Apple2Model::AppleIIgs,
+                                                    // Apple IIgs support temporarily disabled in UI.
+                                                    // Apple2Model::AppleIIgs,
                                                 ] {
                                                     ui.selectable_value(
                                                         &mut self.pending_config.machine_type,

@@ -23,9 +23,11 @@ Pre-built binaries for Windows, macOS, and Linux are available on the [Releases]
 - Apple IIe (`//e`)
 - Apple IIe Enhanced (`//e Enhanced`) — default
 - Apple IIc (`//c`) — 32KB ROM, built-in peripherals, 128KB RAM
-- **Apple IIgs** (`//gs`) — 65C816 CPU, Super Hi-Res graphics, Ensoniq audio
+- **Apple IIgs** (`//gs`) — 65C816 CPU, Super Hi-Res graphics, Ensoniq audio *(temporarily disabled in the UI; see note below)*
 
 > No support currently for the //c+, Laser 128, or Laser 128EX/EX2.
+
+> **Note:** Apple IIgs selection is currently disabled in the Settings UI while IIgs support stabilises. The underlying emulation code remains in the tree and can be re-enabled later.
 
 ---
 
