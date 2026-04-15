@@ -337,3 +337,107 @@ fn smartport_2mg_format() {
     assert_eq!(disk.num_blocks, 1);
     assert_eq!(disk.data[0], 0xCC);
 }
+
+#[test]
+fn smartport_firmware_stub_installed() {
+    // Verify slot 5 firmware has the SmartPort identification and trap bytes
+    use apple2_iigs::cpu65816::Bus816;
+    let rom = vec![0xEA; 131072];
+    let mem = apple2_iigs::memory::IIgsMemory::new(256, rom).unwrap();
+    let bus = apple2_iigs::bus::IIgsBus::new(mem);
+
+    // ProDOS/SmartPort identification pattern ($20, $00, $03, $3C)
+    assert_eq!(bus.read_raw(0x00_C501), 0x20);
+    assert_eq!(bus.read_raw(0x00_C503), 0x00);
+    assert_eq!(bus.read_raw(0x00_C505), 0x03);
+    assert_eq!(bus.read_raw(0x00_C507), 0x3C);
+
+    // SmartPort entry point: WDM $FE, RTS
+    assert_eq!(bus.read_raw(0x00_C508), 0x42);
+    assert_eq!(bus.read_raw(0x00_C509), 0xFE);
+    assert_eq!(bus.read_raw(0x00_C50A), 0x60);
+
+    // Device info byte has capability flags set (should be non-zero, indicating
+    // the slot is populated with a SmartPort-capable device)
+    let info = bus.read_raw(0x00_C5FE);
+    assert_ne!(info, 0x00, "device info should have capability bits set");
+    assert_eq!(bus.read_raw(0x00_C5FF), 0x05); // Offset to SmartPort entry
+}
+
+#[test]
+fn smartport_read_block_via_trap() {
+    use apple2_iigs::cpu65816::Bus816;
+    use apple2_iigs::smartport::SmartPortDisk;
+
+    let rom = vec![0xEA; 131072];
+    let mem = apple2_iigs::memory::IIgsMemory::new(256, rom).unwrap();
+    let mut bus = apple2_iigs::bus::IIgsBus::new(mem);
+
+    let mut disk_data = vec![0u8; 512 * 4];
+    for (i, b) in disk_data.iter_mut().enumerate().skip(512).take(512) {
+        *b = (i as u8).wrapping_mul(3);
+    }
+    bus.smartport
+        .insert(0, SmartPortDisk::from_raw(disk_data, None));
+
+    // Param list at $0300: READ BLOCK unit=1, buffer=$0400, block=1
+    bus.write(0x00_0300, 3, 0);
+    bus.write(0x00_0301, 1, 0);
+    bus.write(0x00_0302, 0x00, 0);
+    bus.write(0x00_0303, 0x04, 0);
+    bus.write(0x00_0304, 0x01, 0);
+    bus.write(0x00_0305, 0x00, 0);
+    bus.write(0x00_0306, 0x00, 0);
+
+    // Inline params at $2001-$2003: cmd=$01, cmdlist=$0300
+    bus.write(0x00_2001, 0x01, 0);
+    bus.write(0x00_2002, 0x00, 0);
+    bus.write(0x00_2003, 0x03, 0);
+
+    // Stack: pushed (return_addr - 1) = $2000
+    bus.write(0x00_01FE, 0x00, 0);
+    bus.write(0x00_01FF, 0x20, 0);
+
+    let (err, carry) = bus
+        .wdm_trap(0xFE, 0x01FD, 0x00, true)
+        .expect("trap handled");
+    assert_eq!(err, 0x00);
+    assert!(!carry);
+
+    // Verify block 1 data arrived at $0400
+    for i in 0..512 {
+        let expected = ((512 + i) as u8).wrapping_mul(3);
+        assert_eq!(bus.read_raw(0x00_0400 + i as u32), expected);
+    }
+
+    // Return address advanced past the 3 inline bytes
+    let ret_lo = bus.read_raw(0x00_01FE);
+    let ret_hi = bus.read_raw(0x00_01FF);
+    assert_eq!(((ret_hi as u16) << 8) | ret_lo as u16, 0x2003);
+}
+
+#[test]
+fn smartport_trap_no_device_error() {
+    use apple2_iigs::cpu65816::Bus816;
+
+    let rom = vec![0xEA; 131072];
+    let mem = apple2_iigs::memory::IIgsMemory::new(256, rom).unwrap();
+    let mut bus = apple2_iigs::bus::IIgsBus::new(mem);
+
+    bus.write(0x00_0300, 3, 0);
+    bus.write(0x00_0301, 1, 0);
+    bus.write(0x00_0302, 0x00, 0);
+    bus.write(0x00_0303, 0x04, 0);
+    bus.write(0x00_0304, 0x00, 0);
+    bus.write(0x00_0305, 0x00, 0);
+    bus.write(0x00_0306, 0x00, 0);
+    bus.write(0x00_2001, 0x01, 0);
+    bus.write(0x00_2002, 0x00, 0);
+    bus.write(0x00_2003, 0x03, 0);
+    bus.write(0x00_01FE, 0x00, 0);
+    bus.write(0x00_01FF, 0x20, 0);
+
+    let (err, carry) = bus.wdm_trap(0xFE, 0x01FD, 0x00, true).unwrap();
+    assert_eq!(err, 0x28, "NO DEVICE");
+    assert!(carry);
+}

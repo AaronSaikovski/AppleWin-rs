@@ -27,6 +27,23 @@ pub trait Bus816 {
 
     /// Read a byte without side-effects (for debugger / reset vector).
     fn read_raw(&self, addr: u32) -> u8;
+
+    /// Handle a WDM trap with the given signature byte.
+    ///
+    /// Returns `Some((a, carry))` if handled — CPU updates A and C accordingly.
+    /// Returns `None` if unhandled (default).
+    ///
+    /// Used to implement SmartPort firmware dispatch via WDM instructions
+    /// embedded in replacement slot ROMs.
+    fn wdm_trap(
+        &mut self,
+        _signature: u8,
+        _sp: u16,
+        _pbr: u8,
+        _emulation: bool,
+    ) -> Option<(u8, bool)> {
+        None
+    }
 }
 
 /// Step the CPU by one instruction. Returns the number of cycles consumed.

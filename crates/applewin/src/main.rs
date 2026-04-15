@@ -286,6 +286,33 @@ mod gui {
 
     const SCREEN_W: usize = 560;
     const SCREEN_H: usize = 384;
+
+    /// Precomputed source-column table mapping each dst x (0..560) to a src x
+    /// in the 640-wide IIgs SHR buffer. Avoids per-pixel division/modulo in the
+    /// scaling hot loop (≈215 K pixels per frame).
+    const SHR_SRC_X: [u16; SCREEN_W] = {
+        let mut t = [0u16; SCREEN_W];
+        let mut i = 0;
+        while i < SCREEN_W {
+            let v = i * 640 / SCREEN_W;
+            t[i] = if v >= 640 { 639 } else { v as u16 };
+            i += 1;
+        }
+        t
+    };
+
+    /// Precomputed source-row table mapping each dst y (0..384) to a src y
+    /// in the 400-tall IIgs SHR buffer.
+    const SHR_SRC_Y: [u16; SCREEN_H] = {
+        let mut t = [0u16; SCREEN_H];
+        let mut i = 0;
+        while i < SCREEN_H {
+            let v = i * 400 / SCREEN_H;
+            t[i] = if v >= 400 { 399 } else { v as u16 };
+            i += 1;
+        }
+        t
+    };
     /// 3D bevel around the Apple II screen (2 layers × 2 px each)
     const BEVEL: f32 = 4.0;
     /// Width of the right-side button strip
@@ -558,7 +585,6 @@ mod gui {
         iigs: Option<apple2_iigs::emulator::IIgsEmulator>,
         renderer: NtscRenderer,
         fb: Framebuffer,
-        pixel_buf: Vec<u8>,
         texture: Option<egui::TextureHandle>,
         logo_texture: Option<egui::TextureHandle>,
         icons: Option<Icons>,
@@ -612,6 +638,19 @@ mod gui {
         gilrs: Option<gilrs::Gilrs>,
         /// The active gamepad ID (first connected pad, or None).
         active_gamepad: Option<gilrs::GamepadId>,
+        /// Reusable 640x400 scratch buffer for SHR rendering (IIgs).
+        /// Allocated once to avoid per-frame 1MB allocations.
+        shr_scratch: Vec<u32>,
+        /// Reusable scratch for WAV recorder sample chunks.
+        wav_scratch: Vec<f32>,
+        /// Reusable scratch for draining speaker_toggles without dropping
+        /// the Vec's preallocated capacity every frame.
+        speaker_toggles_scratch: Vec<u64>,
+        /// Reusable scratch for speaker PCM samples — synthesized without the
+        /// ring-buffer mutex held, then bulk-pushed under a single lock.
+        speaker_scratch: Vec<f32>,
+        /// Reusable scratch for Ensoniq DOC PCM samples (IIgs).
+        ensoniq_scratch: Vec<f32>,
     }
 
     impl EmulatorApp {
@@ -634,7 +673,7 @@ mod gui {
 
         fn new_inner(
             mut emu: Emulator,
-            iigs: Option<apple2_iigs::emulator::IIgsEmulator>,
+            mut iigs: Option<apple2_iigs::emulator::IIgsEmulator>,
             config: Config,
         ) -> Self {
             // Install cards according to slot configuration (IIe only)
@@ -667,7 +706,11 @@ mod gui {
             let mut disk2: Option<PathBuf> = None;
             if let Some(ref p) = config.last_disk1 {
                 let path = PathBuf::from(p);
-                if let Ok(data) = std::fs::read(&path) {
+                if let Some(ref mut iigs_emu) = iigs {
+                    if Self::load_iigs_disk(iigs_emu, 0, &path) {
+                        disk1 = Some(path);
+                    }
+                } else if let Ok(data) = std::fs::read(&path) {
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
@@ -680,7 +723,11 @@ mod gui {
             }
             if let Some(ref p) = config.last_disk2 {
                 let path = PathBuf::from(p);
-                if let Ok(data) = std::fs::read(&path) {
+                if let Some(ref mut iigs_emu) = iigs {
+                    if Self::load_iigs_disk(iigs_emu, 1, &path) {
+                        disk2 = Some(path);
+                    }
+                } else if let Ok(data) = std::fs::read(&path) {
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
@@ -736,7 +783,6 @@ mod gui {
                 iigs,
                 renderer,
                 fb: Framebuffer::new(),
-                pixel_buf: vec![0u8; SCREEN_W * SCREEN_H * 4],
                 texture: None,
                 logo_texture: None,
                 icons: None,
@@ -774,6 +820,11 @@ mod gui {
                 status_msg: None,
                 gilrs: gilrs_inst,
                 active_gamepad,
+                shr_scratch: vec![0u32; 640 * 400],
+                wav_scratch: Vec::with_capacity(1024),
+                speaker_toggles_scratch: Vec::with_capacity(65536),
+                speaker_scratch: Vec::with_capacity(2048),
+                ensoniq_scratch: Vec::with_capacity(2048),
             }
         }
 
@@ -811,6 +862,52 @@ mod gui {
             }
         }
 
+        /// Load a SmartPort disk image into the IIgs emulator.
+        /// Handles .2mg/.2img (with header) and .po/.hdv (raw ProDOS order).
+        /// Returns true on success.
+        fn load_iigs_disk(
+            iigs: &mut apple2_iigs::emulator::IIgsEmulator,
+            drive: usize,
+            path: &std::path::Path,
+        ) -> bool {
+            use apple2_iigs::smartport::SmartPortDisk;
+            let Ok(data) = std::fs::read(path) else {
+                eprintln!("Failed to read disk image: {}", path.display());
+                return false;
+            };
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let path_str = path.to_string_lossy().to_string();
+            let disk = match ext.as_str() {
+                "2mg" | "2img" => SmartPortDisk::from_2mg(&data, Some(path_str)),
+                "po" | "hdv" => Some(SmartPortDisk::from_raw(data, Some(path_str))),
+                _ => {
+                    // Try raw first (many .dsk files are actually ProDOS order)
+                    if data.len() % 512 == 0 {
+                        Some(SmartPortDisk::from_raw(data, Some(path_str)))
+                    } else {
+                        None
+                    }
+                }
+            };
+            match disk {
+                Some(d) => {
+                    iigs.bus.smartport.insert(drive, d);
+                    true
+                }
+                None => {
+                    eprintln!(
+                        "Unsupported disk format for IIgs SmartPort: {}",
+                        path.display()
+                    );
+                    false
+                }
+            }
+        }
+
         fn disk_display_name(path: &Option<PathBuf>) -> &str {
             path.as_ref()
                 .and_then(|p| p.file_name())
@@ -827,11 +924,14 @@ mod gui {
                     let fast = &iigs.bus.mem.fast_ram;
                     if fast.len() >= 0x20000 {
                         let bank_e1 = &fast[0x10000..0x20000];
-                        // Render SHR into our pixel buffer (640x400 → scale to 560x384)
-                        let mut shr_pixels = vec![0u32; 640 * 400];
-                        apple2_iigs::shr::render_shr(bank_e1, &mut shr_pixels);
-                        // Scale SHR (640x400) to the display framebuffer (560x384)
-                        self.scale_shr_to_framebuffer(&shr_pixels);
+                        // Render SHR into the reusable scratch buffer (640x400 → scale to 560x384).
+                        apple2_iigs::shr::render_shr(bank_e1, &mut self.shr_scratch);
+                        // Scale SHR (640x400) to the display framebuffer (560x384).
+                        // Move scratch out to satisfy the borrow checker (scale_shr_to_framebuffer
+                        // takes &mut self), then put it back — no allocation.
+                        let shr = std::mem::take(&mut self.shr_scratch);
+                        self.scale_shr_to_framebuffer(&shr);
+                        self.shr_scratch = shr;
                     }
                     return;
                 }
@@ -866,26 +966,22 @@ mod gui {
                     &mut self.fb,
                 );
             }
-            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
 
         /// Scale a 640×400 SHR pixel buffer down to the 560×384 framebuffer.
+        ///
+        /// Uses precomputed source-coordinate lookup tables
+        /// (`SHR_SRC_X` / `SHR_SRC_Y`) to avoid per-pixel division.
         fn scale_shr_to_framebuffer(&mut self, shr_pixels: &[u32]) {
-            let src_w = 640usize;
-            let src_h = 400usize;
-            let dst_w = SCREEN_W; // 560
-            let dst_h = SCREEN_H; // 384
-
+            const SRC_W: usize = 640;
             let fb_pixels = self.fb.pixels_mut();
-
-            for dst_y in 0..dst_h {
-                let src_y = (dst_y * src_h / dst_h).min(src_h - 1);
-                for dst_x in 0..dst_w {
-                    let src_x = (dst_x * src_w / dst_w).min(src_w - 1);
-                    fb_pixels[dst_y * dst_w + dst_x] = shr_pixels[src_y * src_w + src_x];
+            for (dst_y, &src_y) in SHR_SRC_Y.iter().enumerate() {
+                let src_row_base = src_y as usize * SRC_W;
+                let dst_row_base = dst_y * SCREEN_W;
+                for (dst_x, &src_x) in SHR_SRC_X.iter().enumerate() {
+                    fb_pixels[dst_row_base + dst_x] = shr_pixels[src_row_base + src_x as usize];
                 }
             }
-            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
 
         /// Render the debugger display into the framebuffer, replacing the
@@ -943,7 +1039,6 @@ mod gui {
                     |a| self.emu.bus.read_raw(a),
                 );
             }
-            self.pixel_buf.copy_from_slice(self.fb.pixels_as_bytes());
         }
     }
 
@@ -1060,27 +1155,31 @@ mod gui {
             // ── Speaker audio synthesis ───────────────────────────────────────
             // Mirrors AppleWin's UpdateSpkr() / DCFilter() logic from Speaker.cpp.
             {
-                let (end_cycle, toggles) = if let Some(ref mut iigs) = self.iigs {
-                    (
-                        iigs.cpu.cycles,
-                        std::mem::take(&mut iigs.bus.mega2.speaker_toggles),
-                    )
+                // Swap speaker_toggles into our reusable scratch vec; this preserves
+                // the bus's preallocated capacity across frames instead of resetting it
+                // to 0 as std::mem::take would.
+                self.speaker_toggles_scratch.clear();
+                let end_cycle = if let Some(ref mut iigs) = self.iigs {
+                    std::mem::swap(
+                        &mut iigs.bus.mega2.speaker_toggles,
+                        &mut self.speaker_toggles_scratch,
+                    );
+                    iigs.cpu.cycles
                 } else {
-                    (
-                        self.emu.cpu.cycles,
-                        std::mem::take(&mut self.emu.bus.speaker_toggles),
-                    )
+                    std::mem::swap(
+                        &mut self.emu.bus.speaker_toggles,
+                        &mut self.speaker_toggles_scratch,
+                    );
+                    self.emu.cpu.cycles
                 };
+                let toggles = &self.speaker_toggles_scratch;
                 let start_cycle = self.last_audio_cycle;
                 self.last_audio_cycle = end_cycle;
 
                 if let Some(buf) = &self.audio_buf {
                     let sr = self.audio_sample_rate as f64;
-                    // Cycles per audio sample (truncated to integer, matching the C++
-                    // "Use integer value: Better for MJ Mahon's RT.SYNTH" comment).
                     let clks_per_sample = (CPU_HZ / sr).floor().max(1.0);
 
-                    // Total cycles this frame including any fractional carry-over.
                     let delta = end_cycle.saturating_sub(start_cycle) as f64 + self.spkr_cycle_rem;
                     let n_samples = (delta / clks_per_sample) as usize;
                     self.spkr_cycle_rem = delta - n_samples as f64 * clks_per_sample;
@@ -1088,16 +1187,19 @@ mod gui {
                     if n_samples > 0 {
                         let cycles_per_sample = delta / n_samples as f64;
                         let mut toggle_idx = 0usize;
-                        // Hoist volume scale out of the per-sample loop.
                         let volume_scale = self.config.master_volume as f32 / 100.0;
-                        let mut locked = buf.lock().unwrap();
+
+                        // Synthesize samples into a lock-free scratch buffer first,
+                        // then push them to the ring buffer under a single lock.
+                        // Keeps the audio callback thread from waiting through a
+                        // long sample loop (~735 iterations at 44.1 kHz / 60 fps).
+                        self.speaker_scratch.clear();
+                        self.speaker_scratch.reserve(n_samples);
 
                         for i in 0..n_samples {
                             let sample_end =
                                 start_cycle as f64 + (i + 1) as f64 * cycles_per_sample;
 
-                            // Apply every toggle whose cycle falls within this sample.
-                            // On each toggle: reset the DC filter (matches ResetDCFilter()).
                             while toggle_idx < toggles.len()
                                 && (toggles[toggle_idx] as f64) <= sample_end
                             {
@@ -1106,12 +1208,8 @@ mod gui {
                                 toggle_idx += 1;
                             }
 
-                            // Raw square wave ±0.5
                             let raw = if self.speaker_state { 0.5f32 } else { -0.5f32 };
 
-                            // DC filter: mirrors DCFilter() in Speaker.cpp.
-                            // Passes full amplitude for ~250 ms after last toggle,
-                            // then linearly fades to zero over ~744 ms.
                             let out = if self.dc_filter_ctr == 0 {
                                 0.0f32
                             } else if self.dc_filter_ctr >= 32_768 {
@@ -1123,8 +1221,13 @@ mod gui {
                                 raw * gain
                             };
 
+                            self.speaker_scratch.push(out * volume_scale);
+                        }
+
+                        let mut locked = buf.lock().unwrap();
+                        for s in &self.speaker_scratch {
                             if locked.len() < AUDIO_BUF_MAX {
-                                locked.push_back(out * volume_scale);
+                                locked.push_back(*s);
                             }
                         }
                     }
@@ -1141,13 +1244,14 @@ mod gui {
                     (self.config.emulation_speed.max(1) as f64 * 102_300.0 / 60.0) as u64;
                 let n_samples = (sr as usize) / 60;
                 if n_samples > 0 {
-                    let mut ensoniq_buf = vec![0.0f32; n_samples];
+                    self.ensoniq_scratch.clear();
+                    self.ensoniq_scratch.resize(n_samples, 0.0f32);
                     iigs.bus
                         .ensoniq
-                        .fill_audio(&mut ensoniq_buf, sr, delta_cycles);
+                        .fill_audio(&mut self.ensoniq_scratch, sr, delta_cycles);
 
                     let mut locked = buf.lock().unwrap();
-                    for &sample in &ensoniq_buf {
+                    for &sample in &self.ensoniq_scratch {
                         if locked.len() < AUDIO_BUF_MAX {
                             locked.push_back(sample * volume_scale * 0.5);
                         }
@@ -1200,9 +1304,10 @@ mod gui {
                 // Record the last N samples (approximate frame's worth).
                 let n = (self.audio_sample_rate as usize / 60).min(locked.len());
                 let start = locked.len().saturating_sub(n);
-                let chunk: Vec<f32> = locked.range(start..).copied().collect();
+                self.wav_scratch.clear();
+                self.wav_scratch.extend(locked.range(start..).copied());
                 drop(locked);
-                let _ = rec.write_samples(&chunk);
+                let _ = rec.write_samples(&self.wav_scratch);
             }
 
             // ── Collect input events ──────────────────────────────────────────
@@ -1783,7 +1888,7 @@ mod gui {
             // Screenshot: save framebuffer as BMP (triggered by F12).
             if take_screenshot && !in_logo_mode {
                 self.render_apple2(); // ensure latest frame
-                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+                save_screenshot(self.fb.pixels_as_bytes(), SCREEN_W, SCREEN_H);
             }
 
             // Save / load emulator state (F11 / Shift+F11).
@@ -1886,8 +1991,10 @@ mod gui {
                     magnification: egui::TextureFilter::Nearest,
                     minification: egui::TextureFilter::Nearest,
                 };
-                let image =
-                    ColorImage::from_rgba_unmultiplied([SCREEN_W, SCREEN_H], &self.pixel_buf);
+                let image = ColorImage::from_rgba_unmultiplied(
+                    [SCREEN_W, SCREEN_H],
+                    self.fb.pixels_as_bytes(),
+                );
                 if let Some(t) = &mut self.texture {
                     t.set(image, tex_opts);
                 } else {
@@ -3422,48 +3529,64 @@ mod gui {
             }
             if act_load_disk1 {
                 let start_dir = self.config.last_disk_dir.as_deref();
-                if let Some(path) = open_disk_dialog("Load Disk 1", start_dir)
-                    && let Ok(data) = std::fs::read(&path)
-                {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext);
-                    let path_str = path.to_string_lossy().into_owned();
-                    self.config.add_recent_disk(&path_str);
-                    self.config.last_disk1 = Some(path_str);
-                    self.config.last_disk_dir =
-                        path.parent().map(|p| p.to_string_lossy().into_owned());
-                    self.disk1 = Some(path);
-                    self.config.save();
+                if let Some(path) = open_disk_dialog("Load Disk 1", start_dir) {
+                    let loaded = if let Some(ref mut iigs) = self.iigs {
+                        Self::load_iigs_disk(iigs, 0, &path)
+                    } else if let Ok(data) = std::fs::read(&path) {
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext);
+                        true
+                    } else {
+                        false
+                    };
+                    if loaded {
+                        let path_str = path.to_string_lossy().into_owned();
+                        self.config.add_recent_disk(&path_str);
+                        self.config.last_disk1 = Some(path_str);
+                        self.config.last_disk_dir =
+                            path.parent().map(|p| p.to_string_lossy().into_owned());
+                        self.disk1 = Some(path);
+                        self.config.save();
+                    }
                 }
             }
             if act_load_disk2 {
                 let start_dir = self.config.last_disk_dir.as_deref();
-                if let Some(path) = open_disk_dialog("Load Disk 2", start_dir)
-                    && let Ok(data) = std::fs::read(&path)
-                {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext);
-                    let path_str = path.to_string_lossy().into_owned();
-                    self.config.add_recent_disk(&path_str);
-                    self.config.last_disk2 = Some(path_str);
-                    self.config.last_disk_dir =
-                        path.parent().map(|p| p.to_string_lossy().into_owned());
-                    self.disk2 = Some(path);
-                    self.config.save();
+                if let Some(path) = open_disk_dialog("Load Disk 2", start_dir) {
+                    let loaded = if let Some(ref mut iigs) = self.iigs {
+                        Self::load_iigs_disk(iigs, 1, &path)
+                    } else if let Ok(data) = std::fs::read(&path) {
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        self.emu.bus.load_disk(self.disk_slot, 1, &data, &ext);
+                        true
+                    } else {
+                        false
+                    };
+                    if loaded {
+                        let path_str = path.to_string_lossy().into_owned();
+                        self.config.add_recent_disk(&path_str);
+                        self.config.last_disk2 = Some(path_str);
+                        self.config.last_disk_dir =
+                            path.parent().map(|p| p.to_string_lossy().into_owned());
+                        self.disk2 = Some(path);
+                        self.config.save();
+                    }
                 }
             }
             // Load disk from recent list into drive 1
             if let Some(path_str) = act_recent_disk {
                 let path = PathBuf::from(&path_str);
-                if let Ok(data) = std::fs::read(&path) {
+                let loaded = if let Some(ref mut iigs) = self.iigs {
+                    Self::load_iigs_disk(iigs, 0, &path)
+                } else if let Ok(data) = std::fs::read(&path) {
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
@@ -3471,6 +3594,11 @@ mod gui {
                         .to_lowercase();
                     self.emu.bus.load_disk(self.disk_slot, 0, &data, &ext);
                     self.emu.bus.set_disk_path(self.disk_slot, 0, path.clone());
+                    true
+                } else {
+                    false
+                };
+                if loaded {
                     self.config.add_recent_disk(&path_str);
                     self.config.last_disk1 = Some(path_str);
                     self.config.last_disk_dir =
@@ -3568,7 +3696,7 @@ mod gui {
             // Screenshot from menu or F12 key
             if act_screenshot && !in_logo_mode {
                 self.render_apple2();
-                save_screenshot(&self.pixel_buf, SCREEN_W, SCREEN_H);
+                save_screenshot(self.fb.pixels_as_bytes(), SCREEN_W, SCREEN_H);
             }
 
             // ── Drag-and-drop disk insertion ─────────────────────────────
@@ -3587,11 +3715,18 @@ mod gui {
                             .to_lowercase();
                         if disk_exts.iter().any(|&e| e == ext) {
                             let drive = i.min(1); // 0 or 1
-                            if let Ok(data) = std::fs::read(path) {
+                            let loaded = if let Some(ref mut iigs) = self.iigs {
+                                Self::load_iigs_disk(iigs, drive, path)
+                            } else if let Ok(data) = std::fs::read(path) {
                                 self.emu.bus.load_disk(self.disk_slot, drive, &data, &ext);
                                 self.emu
                                     .bus
                                     .set_disk_path(self.disk_slot, drive, path.clone());
+                                true
+                            } else {
+                                false
+                            };
+                            if loaded {
                                 let path_str = path.to_string_lossy().into_owned();
                                 self.config.add_recent_disk(&path_str);
                                 if drive == 0 {
@@ -3630,8 +3765,17 @@ mod gui {
                 self.config.window_y = Some(pos.y as i32);
             }
 
-            // Drive continuous animation at the display refresh rate
-            ctx.request_repaint();
+            // Drive continuous animation at the display refresh rate — but skip
+            // when the debugger has halted execution (Stepping). In that state
+            // nothing is advancing on-screen, so egui can rely on input-driven
+            // repaints, saving CPU while the user inspects state.
+            let needs_repaint = self.emu.mode != apple2_core::emulator::AppMode::Stepping
+                || self.show_settings
+                || self.show_about
+                || self.show_debugger;
+            if needs_repaint {
+                ctx.request_repaint();
+            }
         }
 
         fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

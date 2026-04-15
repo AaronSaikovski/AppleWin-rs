@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Apple IIgs disk loading (SmartPort):** The GUI now routes IIgs disk image
+  loading (drag-and-drop, File→Open, auto-load from config, recent disks) to
+  `iigs.bus.smartport` when an Apple IIgs emulator is active. Supports `.2mg`,
+  `.2img` (2IMG container), `.po`, and `.hdv` (raw ProDOS-order) formats.
+- **SmartPort firmware trap:** Replaces the built-in slot 5 firmware with a
+  custom stub that uses the 65C816 `WDM $FE` instruction to dispatch SmartPort
+  MLI calls directly to `SmartPort::read_block`/`write_block`/status. Enables
+  the IIgs ROM, ProDOS, and GS/OS to access SmartPort disks without needing
+  full hardware register emulation. Implements STATUS, READ BLOCK, WRITE BLOCK,
+  FORMAT, CONTROL, INIT, OPEN, and CLOSE commands.
+- **`Bus816::wdm_trap` trait method:** New bus method with default no-op impl,
+  invoked when the 65C816 executes `WDM $xx`. `IIgsBus` overrides it to handle
+  the SmartPort trap signature (`$FE`).
+- **Apple IIgs SmartPort tests (3 new):** Firmware stub installation, READ BLOCK
+  via trap (verifies data transfer to RAM and return-address advancement),
+  and NO DEVICE error path.
+
+### Performance
+
+- **CPU dispatch hoisting:** The 6502-vs-65C02 dispatch table is now selected
+  once per `Emulator::execute` batch instead of being re-chosen via an
+  `is_65c02` branch on every instruction. The hot loop calls a new
+  `dispatch::step_with_table()` that takes the pre-resolved `&[OpFn; 256]`.
+  `dispatch::step()` is preserved for debugger / single-step callers.
+- **Inlined hot 6502 opcode handlers:** Added `#[inline]` to the ~90 most-
+  executed opcode handlers (all LDA/STA/LDX/LDY/STX/STY addressing modes,
+  immediate ADC/SBC/CMP, all branches, JMP/JSR/RTS, INC/DEC variants,
+  register transfers, flag sets/clears, push/pull, BIT, STZ). Leaves the
+  256-entry dispatch table small enough to stay I-cache-friendly while
+  eliminating prologue/epilogue overhead on the common path.
+- **RGB lores / dlores batched pixel writes:** Replaced per-pixel
+  `set_pixel()` calls in `render_lores` and `render_dlores` (which each do a
+  bounds check per pixel) with `pixels[...].fill(color)` over 14-wide /
+  7-wide contiguous spans. Eliminates ~21 K bounds checks per frame in text
+  display modes and enables SIMD stores on the target CPU.
+
+- **Phase 1 hot-path allocation fixes:** Eliminated several per-frame heap
+  allocations on the rendering and audio paths. The IIgs SHR renderer now reuses
+  a single 640×400 `u32` scratch buffer on `EmulatorApp` instead of
+  `vec![0u32; 640*400]` every frame (~1 MiB per frame saved at 60 FPS). WAV
+  recording reuses a `Vec<f32>` scratch buffer rather than `collect()`ing a
+  fresh chunk per frame. Speaker toggle draining now uses `std::mem::swap`
+  against a reusable scratch `Vec<u64>` on `EmulatorApp`, preserving the bus's
+  preallocated 65 536-entry capacity across frames (previously `std::mem::take`
+  dropped that capacity each frame, forcing a regrow-from-zero). Added
+  safety caps to `Bus::mem_trace` (1 M entries) and `Bus::speaker_toggles` /
+  `Mega2::speaker_toggles` (65 536 entries) to bound worst-case growth. The
+  egui repaint request is now skipped when the debugger has halted execution
+  (`AppMode::Stepping`) with no dialogs open, letting the UI thread idle on
+  input instead of running a 60 Hz redraw loop.
+
+### Added
+
 - **Apple IIgs emulation** (new `apple2-iigs` crate): 65C816 CPU with all 256
   opcodes (emulation + native mode, 8/16-bit registers, 24-bit addressing),
   IIgs memory bus (256KB-8MB RAM, 128-256KB ROM), Mega II IIe compatibility,

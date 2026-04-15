@@ -718,7 +718,13 @@ fn op_41(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 
 // ── 0x42: WDM ──
 fn op_42(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    let _ = cpu.fetch8(bus); // skip signature byte (reserved for future use)
+    let sig = cpu.fetch8(bus);
+    // Allow the bus to handle this as a trap (e.g., SmartPort firmware).
+    // If handled, update A and C flag.
+    if let Some((a, carry)) = bus.wdm_trap(sig, cpu.sp, cpu.pbr, cpu.emulation) {
+        cpu.set_a(a as u16);
+        cpu.flags.set(super::flags816::Flags816::C, carry);
+    }
     0
 }
 
