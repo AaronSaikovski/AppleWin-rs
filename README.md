@@ -228,6 +228,11 @@ Runs 458 tests across all crates:
 - **Save/restore** emulator state (F11 / Shift+F11)
 - **Gamepad support** via gilrs (Xbox, PlayStation, and other controllers)
 - **TOML configuration** with platform-standard paths
+- **Optimized hot paths** — per-instruction dispatch with hoisted 6502/65C02
+  table selection and `#[inline]` on the ~90 most-executed opcode handlers,
+  direct-to-display rendering with no intermediate framebuffer copy,
+  compile-time SHR scale LUTs, and lock-free audio synthesis into reusable
+  scratch buffers for the speaker, Ensoniq DOC, and Mockingboard paths
 
 ---
 

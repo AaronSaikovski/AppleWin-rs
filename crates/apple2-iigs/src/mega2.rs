@@ -11,6 +11,9 @@
 use apple2_core::bus::MemMode;
 use serde::{Deserialize, Serialize};
 
+/// Safety cap on speaker toggle accumulation (matches the IIe bus cap).
+const SPEAKER_TOGGLES_MAX: usize = 65_536;
+
 use crate::shadowing::ShadowReg;
 
 /// Mega II state — IIe-compatible and IIgs-specific soft-switch registers.
@@ -214,7 +217,9 @@ impl Mega2 {
             // ── Speaker ──────────────────────────────────────────────────
             0x30 => {
                 self.speaker_state = !self.speaker_state;
-                self.speaker_toggles.push(cycles);
+                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
+                    self.speaker_toggles.push(cycles);
+                }
                 0x00
             }
 
@@ -366,7 +371,9 @@ impl Mega2 {
             // ── Speaker ──────────────────────────────────────────────────
             0x30 => {
                 self.speaker_state = !self.speaker_state;
-                self.speaker_toggles.push(cycles);
+                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
+                    self.speaker_toggles.push(cycles);
+                }
             }
 
             // ── Border + shadow + speed ──────────────────────────────────

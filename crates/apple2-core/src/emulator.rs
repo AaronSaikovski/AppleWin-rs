@@ -59,6 +59,15 @@ impl Emulator {
         let target = start + cycles;
         let mut next_update = start + 17_030; // one NTSC frame worth of cycles
 
+        // Pick the dispatch table once rather than re-branching on is_65c02
+        // for every instruction — the CPU variant is effectively static for
+        // the duration of this execute() call.
+        let table: &[dispatch::OpFn; 256] = if self.cpu.is_65c02 {
+            &dispatch::DISPATCH_65C02
+        } else {
+            &dispatch::DISPATCH_6502
+        };
+
         while self.cpu.cycles < target {
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
@@ -98,7 +107,7 @@ impl Emulator {
                 self.cpu.irq_defer = false;
             }
 
-            dispatch::step(&mut self.cpu, &mut self.bus);
+            dispatch::step_with_table(&mut self.cpu, &mut self.bus, table);
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
             // the last cycle of this opcode → defer by one opcode (if I flag is clear).

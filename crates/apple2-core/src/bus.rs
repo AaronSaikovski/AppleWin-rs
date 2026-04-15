@@ -8,6 +8,18 @@ use crate::model::Apple2Model;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
+// ── Capacity caps for bounded hot-path buffers ───────────────────────────────
+
+/// Maximum entries kept in `mem_trace` before new trace records are dropped.
+/// Prevents unbounded growth when debugger tracing is left enabled for long
+/// runs; 1M entries ≈ 4 MiB and covers seconds of emulation.
+const MEM_TRACE_MAX: usize = 1_000_000;
+
+/// Maximum speaker toggles retained between frame boundaries. One frame at
+/// full speed cannot realistically produce anywhere near this many toggles;
+/// the cap exists purely as a safety valve against pathological programs.
+const SPEAKER_TOGGLES_MAX: usize = 65_536;
+
 // ── Memory mode flags ─────────────────────────────────────────────────────────
 
 bitflags! {
@@ -569,7 +581,7 @@ impl Bus {
             PageSrc::Io => self.io_read(addr, cycles),
             PageSrc::FloatingBus => self.floating_bus,
         };
-        if self.mem_trace_enabled {
+        if self.mem_trace_enabled && self.mem_trace.len() < MEM_TRACE_MAX {
             self.mem_trace.push((addr, val, false));
         }
         val
@@ -578,7 +590,7 @@ impl Bus {
     /// Write a byte, triggering I/O side-effects.
     #[inline]
     pub fn write(&mut self, addr: u16, val: u8, cycles: u64) {
-        if self.mem_trace_enabled {
+        if self.mem_trace_enabled && self.mem_trace.len() < MEM_TRACE_MAX {
             self.mem_trace.push((addr, val, true));
         }
         let page = (addr >> 8) as usize;
@@ -648,10 +660,11 @@ impl Bus {
 
     // ── I/O dispatch ($C000–$CFFF) ───────────────────────────────────────────
 
+    #[inline]
     fn io_read(&mut self, addr: u16, cycles: u64) -> u8 {
         let lo = addr & 0xFF;
         if addr < 0xC100 {
-            // $C000–$C0FF: soft switches
+            // $C000–$C0FF: soft switches — the very hot path.
             self.soft_switch_read(lo as u8, cycles)
         } else {
             // $C100–$CFFF: peripheral slot ROM
@@ -664,6 +677,7 @@ impl Bus {
         }
     }
 
+    #[inline]
     fn io_write(&mut self, addr: u16, val: u8, cycles: u64) {
         let lo = addr & 0xFF;
         if addr < 0xC100 {
@@ -696,7 +710,9 @@ impl Bus {
             }
             0x30 => {
                 self.speaker_state = !self.speaker_state;
-                self.speaker_toggles.push(cycles);
+                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
+                    self.speaker_toggles.push(cycles);
+                }
                 self.floating_bus
             }
             0x11 => self.flag_byte(MemMode::MF_BANK2),
@@ -1011,7 +1027,9 @@ impl Bus {
             }
             0x30 => {
                 self.speaker_state = !self.speaker_state;
-                self.speaker_toggles.push(cycles);
+                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
+                    self.speaker_toggles.push(cycles);
+                }
             }
             // Text/graphics + mixed mode soft switches — video-only, no paging side-effects
             0x50 => {

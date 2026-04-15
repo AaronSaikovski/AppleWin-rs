@@ -28,6 +28,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Direct-to-display rendering:** Removed the intermediate `pixel_buf: Vec<u8>`
+  on `EmulatorApp` and now source the egui texture, BMP screenshot writer, and
+  SHR scaler directly from `Framebuffer::pixels_as_bytes()`. This eliminates a
+  ~860 KB `copy_from_slice(fb → pixel_buf)` per frame (~52 MB/s at 60 FPS) and
+  drops one allocation from `EmulatorApp::new_inner`.
+- **SHR scale lookup tables:** Precomputed `SHR_SRC_X: [u16; 560]` and
+  `SHR_SRC_Y: [u16; 384]` at compile time (`const` with a `while`-loop
+  initializer) and reference them in `scale_shr_to_framebuffer`. Removes the
+  `dst_x * src_w / dst_w` division/modulo from every one of the ~215 K inner-
+  loop iterations per SHR frame.
+- **Speaker / Ensoniq audio drain into reusable scratch:** Speaker synthesis
+  now fills a reusable `speaker_scratch: Vec<f32>` without holding the ring-
+  buffer mutex, then bulk-pushes all samples under a single lock. Ensoniq DOC
+  path replaces its per-frame `vec![0.0; n]` with a preallocated
+  `ensoniq_scratch`. Shrinks the critical section the audio callback thread
+  can wait on from ~735 iterations to a tight memcpy-style loop.
+- **Card slot dispatch hot-path:** `CardManager::slot` and `slot_mut` are
+  `#[inline]` and use an explicit `slot < NUM_SLOTS` range check (replacing
+  the `.get(slot)?` pattern) so the bounds check collapses at the call site.
+  `Bus::io_read` / `io_write` are `#[inline]` so LLVM can see through to the
+  soft-switch dispatch on `$C000–$C0FF`, the hottest address range.
 - **CPU dispatch hoisting:** The 6502-vs-65C02 dispatch table is now selected
   once per `Emulator::execute` batch instead of being re-chosen via an
   `is_65c02` branch on every instruction. The hot loop calls a new

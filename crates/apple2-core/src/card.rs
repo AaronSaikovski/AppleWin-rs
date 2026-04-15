@@ -254,13 +254,25 @@ impl CardManager {
     }
 
     /// Immutable access to a slot.
+    #[inline]
     pub fn slot(&self, slot: usize) -> Option<&dyn Card> {
-        self.slots.get(slot)?.as_deref()
+        // Explicit range check lets the branch predictor learn the common
+        // in-range path and allows the indexing below to elide its own check.
+        if slot < NUM_SLOTS {
+            self.slots[slot].as_deref()
+        } else {
+            None
+        }
     }
 
     /// Mutable access to a slot.
+    #[inline]
     pub fn slot_mut(&mut self, slot: usize) -> Option<&mut dyn Card> {
-        self.slots.get_mut(slot)?.as_deref_mut()
+        if slot < NUM_SLOTS {
+            self.slots[slot].as_deref_mut()
+        } else {
+            None
+        }
     }
 
     /// Mutable access to the aux slot.
