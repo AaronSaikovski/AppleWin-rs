@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via trap (verifies data transfer to RAM and return-address advancement),
   and NO DEVICE error path.
 
+### Tests
+
+- **Performance regression guards (6 new):** `step_with_table_equivalent_to_step_6502`
+  and `step_with_table_equivalent_to_step_65c02` validate that the hoisted
+  dispatch path produces identical register / memory / cycle state to the
+  original `dispatch::step` for both CPU variants. `speaker_toggles_capped_at_65536`
+  asserts the 65 536-entry ceiling on the speaker toggle ring-buffer guard.
+  `slot_out_of_range_returns_none`, `slot_mut_out_of_range_returns_none`, and
+  `slot_empty_in_range_returns_none` pin down `CardManager::slot` / `slot_mut`
+  behaviour after Phase 2.3 replaced `get(slot)?` with an explicit
+  `slot < NUM_SLOTS` range check.
+
 ### Performance
 
 - **Direct-to-display rendering:** Removed the intermediate `pixel_buf: Vec<u8>`

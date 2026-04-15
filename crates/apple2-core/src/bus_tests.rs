@@ -395,6 +395,22 @@ fn speaker_toggle_on_write_c030() {
     assert_eq!(bus.speaker_toggles[0], 50);
 }
 
+/// The speaker-toggle cap prevents pathological unbounded growth.  Toggles
+/// past the 65 536-entry ceiling are dropped; the speaker_state still
+/// flips so audio behaviour is preserved.
+#[test]
+fn speaker_toggles_capped_at_65536() {
+    let mut bus = make_bus();
+    // Push well past the cap.
+    for i in 0..70_000u64 {
+        bus.read(0xC030, i);
+    }
+    assert_eq!(bus.speaker_toggles.len(), 65_536);
+    // speaker_state is the XOR of the number of toggles attempted (all flips
+    // still happen even after the buffer stops accepting new timestamps).
+    assert!(!bus.speaker_state); // 70 000 toggles = even count → back to false
+}
+
 // ===========================================================================
 // Video mode switches
 // ===========================================================================

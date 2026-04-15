@@ -2148,3 +2148,70 @@ fn op_stp(cpu: &mut Cpu, _bus: &mut Bus) -> u8 {
     cpu.jammed = true;
     0
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Apple2Model;
+
+    fn make_cpu_bus(is_65c02: bool) -> (Cpu, Bus) {
+        let cpu = Cpu::new(is_65c02);
+        let bus = Bus::new(vec![0u8; 16384], Apple2Model::AppleIIe);
+        (cpu, bus)
+    }
+
+    /// `step_with_table` must behave identically to `step` for both CPU variants.
+    /// Guards the Phase 2.2 dispatch-hoist optimization against regression.
+    #[test]
+    fn step_with_table_equivalent_to_step_6502() {
+        step_with_table_equivalence(false);
+    }
+
+    #[test]
+    fn step_with_table_equivalent_to_step_65c02() {
+        step_with_table_equivalence(true);
+    }
+
+    fn step_with_table_equivalence(is_65c02: bool) {
+        // A short program exercising LDA imm / ADC imm / STA abs — three of
+        // the hottest dispatch handlers.
+        let program: [u8; 7] = [
+            0xA9, 0x20, // LDA #$20
+            0x69, 0x05, // ADC #$05
+            0x8D, 0x00, 0x30, // STA $3000
+        ];
+
+        let run = |use_table: bool| -> (u8, u8, u8, u8, u64) {
+            let (mut cpu, mut bus) = make_cpu_bus(is_65c02);
+            cpu.pc = 0x0300;
+            for (i, &b) in program.iter().enumerate() {
+                bus.write_raw(0x0300 + i as u16, b);
+            }
+            cpu.cycles = 0;
+
+            if use_table {
+                let table: &[OpFn; 256] = if is_65c02 {
+                    &DISPATCH_65C02
+                } else {
+                    &DISPATCH_6502
+                };
+                for _ in 0..3 {
+                    step_with_table(&mut cpu, &mut bus, table);
+                }
+            } else {
+                for _ in 0..3 {
+                    step(&mut cpu, &mut bus);
+                }
+            }
+            (cpu.a, cpu.x, cpu.y, bus.read_raw(0x3000), cpu.cycles)
+        };
+
+        let direct = run(false);
+        let via_table = run(true);
+        assert_eq!(direct, via_table, "step and step_with_table diverged");
+        assert_eq!(direct.0, 0x25, "LDA+ADC result");
+        assert_eq!(direct.3, 0x25, "STA target");
+    }
+}
