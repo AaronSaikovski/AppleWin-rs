@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-05-08
+
+### Fixed
+
+- **GitHub Actions: Publish macOS DMG to Releases.** Added a `publish-dmg-macos` job
+  to the CI workflow that signs the app with `codesign` and packages a notarized
+  `.dmg` into GitHub Releases artifacts.
+
 ## [Unreleased]
 
 ### Changed

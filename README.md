@@ -14,6 +14,37 @@ A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-f
 
 Pre-built binaries for Windows, macOS, and Linux are available on the [Releases](https://github.com/AaronSaikovski/AppleWin-rs/releases) page.
 
+### macOS DMG
+
+Download the `.dmg` file matching your Mac's architecture (`apple-silicon` for M-series chips, `intel` for Intel-based Macs).
+
+**Running the app:**
+
+1. Double-click the `.dmg` file to mount it
+2. Drag the `AppleWin.app` icon into your `Applications` folder
+3. Launch from `Applications` or Finder
+
+**If you see "AppleWin can't be opened" or "verified developer" warning:**
+
+macOS Gatekeeper blocks unsigned apps by default. To open:
+
+1. Right-click (or Control-click) the `AppleWin.app` in `Applications`
+2. Select **Open** from the context menu
+3. Click **Open** in the confirmation dialog
+
+Alternatively, run from Terminal:
+
+```sh
+# Allow from System Settings:
+# System Settings → Privacy & Security → scroll to "AppleWin" → Open
+
+# Or bypass via Terminal (one-time):
+xattr -d com.apple.quarantine ~/Applications/AppleWin.app
+
+# Or from the mounted DMG directly:
+xattr -d com.apple.quarantine AppleWin.app
+```
+
 ---
 
 ## Apple II Models Supported
