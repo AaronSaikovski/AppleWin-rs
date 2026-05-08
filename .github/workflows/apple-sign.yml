@@ -1,82 +1,82 @@
-name: Build and Sign macOS App (Ad-hoc) - Rust
+name: Build macOS Apps (Ad-hoc)
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build-macos:
+  build-universal-app:
+    name: Build macOS .app (Ad-hoc)
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: apple-silicon
+            bin_dir: aarch64-apple-darwin/release
+          - target: x86_64-apple-darwin
+            arch: intel
+            bin_dir: x86_64-apple-darwin/release
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-aarch64-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-aarch64-cargo-
+          key: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --target aarch64-apple-darwin
+      - name: Build release binary
+        run: cargo build --release --package applewin --target ${{ matrix.target }}
 
-      - name: Create app bundle
+      - name: Create .app bundle
         run: |
-          APP_NAME="MyApp"
-          BUNDLE="$APP_NAME.app"
-          BINARY_NAME="my_app"   # must match your [[bin]] name in Cargo.toml
-
+          BUNDLE="applewin-${{ matrix.arch }}.app"
           mkdir -p "$BUNDLE/Contents/MacOS"
           mkdir -p "$BUNDLE/Contents/Resources"
-
-          cp "target/aarch64-apple-darwin/release/$BINARY_NAME" \
-             "$BUNDLE/Contents/MacOS/$APP_NAME"
-          chmod +x "$BUNDLE/Contents/MacOS/$APP_NAME"
-
+          cp "target/${{ matrix.bin_dir }}/applewin" \
+                 "$BUNDLE/Contents/MacOS/applewin"
+          chmod +x "$BUNDLE/Contents/MacOS/applewin"
           cat > "$BUNDLE/Contents/Info.plist" << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key>         <string>MyApp</string>
-            <key>CFBundleIdentifier</key>         <string>com.yourcompany.myapp</string>
-            <key>CFBundleName</key>               <string>MyApp</string>
-            <key>CFBundleVersion</key>            <string>1.0.0</string>
-            <key>CFBundleShortVersionString</key> <string>1.0.0</string>
-            <key>CFBundlePackageType</key>        <string>APPL</string>
-            <key>LSMinimumSystemVersion</key>     <string>12.0</string>
-          </dict>
-          </plist>
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+              "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleExecutable</key>              <string>applewin</string>
+              <key>CFBundleIdentifier</key>              <string>rs.applewin.emulator</string>
+              <key>CFBundleName</key>                    <string>AppleWin</string>
+              <key>CFBundleVersion</key>                 <string>${{ github.ref_name }}</string>
+              <key>CFBundleShortVersionString</key>      <string>${{ github.ref_name }}</string>
+              <key>CFBundlePackageType</key>             <string>APPL</string>
+              <key>LSMinimumSystemVersion</key>          <string>12.0</string>
+            </dict>
+            </plist>
           EOF
 
       - name: Ad-hoc sign app bundle
         run: |
-          codesign --force --deep -s - MyApp.app
-          codesign --verify --verbose MyApp.app
+          codesign --force --deep -s - "applewin-${{ matrix.arch }}.app"
+          codesign --verify --verbose "applewin-${{ matrix.arch }}.app"
 
       - name: Package as DMG
         run: |
-          hdiutil create -volname "MyApp" \
-            -srcfolder MyApp.app \
-            -ov -format UDZO \
-            MyApp-apple-silicon.dmg
+          hdiutil create -volname "AppleWin ${{ matrix.arch }}" \
+                 -srcfolder "applewin-${{ matrix.arch }}.app" \
+                 -ov -format UDZO \
+                 "applewin-${{ matrix.arch }}.dmg"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MyApp-apple-silicon
-          path: MyApp-apple-silicon.dmg
-          retention-days: 7
+          name: applewin-${{ matrix.arch }}
+          path: applewin-${{ matrix.arch }}.dmg
+          retention-days: 30
