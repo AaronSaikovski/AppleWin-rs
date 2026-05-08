@@ -49,7 +49,7 @@ The project is a Cargo workspace with 6 crates, each with a distinct responsibil
 |-------|---------|
 | `crates/apple2-core` | Pure emulation engine — CPU, memory bus, expansion cards. **Zero OS dependencies.** |
 | `crates/apple2-iigs` | Apple IIgs emulation — 65C816 CPU, IIgs memory bus, Mega II, SHR video, Ensoniq DOC, ADB, SmartPort |
-| `crates/apple2-audio` | Audio synthesis (speaker, AY-8910/Mockingboard, SSI263 speech) |
+| `crates/apple2-audio` | Audio synthesis (speaker, AY-8910/Mockingboard, SSI263 speec1 |
 | `crates/apple2-video` | Video rendering pipeline (NTSC, RGB, hi-res, text modes) |
 | `crates/apple2-debugger` | 6502 disassembler, breakpoints, symbol table — no GUI dependencies |
 | `crates/applewin` | Main application: egui/eframe GUI, audio I/O (cpal), gamepad (gilrs), TOML config |

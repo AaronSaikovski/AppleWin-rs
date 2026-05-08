@@ -247,14 +247,8 @@ impl Mega2 {
             0x41 => self.mega2_int,
 
             // ── Diagnostic speed ─────────────────────────────────────────
-            0x46 => {
-                // Bit 0: 1 = fast, 0 = slow (read-only)
-                if self.speed_reg & 0x80 != 0 {
-                    0x01
-                } else {
-                    0x00
-                }
-            }
+            0x46 if self.speed_reg & 0x80 != 0 => 0x01,
+            0x46 => 0x00,
 
             // ── Game I/O (paddles/buttons) ───────────────────────────────
             0x61 => 0x00,        // PB0 (open apple) - not pressed

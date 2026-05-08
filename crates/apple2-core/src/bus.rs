@@ -965,17 +965,13 @@ impl Bus {
                 self.mode.insert(MemMode::MF_AUXWRITE);
                 self.rebuild_page_tables();
             }
-            0x06 => {
-                if !self.model.is_iic() {
-                    self.mode.remove(MemMode::MF_INTCXROM);
-                    self.rebuild_page_tables();
-                }
+            0x06 if !self.model.is_iic() => {
+                self.mode.remove(MemMode::MF_INTCXROM);
+                self.rebuild_page_tables();
             }
-            0x07 => {
-                if !self.model.is_iic() {
-                    self.mode.insert(MemMode::MF_INTCXROM);
-                    self.rebuild_page_tables();
-                }
+            0x07 if !self.model.is_iic() => {
+                self.mode.insert(MemMode::MF_INTCXROM);
+                self.rebuild_page_tables();
             }
             0x08 => {
                 self.mode.remove(MemMode::MF_ALTZP);
@@ -985,17 +981,13 @@ impl Bus {
                 self.mode.insert(MemMode::MF_ALTZP);
                 self.rebuild_page_tables();
             }
-            0x0A => {
-                if !self.model.is_iic() {
-                    self.mode.remove(MemMode::MF_SLOTC3ROM);
-                    self.rebuild_page_tables();
-                }
+            0x0A if !self.model.is_iic() => {
+                self.mode.remove(MemMode::MF_SLOTC3ROM);
+                self.rebuild_page_tables();
             }
-            0x0B => {
-                if !self.model.is_iic() {
-                    self.mode.insert(MemMode::MF_SLOTC3ROM);
-                    self.rebuild_page_tables();
-                }
+            0x0B if !self.model.is_iic() => {
+                self.mode.insert(MemMode::MF_SLOTC3ROM);
+                self.rebuild_page_tables();
             }
             // $C00C/$C00D: CLR/SET80VID — 80-column display mode
             0x0C => {
@@ -1012,10 +1004,8 @@ impl Bus {
                 self.mode.insert(MemMode::MF_ALTCHAR);
             }
             // $C028: ROMSWITCH — toggle ROM bank on Apple IIc.
-            0x28 => {
-                if self.model.is_iic() {
-                    self.mode.toggle(MemMode::MF_ALTROM0);
-                }
+            0x28 if self.model.is_iic() => {
+                self.mode.toggle(MemMode::MF_ALTROM0);
             }
             // $C070: paddle strobe — reset one-shot timers
             0x70 => {
@@ -1044,29 +1034,21 @@ impl Bus {
             0x53 => {
                 self.mode.insert(MemMode::MF_MIXED);
             }
-            0x54 => {
-                if self.mode.contains(MemMode::MF_PAGE2) {
-                    self.mode.remove(MemMode::MF_PAGE2);
-                    self.rebuild_page_tables();
-                }
+            0x54 if self.mode.contains(MemMode::MF_PAGE2) => {
+                self.mode.remove(MemMode::MF_PAGE2);
+                self.rebuild_page_tables();
             }
-            0x55 => {
-                if !self.mode.contains(MemMode::MF_PAGE2) {
-                    self.mode.insert(MemMode::MF_PAGE2);
-                    self.rebuild_page_tables();
-                }
+            0x55 if !self.mode.contains(MemMode::MF_PAGE2) => {
+                self.mode.insert(MemMode::MF_PAGE2);
+                self.rebuild_page_tables();
             }
-            0x56 => {
-                if self.mode.contains(MemMode::MF_HIRES) {
-                    self.mode.remove(MemMode::MF_HIRES);
-                    self.rebuild_page_tables();
-                }
+            0x56 if self.mode.contains(MemMode::MF_HIRES) => {
+                self.mode.remove(MemMode::MF_HIRES);
+                self.rebuild_page_tables();
             }
-            0x57 => {
-                if !self.mode.contains(MemMode::MF_HIRES) {
-                    self.mode.insert(MemMode::MF_HIRES);
-                    self.rebuild_page_tables();
-                }
+            0x57 if !self.mode.contains(MemMode::MF_HIRES) => {
+                self.mode.insert(MemMode::MF_HIRES);
+                self.rebuild_page_tables();
             }
             // $C058–$C05D: annunciators 0–2
             0x58 => {
@@ -1089,15 +1071,11 @@ impl Bus {
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF
             // On the IIc, these only control DHIRES when IOUDIS is set.
-            0x5E => {
-                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
-                    self.mode.insert(MemMode::MF_DHIRES);
-                }
+            0x5E if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) => {
+                self.mode.insert(MemMode::MF_DHIRES);
             }
-            0x5F => {
-                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
-                    self.mode.remove(MemMode::MF_DHIRES);
-                }
+            0x5F if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) => {
+                self.mode.remove(MemMode::MF_DHIRES);
             }
             // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)
             0x7E => {

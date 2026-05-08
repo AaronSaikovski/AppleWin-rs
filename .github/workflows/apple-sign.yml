@@ -1,0 +1,82 @@
+name: Build macOS Apps (Ad-hoc)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-universal-app:
+    name: Build macOS .app (Ad-hoc)
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: apple-silicon
+            bin_dir: aarch64-apple-darwin/release
+          - target: x86_64-apple-darwin
+            arch: intel
+            bin_dir: x86_64-apple-darwin/release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --package applewin --target ${{ matrix.target }}
+
+      - name: Create .app bundle
+        run: |
+          BUNDLE="applewin-${{ matrix.arch }}.app"
+          mkdir -p "$BUNDLE/Contents/MacOS"
+          mkdir -p "$BUNDLE/Contents/Resources"
+          cp "target/${{ matrix.bin_dir }}/applewin" \
+                 "$BUNDLE/Contents/MacOS/applewin"
+          chmod +x "$BUNDLE/Contents/MacOS/applewin"
+          cat > "$BUNDLE/Contents/Info.plist" << 'EOF'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+              "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleExecutable</key>              <string>applewin</string>
+              <key>CFBundleIdentifier</key>              <string>rs.applewin.emulator</string>
+              <key>CFBundleName</key>                    <string>AppleWin</string>
+              <key>CFBundleVersion</key>                 <string>${{ github.ref_name }}</string>
+              <key>CFBundleShortVersionString</key>      <string>${{ github.ref_name }}</string>
+              <key>CFBundlePackageType</key>             <string>APPL</string>
+              <key>LSMinimumSystemVersion</key>          <string>12.0</string>
+            </dict>
+            </plist>
+          EOF
+
+      - name: Ad-hoc sign app bundle
+        run: |
+          codesign --force --deep -s - "applewin-${{ matrix.arch }}.app"
+          codesign --verify --verbose "applewin-${{ matrix.arch }}.app"
+
+      - name: Package as DMG
+        run: |
+          hdiutil create -volname "AppleWin ${{ matrix.arch }}" \
+                 -srcfolder "applewin-${{ matrix.arch }}.app" \
+                 -ov -format UDZO \
+                 "applewin-${{ matrix.arch }}.dmg"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: applewin-${{ matrix.arch }}
+          path: applewin-${{ matrix.arch }}.dmg
+          retention-days: 30

@@ -64,7 +64,7 @@ pub fn add_file(
 ) -> Result<(), ProDosError> {
     // ── Locate root directory ──────────────────────────────────────────────
     let base_offset = get_path_offset("/").unwrap(); // always Some for "/"
-    let dir_block = dir_block_of(base_offset) as u32;
+    let dir_block = dir_block_of(base_offset);
 
     let mut vh = get_volume_header(image, dir_block);
 

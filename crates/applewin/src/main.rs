@@ -1552,15 +1552,13 @@ mod gui {
                 if let Some(ref mut gilrs) = self.gilrs {
                     while let Some(ev) = gilrs.next_event() {
                         match ev.event {
-                            gilrs::EventType::Connected => {
-                                if self.active_gamepad.is_none() {
-                                    self.active_gamepad = Some(ev.id);
-                                }
+                            gilrs::EventType::Connected if self.active_gamepad.is_none() => {
+                                self.active_gamepad = Some(ev.id);
                             }
-                            gilrs::EventType::Disconnected => {
-                                if self.active_gamepad == Some(ev.id) {
-                                    self.active_gamepad = gilrs.gamepads().next().map(|(id, _)| id);
-                                }
+                            gilrs::EventType::Disconnected
+                                if self.active_gamepad == Some(ev.id) =>
+                            {
+                                self.active_gamepad = gilrs.gamepads().next().map(|(id, _)| id);
                             }
                             _ => {}
                         }
