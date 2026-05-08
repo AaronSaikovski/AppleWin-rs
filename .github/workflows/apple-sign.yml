@@ -45,6 +45,26 @@ jobs:
           cp "target/${{ matrix.bin_dir }}/applewin" \
                  "$BUNDLE/Contents/MacOS/applewin"
           chmod +x "$BUNDLE/Contents/MacOS/applewin"
+          # Generate .icns from PNG
+           ICONSET="$BUNDLE/Contents/Resources/AppIcon.iconset"
+           mkdir -p "$ICONSET"
+           sips -z 16 16 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_16x16.png"
+           sips -z 32 32 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_32x32.png"
+           sips -z 48 48 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_48x48.png"
+           sips -z 64 64 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_64x64.png"
+           sips -z 128 128 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_128x128.png"
+           sips -z 256 256 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_256x256.png"
+           sips -z 512 512 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_512x512.png"
+           sips -z 1024 1024 "crates/applewin/icons/AppleII.png" \
+              | xargs -I {} cp "{}" "$ICONSET/icon_1024x1024.png"
+           iconutil -c icns "$ICONSET" -o "$BUNDLE/Contents/Resources/AppIcon.icns"
           cat > "$BUNDLE/Contents/Info.plist" << 'EOF'
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -57,6 +77,7 @@ jobs:
               <key>CFBundleVersion</key>                 <string>${{ github.ref_name }}</string>
               <key>CFBundleShortVersionString</key>      <string>${{ github.ref_name }}</string>
               <key>CFBundlePackageType</key>             <string>APPL</string>
+              <key>CFBundleIconFile</key>             <string>AppIcon.icns</string>
               <key>LSMinimumSystemVersion</key>          <string>12.0</string>
             </dict>
             </plist>
