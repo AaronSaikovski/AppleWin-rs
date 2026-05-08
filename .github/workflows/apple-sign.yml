@@ -24,57 +24,57 @@ jobs:
             bin_dir: x86_64-apple-darwin/release
 
     steps:
-       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-       - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-       - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-       - name: Build release binary
+      - name: Build release binary
         run: cargo build --release --package applewin --target ${{ matrix.target }}
 
-       - name: Create .app bundle
+      - name: Create .app bundle
         run: |
           BUNDLE="applewin-${{ matrix.arch }}.app"
           mkdir -p "$BUNDLE/Contents/MacOS"
           mkdir -p "$BUNDLE/Contents/Resources"
           cp "target/${{ matrix.bin_dir }}/applewin" \
-                   "$BUNDLE/Contents/MacOS/applewin"
+                 "$BUNDLE/Contents/MacOS/applewin"
           chmod +x "$BUNDLE/Contents/MacOS/applewin"
           cat > "$BUNDLE/Contents/Info.plist" << 'EOF'
-             <?xml version="1.0" encoding="UTF-8"?>
-             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-               "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-             <plist version="1.0">
-             <dict>
-               <key>CFBundleExecutable</key>               <string>applewin</string>
-               <key>CFBundleIdentifier</key>               <string>rs.applewin.emulator</string>
-               <key>CFBundleName</key>                     <string>AppleWin</string>
-               <key>CFBundleVersion</key>                  <string>${{ github.ref_name }}</string>
-               <key>CFBundleShortVersionString</key>       <string>${{ github.ref_name }}</string>
-               <key>CFBundlePackageType</key>              <string>APPL</string>
-               <key>LSMinimumSystemVersion</key>           <string>12.0</string>
-             </dict>
-             </plist>
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+              "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleExecutable</key>              <string>applewin</string>
+              <key>CFBundleIdentifier</key>              <string>rs.applewin.emulator</string>
+              <key>CFBundleName</key>                    <string>AppleWin</string>
+              <key>CFBundleVersion</key>                 <string>${{ github.ref_name }}</string>
+              <key>CFBundleShortVersionString</key>      <string>${{ github.ref_name }}</string>
+              <key>CFBundlePackageType</key>             <string>APPL</string>
+              <key>LSMinimumSystemVersion</key>          <string>12.0</string>
+            </dict>
+            </plist>
           EOF
 
-       - name: Ad-hoc sign app bundle
+      - name: Ad-hoc sign app bundle
         run: |
           codesign --force --deep -s - "applewin-${{ matrix.arch }}.app"
           codesign --verify --verbose "applewin-${{ matrix.arch }}.app"
 
-       - name: Package as DMG
+      - name: Package as DMG
         run: |
           hdiutil create -volname "AppleWin ${{ matrix.arch }}" \
-                  -srcfolder "applewin-${{ matrix.arch }}.app" \
-                  -ov -format UDZO \
-                  "applewin-${{ matrix.arch }}.dmg"
+                 -srcfolder "applewin-${{ matrix.arch }}.app" \
+                 -ov -format UDZO \
+                 "applewin-${{ matrix.arch }}.dmg"
 
-       - name: Upload DMG artifact
+      - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: applewin-${{ matrix.arch }}
@@ -88,22 +88,22 @@ jobs:
     permissions:
       contents: write
     steps:
-       - name: Download DMG artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: applewin-*
-          merge-multiple: true
-          path: dmg
+        - name: Download DMG artifacts
+          uses: actions/download-artifact@v4
+          with:
+            pattern: applewin-*
+            merge-multiple: true
+            path: dmg
 
-       - name: Generate checksums
-        run: |
-          cd dmg
-          sha256sum * > SHA256SUMS.txt
+        - name: Generate checksums
+          run: |
+            cd dmg
+            sha256sum * > SHA256SUMS.txt
 
-       - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dmg/*
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+        - name: Create release
+          uses: softprops/action-gh-release@v2
+          with:
+            files: dmg/*
+            generate_release_notes: true
+            draft: false
+            prerelease: ${{ contains(github.ref_name, '-') }}
