@@ -51,7 +51,7 @@ jobs:
               "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0">
             <dict>
-              <key>CFBundleExecutable</key>              <string>applewin-rs</string>
+              <key>CFBundleExecutable</key>              <string>applewin</string>
               <key>CFBundleIdentifier</key>              <string>rs.applewin.emulator</string>
               <key>CFBundleName</key>                    <string>AppleWin-rs</string>
               <key>CFBundleVersion</key>                 <string>${{ github.ref_name }}</string>
