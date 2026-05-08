@@ -1,0 +1,82 @@
+name: Build and Sign macOS App (Ad-hoc) - Rust
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-aarch64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-aarch64-cargo-
+
+      - name: Build
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Create app bundle
+        run: |
+          APP_NAME="MyApp"
+          BUNDLE="$APP_NAME.app"
+          BINARY_NAME="my_app"   # must match your [[bin]] name in Cargo.toml
+
+          mkdir -p "$BUNDLE/Contents/MacOS"
+          mkdir -p "$BUNDLE/Contents/Resources"
+
+          cp "target/aarch64-apple-darwin/release/$BINARY_NAME" \
+             "$BUNDLE/Contents/MacOS/$APP_NAME"
+          chmod +x "$BUNDLE/Contents/MacOS/$APP_NAME"
+
+          cat > "$BUNDLE/Contents/Info.plist" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>         <string>MyApp</string>
+            <key>CFBundleIdentifier</key>         <string>com.yourcompany.myapp</string>
+            <key>CFBundleName</key>               <string>MyApp</string>
+            <key>CFBundleVersion</key>            <string>1.0.0</string>
+            <key>CFBundleShortVersionString</key> <string>1.0.0</string>
+            <key>CFBundlePackageType</key>        <string>APPL</string>
+            <key>LSMinimumSystemVersion</key>     <string>12.0</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Ad-hoc sign app bundle
+        run: |
+          codesign --force --deep -s - MyApp.app
+          codesign --verify --verbose MyApp.app
+
+      - name: Package as DMG
+        run: |
+          hdiutil create -volname "MyApp" \
+            -srcfolder MyApp.app \
+            -ov -format UDZO \
+            MyApp-apple-silicon.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyApp-apple-silicon
+          path: MyApp-apple-silicon.dmg
+          retention-days: 7

@@ -836,11 +836,8 @@ impl Card for Disk2Card {
 
         // Process side-effects for each register.
         match reg {
-            0x00..=0x07 => {
-                // Stepper: ignore if motor off AND drive not spinning (C++ GH#525)
-                if self.motor_on || self.is_spinning() {
-                    self.step_phase(reg);
-                }
+            0x00..=0x07 if self.motor_on || self.is_spinning() => {
+                self.step_phase(reg);
             }
             0x08 => {
                 // Motor off: clear magnet states (UTAIIe p9-12, C++ GH#926, GH#1315)
@@ -866,32 +863,28 @@ impl Card for Disk2Card {
                 self.active_drive = 1;
                 self.check_spinning();
             }
-            0x0C => {
+            0x0C if !is_woz => {
                 // For non-WOZ: read/write nibble (WOZ handled below via even-address path)
-                if !is_woz {
-                    if self.write_mode && self.is_spinning() {
-                        self.drives[self.active_drive].write_nibble(self.latch, cycles);
-                    } else if !self.write_mode && self.is_spinning() {
-                        self.latch = self.drives[self.active_drive].read_nibble_non_woz();
-                    }
+                if self.write_mode && self.is_spinning() {
+                    self.drives[self.active_drive].write_nibble(self.latch, cycles);
+                } else if !self.write_mode && self.is_spinning() {
+                    self.latch = self.drives[self.active_drive].read_nibble_non_woz();
                 }
             }
-            0x0D => {
+            0x0D if self.is_spinning() => {
                 // LoadWriteProtect: only update latch if drive is spinning (GH#599).
                 // "DRIVES OFF forces the data register to hold its present state." (UTAIIe p9-12)
-                if self.is_spinning() {
-                    if self.drives[self.active_drive].write_protected {
-                        self.latch = 0xFF;
-                    } else {
-                        self.latch = 0x00;
-                    }
-                    // For WOZ: advance bit stream and reset LSS (C++ fix for E7 protection)
-                    if is_woz {
-                        let drv = &mut self.drives[self.active_drive];
-                        let delta = drv.advance_bits(cycles);
-                        drv.woz_skip_bits(delta);
-                        self.reset_lss();
-                    }
+                if self.drives[self.active_drive].write_protected {
+                    self.latch = 0xFF;
+                } else {
+                    self.latch = 0x00;
+                }
+                // For WOZ: advance bit stream and reset LSS (C++ fix for E7 protection)
+                if is_woz {
+                    let drv = &mut self.drives[self.active_drive];
+                    let delta = drv.advance_bits(cycles);
+                    drv.woz_skip_bits(delta);
+                    self.reset_lss();
                 }
             }
             0x0E | 0x0F => {} // Q7L/Q7H: side-effect already handled above
@@ -947,10 +940,8 @@ impl Card for Disk2Card {
 
         // Process side-effects for each register.
         match reg {
-            0x00..=0x07 => {
-                if self.motor_on || self.is_spinning() {
-                    self.step_phase(reg);
-                }
+            0x00..=0x07 if self.motor_on || self.is_spinning() => {
+                self.step_phase(reg);
             }
             0x08 => {
                 self.phases = 0;
@@ -973,16 +964,14 @@ impl Card for Disk2Card {
                 self.active_drive = 1;
                 self.check_spinning();
             }
-            0x0C => {
-                if !is_woz {
-                    if self.write_mode && self.is_spinning() {
-                        self.drives[self.active_drive].write_nibble(self.latch, cycles);
-                    } else if !self.write_mode && self.is_spinning() {
-                        self.latch = self.drives[self.active_drive].read_nibble_non_woz();
-                    }
+            0x0C if !is_woz => {
+                if self.write_mode && self.is_spinning() {
+                    self.drives[self.active_drive].write_nibble(self.latch, cycles);
+                } else if !self.write_mode && self.is_spinning() {
+                    self.latch = self.drives[self.active_drive].read_nibble_non_woz();
                 }
             }
-            0x0D => {
+            0x0D if self.is_spinning() => {
                 // Q6H write: load data register with bus value when in write mode.
                 // The data register is loaded when Q6=1 AND Q7=1 — handled at the
                 // bottom of this function via the load_mode && write_mode check.

@@ -68,11 +68,8 @@ impl Card for SnesMaxCard {
     fn slot_io_write(&mut self, reg: u8, _value: u8, _cycles: u64) {
         match reg & 0x0F {
             0x00 => self.latch_controllers(), // Latch: snapshot state, reset index
-            0x01 => {
-                // Clock: advance to next bit
-                if self.btn_index < BUTTON_COUNT {
-                    self.btn_index += 1;
-                }
+            0x01 if self.btn_index < BUTTON_COUNT => {
+                self.btn_index += 1;
             }
             _ => {}
         }

@@ -218,28 +218,26 @@ impl W5100 {
                     self.regs[base + SN_SR as usize] = SOCK_UDP;
                 }
             }
-            CMD_CONNECT => {
-                if mode == MODE_TCP {
-                    let ip = Ipv4Addr::new(
-                        self.regs[base + SN_DIPR as usize],
-                        self.regs[base + SN_DIPR as usize + 1],
-                        self.regs[base + SN_DIPR as usize + 2],
-                        self.regs[base + SN_DIPR as usize + 3],
-                    );
-                    let port = u16::from_be_bytes([
-                        self.regs[base + SN_DPORT as usize],
-                        self.regs[base + SN_DPORT as usize + 1],
-                    ]);
-                    let addr = SocketAddr::from((ip, port));
-                    match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)) {
-                        Ok(stream) => {
-                            let _ = stream.set_nonblocking(true);
-                            self.sockets[sock].conn = SocketConn::Tcp(stream);
-                            self.regs[base + SN_SR as usize] = SOCK_ESTABLISHED;
-                        }
-                        Err(_) => {
-                            self.regs[base + SN_SR as usize] = SOCK_CLOSED;
-                        }
+            CMD_CONNECT if mode == MODE_TCP => {
+                let ip = Ipv4Addr::new(
+                    self.regs[base + SN_DIPR as usize],
+                    self.regs[base + SN_DIPR as usize + 1],
+                    self.regs[base + SN_DIPR as usize + 2],
+                    self.regs[base + SN_DIPR as usize + 3],
+                );
+                let port = u16::from_be_bytes([
+                    self.regs[base + SN_DPORT as usize],
+                    self.regs[base + SN_DPORT as usize + 1],
+                ]);
+                let addr = SocketAddr::from((ip, port));
+                match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)) {
+                    Ok(stream) => {
+                        let _ = stream.set_nonblocking(true);
+                        self.sockets[sock].conn = SocketConn::Tcp(stream);
+                        self.regs[base + SN_SR as usize] = SOCK_ESTABLISHED;
+                    }
+                    Err(_) => {
+                        self.regs[base + SN_SR as usize] = SOCK_CLOSED;
                     }
                 }
             }
