@@ -1,5 +1,7 @@
 # AppleWin-rs
 
+### ** Please note that this repo has been archived and renamed to a new Repo [Cider](https://github.com/AaronSaikovski/Cider), all future development work will continue there. **
+
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
