@@ -2006,8 +2006,8 @@ mod gui {
             };
 
             // Snapshot emulator state for use in closures (avoids borrow conflicts)
-            let pc = self.emu.cpu.pc;
-            let cycles = self.emu.cpu.cycles;
+            //let pc = self.emu.cpu.pc;
+            //let cycles = self.emu.cpu.cycles;
             let d1_name = Self::disk_display_name(&self.disk1).to_owned();
             let d1_loaded = self.disk1.is_some();
             let d2_loaded = self.disk2.is_some();
@@ -2313,13 +2313,13 @@ mod gui {
                                     RichText::new("AppleWin-rs — Press any key to start").small(),
                                 );
                             } else {
-                                ui.label(
-                                    RichText::new(format!("PC:${pc:04X}")).small().monospace(),
-                                );
+                                // ui.label(
+                                //     RichText::new(format!("PC:${pc:04X}")).small().monospace(),
+                                // );
                                 ui.add_space(6.0);
-                                ui.label(
-                                    RichText::new(format!("Cyc:{cycles}")).small().monospace(),
-                                );
+                                // ui.label(
+                                //     RichText::new(format!("Cyc:{cycles}")).small().monospace(),
+                               //);
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(RichText::new("F1:Reset  Ctrl+Esc:Quit").small());
