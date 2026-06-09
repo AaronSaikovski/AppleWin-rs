@@ -1986,8 +1986,8 @@ mod gui {
                 }
 
                 let tex_opts = TextureOptions {
-                    magnification: egui::TextureFilter::Nearest,
-                    minification: egui::TextureFilter::Nearest,
+                    magnification: egui::TextureFilter::Linear,
+                    minification: egui::TextureFilter::Linear,
                 };
                 let image = ColorImage::from_rgba_unmultiplied(
                     [SCREEN_W, SCREEN_H],
@@ -2319,7 +2319,7 @@ mod gui {
                                 ui.add_space(6.0);
                                 // ui.label(
                                 //     RichText::new(format!("Cyc:{cycles}")).small().monospace(),
-                               //);
+                                //);
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(RichText::new("F1:Reset  Ctrl+Esc:Quit").small());
@@ -3363,17 +3363,11 @@ mod gui {
                     let avail = ui.available_rect_before_wrap();
                     let sw = SCREEN_W as f32;
                     let sh = SCREEN_H as f32;
-                    let ppp = ctx.pixels_per_point();
-
                     if debugger_fullscreen {
-                        // Debugger mode: fill area, no bevel
-                        let avail_pw = avail.width() * ppp;
-                        let avail_ph = avail.height() * ppp;
-                        let phys_scale = (avail_pw / sw)
-                            .floor()
-                            .min((avail_ph / sh).floor())
-                            .max(1.0);
-                        let scale = phys_scale / ppp;
+                        // Debugger mode: fill area, no bevel — fractional scale + linear filter
+                        let scale_w = avail.width() / sw;
+                        let scale_h = avail.height() / sh;
+                        let scale = scale_w.min(scale_h).max(1.0);
                         let disp_w = sw * scale;
                         let disp_h = sh * scale;
                         let ox = avail.left() + ((avail.width() - disp_w) / 2.0).max(0.0);
@@ -3390,13 +3384,12 @@ mod gui {
                         }
                         ui.allocate_rect(avail, Sense::hover());
                     } else {
-                        // Normal mode: bevel + centred screen
-                        let avail_pw = (avail.width() - BEVEL * 2.0) * ppp;
-                        let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
-                        let phys_scale_w = (avail_pw / sw).floor().max(1.0);
-                        let phys_scale_h = (avail_ph / sh).floor().max(1.0);
-                        let phys_scale = phys_scale_w.min(phys_scale_h);
-                        let scale = phys_scale / ppp;
+                        // Normal mode: bevel + centred screen — fractional scale + linear filter
+                        let avail_w = avail.width() - BEVEL * 2.0;
+                        let avail_h = avail.height() - BEVEL * 2.0;
+                        let scale_w = avail_w / sw;
+                        let scale_h = avail_h / sh;
+                        let scale = scale_w.min(scale_h).max(1.0);
                         let outer_w = sw * scale + BEVEL * 2.0;
                         let outer_h = sh * scale + BEVEL * 2.0;
 
