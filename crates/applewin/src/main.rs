@@ -684,7 +684,11 @@ mod gui {
             // Build CharRom from the embedded Apple IIe video ROM
             let font_data = build_font_from_rom(VIDEO_ROM);
             let char_rom = CharRom::new(font_data);
-            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines);
+            let tv_mode = matches!(
+                config.video_type,
+                crate::config::VideoType::ColorTV | crate::config::VideoType::MonoTV
+            );
+            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines, tv_mode);
             renderer.mono_tint = config.mono_tint();
             renderer.color_vertical_blend = config.color_vertical_blend;
             let rgb_renderer = apple2_video::rgb::RgbRenderer::new(char_rom, config.scanlines);
@@ -949,22 +953,34 @@ mod gui {
                 self.emu.bus.mode = iigs.bus.mega2.mem_mode;
             }
 
-            if self.config.video_type == crate::config::VideoType::ColorRGB {
-                self.rgb_renderer.render(
-                    &self.emu.bus.main_ram,
-                    &self.emu.bus.aux_ram,
-                    self.emu.bus.mode,
-                    self.frame_no,
-                    &mut self.fb,
-                );
-            } else {
-                self.renderer.render(
-                    &self.emu.bus.main_ram,
-                    &self.emu.bus.aux_ram,
-                    self.emu.bus.mode,
-                    self.frame_no,
-                    &mut self.fb,
-                );
+            match self.config.video_type {
+                crate::config::VideoType::ColorRGB => {
+                    self.rgb_renderer.render(
+                        &self.emu.bus.main_ram,
+                        &self.emu.bus.aux_ram,
+                        self.emu.bus.mode,
+                        self.frame_no,
+                        &mut self.fb,
+                    );
+                }
+                crate::config::VideoType::ColorIdealized => {
+                    self.renderer.render_idealized(
+                        &self.emu.bus.main_ram,
+                        &self.emu.bus.aux_ram,
+                        self.emu.bus.mode,
+                        self.frame_no,
+                        &mut self.fb,
+                    );
+                }
+                _ => {
+                    self.renderer.render(
+                        &self.emu.bus.main_ram,
+                        &self.emu.bus.aux_ram,
+                        self.emu.bus.mode,
+                        self.frame_no,
+                        &mut self.fb,
+                    );
+                }
             }
         }
 
@@ -1498,6 +1514,10 @@ mod gui {
             // Apply video mode shortcut (Ctrl+1..5)
             if let Some(vt) = video_shortcut {
                 self.config.video_type = vt;
+                self.renderer.tv_mode = matches!(
+                    vt,
+                    crate::config::VideoType::ColorTV | crate::config::VideoType::MonoTV
+                );
                 self.renderer.mono_tint = self.config.mono_tint();
                 self.config.save();
             }
@@ -1986,8 +2006,8 @@ mod gui {
                 }
 
                 let tex_opts = TextureOptions {
-                    magnification: egui::TextureFilter::Linear,
-                    minification: egui::TextureFilter::Linear,
+                    magnification: egui::TextureFilter::Nearest,
+                    minification: egui::TextureFilter::Nearest,
                 };
                 let image = ColorImage::from_rgba_unmultiplied(
                     [SCREEN_W, SCREEN_H],
@@ -2221,6 +2241,11 @@ mod gui {
                                 }
                                 if let Some(mode) = chosen {
                                     self.config.video_type = mode;
+                                    self.renderer.tv_mode = matches!(
+                                        mode,
+                                        crate::config::VideoType::ColorTV
+                                            | crate::config::VideoType::MonoTV
+                                    );
                                     self.renderer.mono_tint = self.config.mono_tint();
                                     self.config.save();
                                 }
@@ -3224,6 +3249,10 @@ mod gui {
                     self.config = self.pending_config.clone();
                     // Apply video settings immediately
                     self.renderer.scanlines = self.config.scanlines;
+                    self.renderer.tv_mode = matches!(
+                        self.config.video_type,
+                        crate::config::VideoType::ColorTV | crate::config::VideoType::MonoTV
+                    );
                     self.renderer.mono_tint = self.config.mono_tint();
                     self.renderer.color_vertical_blend = self.config.color_vertical_blend;
                     // Resize window if scale changed, but only when not maximized.

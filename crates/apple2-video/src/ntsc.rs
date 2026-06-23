@@ -293,16 +293,22 @@ pub struct NtscRenderer {
     /// Blend adjacent pixel rows for colour smoothing
     /// (matches AppleWin VS_COLOR_VERTICAL_BLEND).
     pub color_vertical_blend: bool,
+    /// Whether this is a TV-style video mode (COLOR_TV, MONO_TV, or
+    /// COLOR_MONITOR_NTSC with colour burst).  When true, applies the
+    /// -2 pixel address offset and colour-burst gating (B&W for the
+    /// first ~16 pixels of each scanline) that matches AppleWin.
+    pub tv_mode: bool,
 }
 
 impl NtscRenderer {
-    pub fn new(char_rom: CharRom, scanlines: bool) -> Self {
+    pub fn new(char_rom: CharRom, scanlines: bool, tv_mode: bool) -> Self {
         Self {
             char_rom,
             ntsc_tables: NtscTables::generate(),
             scanlines,
             mono_tint: None,
             color_vertical_blend: false,
+            tv_mode,
         }
     }
 
@@ -407,6 +413,86 @@ impl NtscRenderer {
         // CRT scanline darkening: dim every odd fb row (the "in-between" line)
         // to simulate the dark gaps between CRT scan lines, matching AppleWin's
         // default half-scanline mode.
+        if self.scanlines {
+            apply_scanlines(fb);
+        }
+    }
+
+    /// Render one complete frame using idealized hi-res colour mapping.
+    ///
+    /// Same as `render()` but uses `render_hires_idealized` for hi-res graphics,
+    /// which maps each pixel to its artifact colour based on bit position and
+    /// hi-bit, then merges adjacent set bits to white.  Produces clean, readable
+    /// output without NTSC signal-chain artifacts.
+    ///
+    /// Matches AppleWin's `VT_COLOR_IDEALIZED` rendering path.
+    pub fn render_idealized(
+        &self,
+        main_ram: &[u8; 65536],
+        aux_ram: &[u8; 65536],
+        mode: MemMode,
+        frame_no: u32,
+        fb: &mut Framebuffer,
+    ) {
+        let flash_on = (frame_no / 16).is_multiple_of(2);
+
+        let page2 = mode.contains(MemMode::MF_PAGE2);
+        let graphics = mode.contains(MemMode::MF_GRAPHICS);
+        let hires = mode.contains(MemMode::MF_HIRES);
+        let mixed = mode.contains(MemMode::MF_MIXED);
+        let vid80 = mode.contains(MemMode::MF_VID80);
+        let dhires = mode.contains(MemMode::MF_DHIRES);
+        let _store80 = mode.contains(MemMode::MF_80STORE);
+
+        let display_page2 = page2 && !_store80;
+        let text_base: usize = if display_page2 { 0x0800 } else { 0x0400 };
+        let hgr_base: usize = if display_page2 { 0x4000 } else { 0x2000 };
+        let text_page = &main_ram[text_base..text_base + 0x400];
+
+        if !graphics {
+            if vid80 {
+                self.render_text80_rows(main_ram, aux_ram, text_base, 0, 24, flash_on, fb);
+            } else {
+                self.render_text40_rows(text_page, 0, 24, flash_on, fb);
+            }
+        } else if hires {
+            let scan_lines = if mixed { 160 } else { 192 };
+            if dhires && vid80 {
+                self.render_dhires(main_ram, aux_ram, hgr_base, scan_lines, fb);
+            } else {
+                self.render_hires_idealized(main_ram, hgr_base, scan_lines, fb);
+            }
+            if mixed {
+                if vid80 {
+                    self.render_text80_rows(main_ram, aux_ram, text_base, 20, 24, flash_on, fb);
+                } else {
+                    self.render_text40_rows(text_page, 20, 24, flash_on, fb);
+                }
+            }
+        } else {
+            let gr_rows = if mixed { 20 } else { 24 };
+            if dhires && vid80 {
+                self.render_dlores(main_ram, aux_ram, text_base, 0, gr_rows, fb);
+            } else {
+                self.render_lores_rows(text_page, 0, gr_rows, fb);
+            }
+            if mixed {
+                if vid80 {
+                    self.render_text80_rows(main_ram, aux_ram, text_base, 20, 24, flash_on, fb);
+                } else {
+                    self.render_text40_rows(text_page, 20, 24, flash_on, fb);
+                }
+            }
+        }
+
+        if self.color_vertical_blend {
+            apply_color_vertical_blend(fb);
+        }
+
+        if let Some([tr, tg, tb]) = self.mono_tint {
+            apply_mono_tint(fb, tr, tg, tb);
+        }
+
         if self.scanlines {
             apply_scanlines(fb);
         }
@@ -745,6 +831,12 @@ impl NtscRenderer {
 
             let row0 = (y * 2) * FB_WIDTH;
 
+            // TV-mode offset: AppleWin subtracts 2 from the video address for
+            // VT_MONO_TV, VT_COLOR_TV, and VT_COLOR_MONITOR_NTSC (with colour
+            // burst).  This accounts for the 2×14M pre-render region at the
+            // start of each scanline.  (NTSC.cpp:766-769)
+            let offset = if self.tv_mode { -2i32 } else { 0 };
+
             for bx in 0..40usize {
                 let addr = hgr_base + row_offset + bx;
                 let byte = ram.get(addr).copied().unwrap_or(0);
@@ -774,12 +866,31 @@ impl NtscRenderer {
                     last_col = 0;
                 }
 
+                // Colour-burst gating (TV mode only):
+                // AppleWin gates colour processing with GetColorBurst(), which
+                // returns true only after the colour burst region (hpos 12-16).
+                // Pixels before hpos 25 are processed through updateBnWPixel
+                // (B&W).  The first 2 bytes (hpos 0-27) fall before the
+                // colour-burst-enabled display region, so render them B&W.
+                // Byte 2 straddles the boundary but we render it in colour
+                // since GetColorBurst() is already true for most of it.
+                let is_bw = self.tv_mode && bx < 2;
+
                 // Feed 14 bits LSB-first into the NTSC signal chain.
-                let col_base = bx * 14;
+                let col_base = ((bx as i32 * 14 + offset).max(0)) as usize;
                 for bit_idx in 0..14u32 {
                     let bit = (bits14 >> bit_idx) & 1;
                     signal_bits = ((signal_bits << 1) | bit as usize) & 0xFFF;
-                    let color = tables[phase][signal_bits];
+                    let color = if is_bw {
+                        // B&W: simple on/off matching AppleWin's updateBnWPixel.
+                        if bit != 0 {
+                            0xFFFFFFFFu32
+                        } else {
+                            0xFF000000u32
+                        }
+                    } else {
+                        tables[phase][signal_bits]
+                    };
                     pixels[row0 + col_base + bit_idx as usize] = color;
                     phase = (phase + 1) & 3;
                 }
@@ -851,22 +962,20 @@ impl NtscRenderer {
     // ── Idealized hi-res colour ──────────────────────────────────────────────
 
     /// Apple II standard artifact colours (ABGR format).
-    /// Bit 7 = 0: violet (odd pixel) / green (even pixel)
-    /// Bit 7 = 1: blue (odd pixel) / orange (even pixel)
-    const HGR_BLACK: u32 = 0xFF000000;
-    const HGR_WHITE: u32 = 0xFFFFFFFF;
-    const HGR_VIOLET: u32 = 0xFFDD22DD; // violet/purple
-    const HGR_GREEN: u32 = 0xFF11DD11; // green
-    const HGR_BLUE: u32 = 0xFFFF4411; // blue (ABGR)
-    const HGR_ORANGE: u32 = 0xFF0088FF; // orange (ABGR)
+    /// Matches AppleWin's `PaletteRGB_NTSC` for VT_COLOR_IDEALIZED rendering.
+    const HGR_BLACK: u32 = 0xFF000000; // 0x00,0x00,0x00
+    const HGR_WHITE: u32 = 0xFFFFFFFF; // 0xFF,0xFF,0xFF
+    const HGR_BLUE: u32 = 0xFFFFA10D; // 0x0D,0xA1,0xFF (Linards Tweaked)
+    const HGR_ORANGE: u32 = 0xFF005EF2; // 0xF2,0x5E,0x00 (Linards Tweaked)
+    const HGR_GREEN: u32 = 0xFF00CB38; // 0x38,0xCB,0x00 (Linards Tweaked)
+    const HGR_VIOLET: u32 = 0xFFFF34C7; // 0xC7,0x34,0xFF (Linards Tweaked)
 
-    /// Render hi-res using simplified/idealized colour mapping.
+    /// Render hi-res using idealized colour mapping matching AppleWin's
+    /// `UpdateHiResRGBCell` / `VT_COLOR_IDEALIZED` path.
     ///
-    /// Maps each pixel to its artifact colour based on bit position and hi-bit,
-    /// then merges adjacent set bits to white.  Produces clean, readable output
-    /// without NTSC signal-chain artifacts.
-    ///
-    /// Matches AppleWin's `VT_COLOR_IDEALIZED` / `updateScreenHires40Simplified`.
+    /// Chains 28 bits from 4 adjacent bytes, extracts 14 colors using 2-bit
+    /// evaluation, then detects "color" pixels using bit patterns.
+    /// Produces clean artifact colours without NTSC signal-chain processing.
     pub fn render_hires_idealized(
         &self,
         ram: &[u8; 65536],
@@ -881,55 +990,83 @@ impl NtscRenderer {
             let pixels = fb.pixels_mut();
             let row0 = py * FB_WIDTH;
             let row1 = (py + 1) * FB_WIDTH;
-            let mut px = 0usize;
-            let mut prev_bit: bool = false;
 
             for bx in 0..40usize {
                 let addr = hgr_base + row_offset + bx;
-                let byte = ram.get(addr).copied().unwrap_or(0);
-                let hi_bit = byte & 0x80 != 0;
-                // Artifact colour pair depends on hi-bit (palette group)
-                let (color_even, color_odd) = if hi_bit {
-                    (Self::HGR_ORANGE, Self::HGR_BLUE)
+
+                // Chain 28 bits from 4 adjacent bytes (matching UpdateHiResRGBCell).
+                // We need context from previous and next bytes for color pixel detection.
+                let byteval1 = if bx >= 2 {
+                    ram.get(addr - 1).copied().unwrap_or(0) & 0x7F
                 } else {
-                    (Self::HGR_GREEN, Self::HGR_VIOLET)
+                    0
+                };
+                let byteval2 = ram.get(addr).copied().unwrap_or(0) & 0x7F;
+                let byteval3 = ram.get(addr + 1).copied().unwrap_or(0) & 0x7F;
+                let byteval4 = if bx < 38 {
+                    ram.get(addr + 2).copied().unwrap_or(0) & 0x7F
+                } else {
+                    0
                 };
 
-                for bit in 0..7usize {
-                    let cur_bit = byte & (1 << bit) != 0;
-                    // Global pixel column (0-based across all 40 bytes × 7 bits)
-                    let col = bx * 7 + bit;
-                    let is_even = col & 1 == 0;
+                // All 28 bits chained together
+                let dwordval = (byteval1 as u32)
+                    | ((byteval2 as u32) << 7)
+                    | ((byteval3 as u32) << 14)
+                    | ((byteval4 as u32) << 21);
 
-                    // Two adjacent set bits merge to white
-                    let color = if cur_bit {
-                        if prev_bit {
-                            // Current AND previous both set → white pair
-                            // Also fix previous pixel to white
-                            let prev_px = px * 2 - 2;
-                            if prev_px < 560 {
-                                pixels[row0 + prev_px] = Self::HGR_WHITE;
-                                pixels[row0 + prev_px + 1] = Self::HGR_WHITE;
-                                pixels[row1 + prev_px] = Self::HGR_WHITE;
-                                pixels[row1 + prev_px + 1] = Self::HGR_WHITE;
-                            }
-                            Self::HGR_WHITE
-                        } else if is_even {
-                            color_even
-                        } else {
-                            color_odd
-                        }
+                // Extract 14 color pixels using 2-bit evaluation
+                let mut colors: [u32; 14] = [0; 14];
+                let mut offset = byteval2 & 0x80 != 0;
+                let mut tmp = dwordval >> 7;
+                for (i, color) in colors.iter_mut().enumerate() {
+                    if i == 7 {
+                        offset = byteval3 & 0x80 != 0;
+                    }
+                    let color_idx = (tmp & 0x3) as usize;
+                    // Two cases because AppleWin's palette is in a strange order:
+                    // offset=true:  indices 1,2,3,4 → WHITE,BLUE,ORANGE,GREEN
+                    // offset=false: indices 6,5,4,3 → VIOLET,GREEN,ORANGE,BLUE
+                    *color = match (offset, color_idx) {
+                        (true, 0) => Self::HGR_WHITE,
+                        (true, 1) => Self::HGR_BLUE,
+                        (true, 2) => Self::HGR_ORANGE,
+                        (true, 3) => Self::HGR_GREEN,
+                        (false, 0) => Self::HGR_VIOLET,
+                        (false, 1) => Self::HGR_GREEN,
+                        (false, 2) => Self::HGR_ORANGE,
+                        (false, 3) => Self::HGR_BLUE,
+                        _ => Self::HGR_BLACK,
+                    };
+                    tmp >>= 2;
+                }
+
+                // Black and White lookup
+                let bw: [u32; 2] = [Self::HGR_BLACK, Self::HGR_WHITE];
+
+                // Color pixel detection using mask pattern.
+                // Matches C++: mask=0x01C0, chck1=0x0140, chck2=0x0080
+                // These detect "101" or "010" patterns in 3 consecutive bits,
+                // which indicate color fringe pixels.
+                let mut dw = dwordval;
+                let fb_x = bx * 14;
+                for (pixel, &color) in colors.iter().enumerate() {
+                    let is_color = (dw & 0x01C0) == 0x0140 || (dw & 0x01C0) == 0x0080;
+                    let final_color = if is_color {
+                        color
                     } else {
-                        Self::HGR_BLACK
+                        bw[(dw & 0x0080) as usize]
                     };
 
-                    // Each HGR pixel = 2 framebuffer pixels wide (280 → 560)
-                    pixels[row0 + px * 2] = color;
-                    pixels[row0 + px * 2 + 1] = color;
-                    pixels[row1 + px * 2] = color;
-                    pixels[row1 + px * 2 + 1] = color;
-                    px += 1;
-                    prev_bit = cur_bit;
+                    // Each HGR pixel = 2 framebuffer pixels wide (14 → 28 per byte)
+                    let px = fb_x + pixel;
+                    pixels[row0 + px * 2] = final_color;
+                    pixels[row0 + px * 2 + 1] = final_color;
+                    pixels[row1 + px * 2] = final_color;
+                    pixels[row1 + px * 2 + 1] = final_color;
+
+                    // Shift right by 1 for next pixel
+                    dw >>= 1;
                 }
             }
         }
@@ -1031,7 +1168,7 @@ mod tests {
         // 128 chars × 8 rows = 1024 bytes; fill with a simple pattern:
         // every glyph row is 0xFF (all pixels lit) for easy verification.
         let char_rom_data = vec![0xFEu8; 1024]; // 0xFE = bits 7-1 set (7 pixels on)
-        NtscRenderer::new(CharRom::new(char_rom_data), false)
+        NtscRenderer::new(CharRom::new(char_rom_data), false, false)
     }
 
     #[test]
