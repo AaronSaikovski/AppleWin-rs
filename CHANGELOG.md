@@ -15,7 +15,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Double Hi-Res (DHGR) colours were completely wrong.** The 16-colour DHGR
+  palette was indexed directly with the raw 4-bit value, but DHGR nibbles must
+  first be remapped via AppleWin's `DoubleHiresPalIndex` — a rotate-left-by-1 of
+  the nibble. Every colour was off (blue↔violet/magenta, orange↔green), which is
+  why DHGR games such as Broderbund's *Airheart* showed the wrong colours. Fixed in
+  both the NTSC and RGB renderers, verified against `RGBMonitor.cpp`'s
+  `UpdateDHiResCell` (`color = ((bits&7)<<1)|((bits&8)>>3)`).
+- **16-colour palette did not match AppleWin.** The lo-res/DHGR palette used
+  hand-tweaked RGB values that differed substantially from AppleWin's, so even with
+  correct nibble mapping the hues were off. Replaced both `LORES_PALETTE` (NTSC) and
+  `RGB_PALETTE` with AppleWin's exact "lores & dhires" table from `RGBMonitor.cpp`
+  (the Linards-tweaked `VideoInitializeOriginal` values). Notably AppleWin's DHGR
+  *blue* is `0x0D,0xA1,0xFF` (a bright sky-blue), which is the correct *Airheart*
+  sky colour — previously rendered as a pure, too-dark blue.
+- **Default DHGR now uses AppleWin's faithful NTSC composite path.** The default
+  (idealized) DHGR mode previously used a custom palette/blur renderer that either
+  looked blocky or introduced colour grain. It now uses `render_dhires_ntsc`, whose
+  colour tables are generated exactly like AppleWin's `initChromaPhaseTables()`
+  (filtered `y1` luminance + filtered I/Q chrominance). High-frequency detail (text,
+  stars) resolves to clean white and solid areas stay smooth and grain-free — the
+  same algorithm AppleWin uses. The invented `render_dhires_smoothed` was removed.
+  The composite DHGR path now scanline-doubles (duplicates each scanline) rather than
+  vertically blending adjacent scanlines, keeping text and detail vertically crisp.
+
+### Added
+
+- **Idealized hi-res renderer was broken.** `render_hires_idealized`
+  (`VT_COLOR_IDEALIZED`) had multiple bugs: an out-of-bounds black/white palette
+  index (`bw[0|128]`), rendered 14 pixels per byte instead of 7 (overrunning the
+  framebuffer), used the wrong shift cadence, and mapped the hi-bit-clear artifact
+  colours incorrectly (green/orange/blue instead of violet/green/orange). Rewritten
+  to faithfully match `RGBMonitor.cpp`'s `UpdateHiResRGBCell`, producing clean,
+  saturated artifact colours.
+
 ### Changed
+
+- **Default video mode is now "Color (Composite Idealized)".** Produces sharp,
+  saturated colours (the clean artifact-colour look) instead of the softer/fringier
+  NTSC composite emulation. Users can still select "Color TV" or any other mode in
+  Settings.
 
 - **Apple IIgs disabled in Settings UI:** The Apple IIgs option is temporarily
   hidden from the Settings → Machine → Computer type dropdown while IIgs support

@@ -16,24 +16,26 @@ use apple2_core::bus::MemMode;
 
 // ── 16-colour ABGR palette (same order as NTSC lo-res) ──────────────────────
 
-/// Standard Apple II 16-colour palette (ABGR8888).
+/// Standard Apple II 16-colour palette (ABGR8888), taken verbatim from
+/// AppleWin's `RGBMonitor.cpp` "lores & dhires" table (Linards-tweaked values).
+/// AppleWin source R,G,B listed in comments for direct verification.
 const RGB_PALETTE: [u32; 16] = [
-    0xFF000000, // 0: Black
-    0xFF12129D, // 1: Deep Red
-    0xFF990011, // 2: Dark Blue
-    0xFFBB22AA, // 3: Purple
-    0xFF226600, // 4: Dark Green
-    0xFF6A6A6A, // 5: Dark Gray
-    0xFFFF2222, // 6: Medium Blue
-    0xFFEE9955, // 7: Light Blue
-    0xFF004466, // 8: Brown
-    0xFF0066FF, // 9: Orange
-    0xFF999999, // A: Light Gray
-    0xFFAA99FF, // B: Pink
-    0xFF11DD11, // C: Light Green
-    0xFF00FFFF, // D: Yellow
-    0xFFAAFF33, // E: Aqua
-    0xFFFFFFFF, // F: White
+    0xFF000000, // 0: Black       00,00,00
+    0xFF66099D, // 1: Deep Red    9D,09,66
+    0xFFE52A2A, // 2: Dark Blue   2A,2A,E5
+    0xFFFF34C7, // 3: Magenta     C7,34,FF
+    0xFF008000, // 4: Dark Green  00,80,00
+    0xFF808080, // 5: Dark Gray   80,80,80
+    0xFFFFA10D, // 6: Blue        0D,A1,FF
+    0xFFFFAAAA, // 7: Light Blue  AA,AA,FF
+    0xFF005555, // 8: Brown       55,55,00
+    0xFF005EF2, // 9: Orange      F2,5E,00
+    0xFFC0C0C0, // A: Light Gray  C0,C0,C0
+    0xFFE589FF, // B: Pink        FF,89,E5
+    0xFF00CB38, // C: Green       38,CB,00
+    0xFF1AD5D5, // D: Yellow      D5,D5,1A
+    0xFF99F662, // E: Aqua        62,F6,99
+    0xFFFFFFFF, // F: White       FF,FF,FF
 ];
 
 /// Monochrome hi-res "colours" for RGB mode.  Bit set = white, bit clear = black.
@@ -322,7 +324,10 @@ impl RgbRenderer {
 
                 let fb_x_base = col_pair * 28;
                 for pixel in 0..7 {
-                    let nibble = ((bits >> (pixel * 4)) & 0x0F) as usize;
+                    let raw = (bits >> (pixel * 4)) & 0x0F;
+                    // DHGR nibbles need AppleWin's DoubleHiresPalIndex remap
+                    // (rotate-left-by-1) before indexing the 16-colour palette.
+                    let nibble = (((raw << 1) | (raw >> 3)) & 0x0F) as usize;
                     let color = RGB_PALETTE[nibble];
                     let px = fb_x_base + pixel * 4;
                     for dx in 0..4 {
@@ -331,6 +336,80 @@ impl RgbRenderer {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::framebuffer::{FB_HEIGHT, FB_WIDTH, Framebuffer};
+
+    #[test]
+    fn rgb_renderer_covers_all_video_modes() {
+        // The RGB-card renderer must render every mode combination (no panic) and
+        // fully cover the framebuffer.  It uses bounds-checked set_pixel, so this
+        // primarily guards coverage and the DHGR palette path.
+        use MemMode as M;
+        let g = M::MF_GRAPHICS;
+        let modes = [
+            ("text40", M::empty()),
+            ("text80", M::MF_VID80),
+            ("lores", g),
+            ("lores+mixed", g | M::MF_MIXED),
+            ("dlores", g | M::MF_VID80 | M::MF_DHIRES),
+            ("hires", g | M::MF_HIRES),
+            ("hires+mixed", g | M::MF_HIRES | M::MF_MIXED),
+            ("hires+page2", g | M::MF_HIRES | M::MF_PAGE2),
+            ("dhires", g | M::MF_HIRES | M::MF_VID80 | M::MF_DHIRES),
+            (
+                "dhires+mixed",
+                g | M::MF_HIRES | M::MF_VID80 | M::MF_DHIRES | M::MF_MIXED,
+            ),
+        ];
+
+        let mut main_ram = Box::new([0u8; 65536]);
+        let mut aux_ram = Box::new([0u8; 65536]);
+        for i in 0..65536 {
+            main_ram[i] = (i & 0xFF) as u8;
+            aux_ram[i] = ((i >> 2) & 0xFF) as u8;
+        }
+        let renderer = RgbRenderer::new(CharRom::new(vec![0x3Cu8; 1024]), false);
+
+        for (name, mode) in modes {
+            let mut fb = Framebuffer::new();
+            fb.pixels_mut().fill(0x0000_0000); // transparent sentinel
+            renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+            for fb_y in (0..FB_HEIGHT).step_by(2) {
+                let row = fb_y * FB_WIDTH;
+                let unwritten = fb.pixels()[row..row + FB_WIDTH]
+                    .iter()
+                    .filter(|&&p| p & 0xFF00_0000 == 0)
+                    .count();
+                assert_eq!(
+                    unwritten, 0,
+                    "RGB mode {name} row {fb_y}: {unwritten} unwritten"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rgb_dhires_uses_palette_remap() {
+        // DHGR nibble 3 → blue (lo-res 6), 12 → orange (9), via rotate-left-1.
+        let renderer = RgbRenderer::new(CharRom::new(vec![0u8; 1024]), false);
+        let main_ram = Box::new([0u8; 65536]);
+        for (val, want) in [(3u8, RGB_PALETTE[6]), (12u8, RGB_PALETTE[9])] {
+            let mut aux_ram = Box::new([0u8; 65536]);
+            aux_ram[0x2000] = val;
+            let mut fb = Framebuffer::new();
+            renderer.render_dhires(&main_ram, &aux_ram, 0x2000, 192, &mut fb);
+            assert_eq!(
+                fb.pixels()[0],
+                want,
+                "rgb dhires nibble {val}: got {:#010x}",
+                fb.pixels()[0]
+            );
         }
     }
 }

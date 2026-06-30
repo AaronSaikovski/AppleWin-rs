@@ -255,7 +255,7 @@ impl Default for Config {
             cpu_type: CpuType::Cpu65C02,
             slot_cards: default_slot_cards(),
             aux_slot_card: CardType::Extended80Col,
-            video_type: VideoType::ColorTV,
+            video_type: VideoType::ColorIdealized,
             scanlines: false,
             color_vertical_blend: false,
             monochrome_color: 0xC0C0C0, // AppleWin default: light gray
