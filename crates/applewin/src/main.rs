@@ -684,7 +684,11 @@ mod gui {
             // Build CharRom from the embedded Apple IIe video ROM
             let font_data = build_font_from_rom(VIDEO_ROM);
             let char_rom = CharRom::new(font_data);
-            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines);
+            let tv_mode = matches!(
+                config.video_type,
+                crate::config::VideoType::ColorTV | crate::config::VideoType::MonoTV
+            );
+            let mut renderer = NtscRenderer::new(char_rom.clone(), config.scanlines, tv_mode);
             renderer.mono_tint = config.mono_tint();
             renderer.color_vertical_blend = config.color_vertical_blend;
             let rgb_renderer = apple2_video::rgb::RgbRenderer::new(char_rom, config.scanlines);
@@ -949,22 +953,34 @@ mod gui {
                 self.emu.bus.mode = iigs.bus.mega2.mem_mode;
             }
 
-            if self.config.video_type == crate::config::VideoType::ColorRGB {
-                self.rgb_renderer.render(
-                    &self.emu.bus.main_ram,
-                    &self.emu.bus.aux_ram,
-                    self.emu.bus.mode,
-                    self.frame_no,
-                    &mut self.fb,
-                );
-            } else {
-                self.renderer.render(
-                    &self.emu.bus.main_ram,
-                    &self.emu.bus.aux_ram,
-                    self.emu.bus.mode,
-                    self.frame_no,
-                    &mut self.fb,
-                );
+            match self.config.video_type {
+                crate::config::VideoType::ColorRGB => {
+                    self.rgb_renderer.render(
+                        &self.emu.bus.main_ram,
+                        &self.emu.bus.aux_ram,
+                        self.emu.bus.mode,
+                        self.frame_no,
+                        &mut self.fb,
+                    );
+                }
+                crate::config::VideoType::ColorIdealized => {
+                    self.renderer.render_idealized(
+                        &self.emu.bus.main_ram,
+                        &self.emu.bus.aux_ram,
+                        self.emu.bus.mode,
+                        self.frame_no,
+                        &mut self.fb,
+                    );
+                }
+                _ => {
+                    self.renderer.render(
+                        &self.emu.bus.main_ram,
+                        &self.emu.bus.aux_ram,
+                        self.emu.bus.mode,
+                        self.frame_no,
+                        &mut self.fb,
+                    );
+                }
             }
         }
 
@@ -1498,6 +1514,10 @@ mod gui {
             // Apply video mode shortcut (Ctrl+1..5)
             if let Some(vt) = video_shortcut {
                 self.config.video_type = vt;
+                self.renderer.tv_mode = matches!(
+                    vt,
+                    crate::config::VideoType::ColorTV | crate::config::VideoType::MonoTV
+                );
                 self.renderer.mono_tint = self.config.mono_tint();
                 self.config.save();
             }
@@ -2006,8 +2026,8 @@ mod gui {
             };
 
             // Snapshot emulator state for use in closures (avoids borrow conflicts)
-            let pc = self.emu.cpu.pc;
-            let cycles = self.emu.cpu.cycles;
+            //let pc = self.emu.cpu.pc;
+            //let cycles = self.emu.cpu.cycles;
             let d1_name = Self::disk_display_name(&self.disk1).to_owned();
             let d1_loaded = self.disk1.is_some();
             let d2_loaded = self.disk2.is_some();
@@ -2221,6 +2241,11 @@ mod gui {
                                 }
                                 if let Some(mode) = chosen {
                                     self.config.video_type = mode;
+                                    self.renderer.tv_mode = matches!(
+                                        mode,
+                                        crate::config::VideoType::ColorTV
+                                            | crate::config::VideoType::MonoTV
+                                    );
                                     self.renderer.mono_tint = self.config.mono_tint();
                                     self.config.save();
                                 }
@@ -2313,13 +2338,13 @@ mod gui {
                                     RichText::new("AppleWin-rs — Press any key to start").small(),
                                 );
                             } else {
-                                ui.label(
-                                    RichText::new(format!("PC:${pc:04X}")).small().monospace(),
-                                );
+                                // ui.label(
+                                //     RichText::new(format!("PC:${pc:04X}")).small().monospace(),
+                                // );
                                 ui.add_space(6.0);
-                                ui.label(
-                                    RichText::new(format!("Cyc:{cycles}")).small().monospace(),
-                                );
+                                // ui.label(
+                                //     RichText::new(format!("Cyc:{cycles}")).small().monospace(),
+                                //);
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(RichText::new("F1:Reset  Ctrl+Esc:Quit").small());
@@ -3224,6 +3249,10 @@ mod gui {
                     self.config = self.pending_config.clone();
                     // Apply video settings immediately
                     self.renderer.scanlines = self.config.scanlines;
+                    self.renderer.tv_mode = matches!(
+                        self.config.video_type,
+                        crate::config::VideoType::ColorTV | crate::config::VideoType::MonoTV
+                    );
                     self.renderer.mono_tint = self.config.mono_tint();
                     self.renderer.color_vertical_blend = self.config.color_vertical_blend;
                     // Resize window if scale changed, but only when not maximized.
@@ -3363,17 +3392,11 @@ mod gui {
                     let avail = ui.available_rect_before_wrap();
                     let sw = SCREEN_W as f32;
                     let sh = SCREEN_H as f32;
-                    let ppp = ctx.pixels_per_point();
-
                     if debugger_fullscreen {
-                        // Debugger mode: fill area, no bevel
-                        let avail_pw = avail.width() * ppp;
-                        let avail_ph = avail.height() * ppp;
-                        let phys_scale = (avail_pw / sw)
-                            .floor()
-                            .min((avail_ph / sh).floor())
-                            .max(1.0);
-                        let scale = phys_scale / ppp;
+                        // Debugger mode: fill area, no bevel — fractional scale + linear filter
+                        let scale_w = avail.width() / sw;
+                        let scale_h = avail.height() / sh;
+                        let scale = scale_w.min(scale_h).max(1.0);
                         let disp_w = sw * scale;
                         let disp_h = sh * scale;
                         let ox = avail.left() + ((avail.width() - disp_w) / 2.0).max(0.0);
@@ -3390,13 +3413,12 @@ mod gui {
                         }
                         ui.allocate_rect(avail, Sense::hover());
                     } else {
-                        // Normal mode: bevel + centred screen
-                        let avail_pw = (avail.width() - BEVEL * 2.0) * ppp;
-                        let avail_ph = (avail.height() - BEVEL * 2.0) * ppp;
-                        let phys_scale_w = (avail_pw / sw).floor().max(1.0);
-                        let phys_scale_h = (avail_ph / sh).floor().max(1.0);
-                        let phys_scale = phys_scale_w.min(phys_scale_h);
-                        let scale = phys_scale / ppp;
+                        // Normal mode: bevel + centred screen — fractional scale + linear filter
+                        let avail_w = avail.width() - BEVEL * 2.0;
+                        let avail_h = avail.height() - BEVEL * 2.0;
+                        let scale_w = avail_w / sw;
+                        let scale_h = avail_h / sh;
+                        let scale = scale_w.min(scale_h).max(1.0);
                         let outer_w = sw * scale + BEVEL * 2.0;
                         let outer_h = sh * scale + BEVEL * 2.0;
 

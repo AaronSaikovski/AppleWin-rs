@@ -3,7 +3,7 @@
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.1-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.4-green.svg)
 
 A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
@@ -221,7 +221,7 @@ Or run the compiled binary directly:
 cargo test
 ```
 
-Runs 467 tests across all crates:
+Runs 472 tests across all crates:
 
 | Crate                       | Tests | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -231,7 +231,7 @@ Runs 467 tests across all crates:
 | `apple2-iigs` (integration) | 15    | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches                                                                                                                                                                                                                                                                                                                                               |
 | `apple2-iigs` (peripherals) | 35    | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path)                                                                                                                                                                                                                                                             |
 | `apple2-audio`              | 10    | Speaker interpolation, DC filter, amplitude, WAV recording                                                                                                                                                                                                                                                                                                                                                                              |
-| `apple2-video`              | 14    | NTSC tables, text/lores/hires/dlores rendering, mixed mode                                                                                                                                                                                                                                                                                                                                                                              |
+| `apple2-video`              | 19    | NTSC tables, text/lores/hires/dlores rendering, mixed mode, double hi-res (DHGR) palette remap and composite signal-chain rendering                                                                                                                                                                                                                                                                                                     |
 | `apple2-debugger`           | 2     | Disassembly                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ---
@@ -313,6 +313,14 @@ Runs 467 tests across all crates:
 | Mono Custom        | Custom monochrome color (0xRRGGBB)                  |
 
 Additional options: scanlines, color vertical blending, 50/60 Hz refresh rate.
+
+**Double hi-res (DHGR)** is rendered faithfully to the original AppleWin: the
+16-colour palette uses AppleWin's exact "lores & dhires" values, the 4-bit cells
+are remapped via AppleWin's `DoubleHiresPalIndex` (rotate-left-by-1) before palette
+lookup, and the colour modes drive AppleWin's NTSC composite signal chain
+(`initChromaPhaseTables`-equivalent filtered luma/chroma), with scanline-doubling
+for crisp text. DHGR games such as Broderbund's _Airheart_ render with the correct
+sky-blue, orange, and white hues and clean high-resolution text.
 
 ---
 
