@@ -5,9 +5,7 @@
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.1.5-green.svg)
 
-### ** This project was experimental and has now been archived and no new development or updates will be done. **
-
-An experimental Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
+A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
 > **Original project:** [https://github.com/AppleWin/AppleWin](https://github.com/AppleWin/AppleWin)
 > **This port:** [https://github.com/AaronSaikovski/AppleWin-rs](https://github.com/AaronSaikovski/AppleWin-rs)
@@ -83,6 +81,37 @@ The Apple IIgs emulation includes:
 | BRAM             | 256-byte battery-backed parameter RAM with factory defaults      |
 
 > **ROM files:** IIgs ROMs are not included. Place your ROM file in `roms/Apple_IIgs/` next to the executable. ROM 03 (256KB) is recommended. The emulator auto-detects the ROM version.
+
+---
+
+### Apple IIc Features
+
+The Apple //c is emulated as a self-contained model with its built-in peripherals
+and dual-bank firmware, rather than as a IIe with cards:
+
+| Feature            | Description                                                                          |
+| ------------------ | ----------------------------------------------------------------------------------- |
+| 32KB "3.5 ROM"     | ROM version 0 (342-0033-A) — first 32KB //c firmware, adds UniDisk 3.5 support, the Mini-Assembler, and the self-test diagnostic |
+| Dual-bank ROM      | Lower 16KB standard bank + upper 16KB alternate bank, switched via the `$C028` ROM switch |
+| Forced internal ROM| `INTCXROM` is forced so the //c always runs its own built-in slot firmware          |
+| IWM disk controller| Built-in Integrated Wozniak Machine drives the disk port (enable-latch status semantics), rather than a discrete Disk II card |
+| 128KB RAM          | Standard //c memory (64KB main + 64KB auxiliary)                                     |
+| Built-in DHGR      | AN3 (`$C05E/$C05F`) toggles double hi-res **independently of IOUDIS**, matching real //c hardware |
+| Boot compatibility | Boots both DOS 3.3 and ProDOS; title banner, BASIC greeting, and disk boot covered by regression tests |
+
+**Recent //c fixes:**
+
+- **ProDOS now boots on the //c.** The //c's IWM status register (`$C0EE`) now
+  reflects the enable latch — which clears the instant the drive motor switches
+  off — so ProDOS's motor-off poll (`AND #$20` / `BNE`) no longer loops forever
+  during spin-down. Scoped to the //c's IWM; discrete Disk II controllers
+  (//e, II+, II) still hold the data latch during spin-down.
+- **Double hi-res now engages on the //c.** `$C05E/$C05F` (AN3) drive DHIRES
+  directly, so //c software such as Broderbund's *Airheart* — which enables DHGR
+  with a bare `$C05E` and never touches `IOUDIS` — renders in correct double
+  hi-res colour instead of garbled single hi-res.
+- **Correct 32K ROM bank mapping.** The dual-bank 3.5 ROM maps the standard bank
+  to the lower 16KB and the alternate bank to the upper 16KB, switched via `$C028`.
 
 ---
 
@@ -225,16 +254,16 @@ cargo test
 
 Runs 479 tests across all crates:
 
-| Crate                       | Tests | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Crate                       | Tests | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apple2-core`               | 294   | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility (handshake/ready/status-register reads), Apple IIc model (INTCXROM, 32K ROM banking, AN3-driven double hi-res), Via6522 (register read/write, timers, IRQ, state serialization), performance regression guards (dispatch-table equivalence, speaker toggle cap, card slot range checks) |
-| `apple2-core` (integration) | 15    | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution, Apple //c 3.5-ROM disk boot (title banner, DOS 3.3, and ProDOS)                                                                                                                                                                                                                                                                              |
-| `apple2-iigs`               | 89    | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP                                                                                                                                                                                                                                                                                              |
-| `apple2-iigs` (integration) | 15    | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches                                                                                                                                                                                                                                                                                                                                               |
-| `apple2-iigs` (peripherals) | 35    | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path)                                                                                                                                                                                                                                                             |
-| `apple2-audio`              | 10    | Speaker interpolation, DC filter, amplitude, WAV recording                                                                                                                                                                                                                                                                                                                                                                              |
-| `apple2-video`              | 19    | NTSC tables, text/lores/hires/dlores rendering, mixed mode, double hi-res (DHGR) palette remap and composite signal-chain rendering                                                                                                                                                                                                                                                                                                     |
-| `apple2-debugger`           | 2     | Disassembly                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `apple2-core` (integration) | 15    | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution, Apple //c 3.5-ROM disk boot (title banner, DOS 3.3, and ProDOS)                                                                                                                                                                                                                                                                                                                             |
+| `apple2-iigs`               | 89    | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP                                                                                                                                                                                                                                                                                                                                              |
+| `apple2-iigs` (integration) | 15    | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches                                                                                                                                                                                                                                                                                                                                                                                               |
+| `apple2-iigs` (peripherals) | 35    | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path)                                                                                                                                                                                                                                                                                                             |
+| `apple2-audio`              | 10    | Speaker interpolation, DC filter, amplitude, WAV recording                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `apple2-video`              | 19    | NTSC tables, text/lores/hires/dlores rendering, mixed mode, double hi-res (DHGR) palette remap and composite signal-chain rendering                                                                                                                                                                                                                                                                                                                                                     |
+| `apple2-debugger`           | 2     | Disassembly                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ---
 
