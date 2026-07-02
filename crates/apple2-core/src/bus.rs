@@ -875,17 +875,17 @@ impl Bus {
                 self.floating_bus
             }
             // $C05E/$C05F: DHIRESON/DHIRESOFF — read also acts as write (same as $C050-$C057)
-            // On the IIc, these only control DHIRES when IOUDIS is set.
+            // On the IIc, $C05E/$C05F are the AN3 soft switch, which controls double
+            // hi-res independently of IOUDIS (per the //c Technical Reference: double
+            // hi-res operates regardless of the IOUDIS state).  So they toggle DHIRES
+            // just like on the //e — software such as Airheart enables DHGR with a bare
+            // $C05E without first setting IOUDIS.
             0x5E => {
-                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
-                    self.mode.insert(MemMode::MF_DHIRES);
-                }
+                self.mode.insert(MemMode::MF_DHIRES);
                 self.floating_bus
             }
             0x5F => {
-                if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) {
-                    self.mode.remove(MemMode::MF_DHIRES);
-                }
+                self.mode.remove(MemMode::MF_DHIRES);
                 self.floating_bus
             }
             // $C060: cassette input — bit 7 reflects the cassette audio waveform.
@@ -1069,12 +1069,12 @@ impl Bus {
             0x5D => {
                 self.ann[2] = true;
             }
-            // $C05E/$C05F: DHIRESON/DHIRESOFF
-            // On the IIc, these only control DHIRES when IOUDIS is set.
-            0x5E if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) => {
+            // $C05E/$C05F: DHIRESON/DHIRESOFF (AN3).  On the IIc this controls double
+            // hi-res independently of IOUDIS, the same as on the //e (see read path).
+            0x5E => {
                 self.mode.insert(MemMode::MF_DHIRES);
             }
-            0x5F if !self.model.is_iic() || self.mode.contains(MemMode::MF_IOUDIS) => {
+            0x5F => {
                 self.mode.remove(MemMode::MF_DHIRES);
             }
             // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)

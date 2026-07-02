@@ -528,6 +528,13 @@ pub struct Disk2Card {
     latch: u8,
     /// Stepper magnet states, bits 0–3 = phases 0–3.
     phases: u8,
+    /// When true, the drive port is driven by the Apple //c's IWM (Integrated
+    /// Woz Machine) firmware rather than the discrete Disk II state machine.
+    /// This enables IWM status-register semantics on Q7L reads (see
+    /// `slot_io_read`) that the //c ROM relies on to boot ProDOS.  Discrete
+    /// Disk II controllers (//e, II+, II) leave this false so that write-protect
+    /// sense and data latch reads behave exactly as the hardware does.
+    iwm: bool,
 
     // ── WOZ LSS (Logic State Sequencer) fields ──────────────────────────
     /// Shift register used by the LSS for WOZ reads/writes.
@@ -550,10 +557,18 @@ impl Disk2Card {
             load_mode: false,
             latch: 0xFF,
             phases: 0,
+            iwm: false,
             shift_reg: 0,
             latch_delay: 0,
             last_update_cycle: 0,
         }
+    }
+
+    /// Mark this controller as driven by the Apple //c IWM (enables IWM
+    /// status-register semantics on Q7L reads).  Call this when installing the
+    /// card in a //c; discrete Disk II controllers leave it disabled.
+    pub fn set_iwm(&mut self, iwm: bool) {
+        self.iwm = iwm;
     }
 
     /// Returns true if the disk motor is on or the drive is still spinning down.
@@ -904,22 +919,41 @@ impl Card for Disk2Card {
             self.data_latch_read_write_woz(cycles);
         }
 
-        // IWM compatibility for Apple IIc boot ROM:
-        //
-        // The IIc ROM has two polling loops that read register $0E (Q7L):
+        // IWM compatibility for the Apple IIc firmware (the IIc uses an IWM, not
+        // the discrete Disk II state machine):
         //
         // 1. Handshake loop ($CC29): writes data to Q7H ($0F), then reads Q7L
         //    ($0E) and checks if the lower 5 bits match.  The IWM echoes the
         //    written data back; we return the latch (set by the Q7H write).
+        //    Here Q6 is low (data/handshake mode).
         //
         // 2. Ready loop ($CC3F): reads Q7L ($0E) and checks bit 5.  The IWM
         //    returns 0 when idle; returning the stale $FF latch loops forever.
         //
-        // We distinguish these by checking whether write_mode was just cleared
-        // by THIS read (handshake: write_mode was true before we cleared it)
-        // vs. already clear (ready check).  The `was_write_mode` flag captures
-        // the state before the sequencer update at the top of this function.
-        if reg == 0x0E && !was_write_mode && !self.motor_on && !self.is_spinning() {
+        // 3. Status-register poll (ProDOS boot, $CF45 in the alt-bank ROM):
+        //    sets Q6 high (BIT $C0ED) then reads Q7L with the motor off.  Q6=high,
+        //    Q7=low selects the IWM *status register*, whose bit 5 reflects the
+        //    drive/motor enable state — 0 when the motor is off.  Returning the
+        //    stale latch (bit 5 set) loops forever, so ProDOS never boots on the
+        //    //c.  We return 0 (motor off ⇒ status bit 5 clear).
+        //
+        // We distinguish handshake (case 1) from the status/ready reads by Q6
+        // (`load_mode`) and by whether write_mode was just cleared by THIS read.
+        // `was_write_mode` captures the state before the sequencer update above.
+        //
+        // For the ready check (case 2) `is_spinning()` must be false; but for the
+        // status-register poll (case 3) Q6 (`load_mode`) is high and the read
+        // reflects the IWM *enable* latch, which clears the instant the motor is
+        // switched off — even while the drive is still physically spinning down.
+        // So when Q6 is high we ignore the spin-down grace period — but ONLY for
+        // the //c's IWM.  A discrete Disk II (//e, II+, II) must keep returning
+        // the latch during spin-down so a write-protect sense ($C0ED then $C0EE)
+        // is never misread as "writable" while the drive coasts to a stop.
+        if reg == 0x0E
+            && !was_write_mode
+            && !self.motor_on
+            && (!self.is_spinning() || (self.iwm && self.load_mode))
+        {
             return 0;
         }
 
@@ -2306,6 +2340,69 @@ mod tests {
         assert_eq!(
             val, 0,
             "Q7L should return 0 when idle (motor off, write_mode was already false)"
+        );
+    }
+
+    #[test]
+    fn test_iwm_status_read_clears_bit5_when_motor_off_during_spindown() {
+        // ProDOS boot on the //c: motor is switched off, then the IWM status
+        // register is polled (Q6 high, read Q7L) for bit 5 (enable) to clear.
+        // Even while the drive is still physically spinning down, the status
+        // read must reflect the enable latch (motor off), i.e. return 0 — else
+        // the poll (AND #$20 / BNE) loops forever.
+        let mut card = Disk2Card::new(6);
+        card.set_iwm(true); // //c IWM controller
+        card.load_mode = true; // Q6 high — status-register read
+        card.write_mode = false;
+        card.motor_on = false;
+        card.drives[0].spinning = 1; // still spinning down
+        card.latch = 0x2B; // stale latch with bit 5 set
+        assert!(card.is_spinning());
+
+        let val = card.slot_io_read(0x0E, 0);
+        assert_eq!(
+            val & 0x20,
+            0,
+            "IWM status bit 5 must be clear when the motor is off"
+        );
+    }
+
+    #[test]
+    fn test_discrete_disk2_keeps_latch_during_spindown() {
+        // A discrete Disk II (non-//c, iwm == false) must NOT adopt the IWM
+        // status-register shortcut: while the motor is off but the drive is still
+        // spinning down, reading Q7L with Q6 high returns the held latch — so a
+        // write-protect sense ($C0ED then $C0EE) is never misread as "writable".
+        let mut card = Disk2Card::new(6);
+        assert!(!card.iwm);
+        card.load_mode = true; // Q6 high
+        card.write_mode = false;
+        card.motor_on = false;
+        card.drives[0].spinning = 1; // still spinning down
+        card.latch = 0xFF; // write-protected sense
+        assert!(card.is_spinning());
+
+        assert_eq!(
+            card.slot_io_read(0x0E, 0),
+            0xFF,
+            "discrete Disk II must hold the latch during spin-down (write-protect safety)"
+        );
+    }
+
+    #[test]
+    fn test_iwm_status_read_returns_latch_when_motor_on() {
+        // The status-register special case must only fire when the motor is off.
+        // With the motor on (Q6 high), Q7L returns the normal latch so that the
+        // Disk II write-protect sense ($C0ED then $C0EE) still works on the //e.
+        let mut card = Disk2Card::new(6);
+        card.load_mode = true; // Q6 high
+        card.write_mode = false;
+        card.motor_on = true;
+        card.latch = 0xFF; // write-protected sense
+        assert_eq!(
+            card.slot_io_read(0x0E, 0),
+            0xFF,
+            "status read must return the latch while the motor is on"
         );
     }
 

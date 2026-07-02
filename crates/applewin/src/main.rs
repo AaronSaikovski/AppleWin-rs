@@ -6,8 +6,13 @@ use apple2_core::{
 /// Apple IIe Enhanced 16KB ROM embedded at compile time.
 static APPLE2E_ROM: &[u8] = include_bytes!("../../../roms/apple2e_enhanced.rom");
 
-/// Apple IIc 32KB ROM (ROM version 04, 341-0445-B) embedded at compile time.
-static APPLE2C_ROM: &[u8] = include_bytes!("../../../roms/apple2c.rom");
+/// Apple IIc 32KB ROM (ROM version 0 — the "3.5 ROM", 342-0033-A) embedded at
+/// compile time.  This is the first 32KB IIc firmware, adding UniDisk 3.5
+/// support, the Mini-Assembler, and the self-test diagnostic.  It is a genuine
+/// dual-bank ROM: the lower 16KB is the standard bank (active at power-on) and
+/// the upper 16KB is the alternate bank selected via the $C028 ROM switch.
+static APPLE2C_ROM: &[u8] =
+    include_bytes!("../../../roms/Apple_IIc/Apple IIc ROM 00 - 342-0033-A - 1985.bin");
 
 #[cfg(feature = "gui")]
 mod config;
@@ -3855,7 +3860,11 @@ mod gui {
             // Slot 3: 80-col handled by ROM + bus soft-switches
             emu.bus.cards.insert(Box::new(MouseCard::new(4)));
             // Slot 5: empty
-            emu.bus.cards.insert(Box::new(Disk2Card::new(6)));
+            // The //c drives its disk port through the internal IWM firmware, so
+            // enable IWM status-register semantics on the Disk II controller.
+            let mut disk = Disk2Card::new(6);
+            disk.set_iwm(true);
+            emu.bus.cards.insert(Box::new(disk));
             // Slot 7: empty
             // No aux card — IIc has 128KB built-in (aux_ram is always present)
             return;
