@@ -5,9 +5,7 @@
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
 ![Version](https://img.shields.io/badge/version-1.1.4-green.svg)
 
-### ** This project was expermimental and has now been archived and no new development or updates will be done. **
-
-An experimental Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
+An complete Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
 > **Original project:** [https://github.com/AppleWin/AppleWin](https://github.com/AppleWin/AppleWin)
 > **This port:** [https://github.com/AaronSaikovski/AppleWin-rs](https://github.com/AaronSaikovski/AppleWin-rs)
