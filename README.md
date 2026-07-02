@@ -3,9 +3,9 @@
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.4-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.5-green.svg)
 
-### ** This project was expermimental and has now been archived and no new development or updates will be done. **
+### ** This project was experimental and has now been archived and no new development or updates will be done. **
 
 An experimental Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
@@ -55,7 +55,7 @@ xattr -d com.apple.quarantine AppleWin.app
 - Apple II+ (`][+`)
 - Apple IIe (`//e`)
 - Apple IIe Enhanced (`//e Enhanced`) — default
-- Apple IIc (`//c`) — 32KB ROM, built-in peripherals, 128KB RAM
+- Apple IIc (`//c`) — 32KB "3.5 ROM" (ROM 0, 342-0033-A), built-in peripherals, 128KB RAM; boots DOS 3.3 and ProDOS, and renders double hi-res (DHGR) software correctly
 - **Apple IIgs** (`//gs`) — 65C816 CPU, Super Hi-Res graphics, Ensoniq audio _(temporarily disabled in the UI; see note below)_
 
 > No support currently for the //c+, Laser 128, or Laser 128EX/EX2.
@@ -223,12 +223,12 @@ Or run the compiled binary directly:
 cargo test
 ```
 
-Runs 472 tests across all crates:
+Runs 479 tests across all crates:
 
 | Crate                       | Tests | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apple2-core`               | 290   | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility, Apple IIc model (INTCXROM, ROM banking, IOUDIS/DHIRES gating), Via6522 (register read/write, timers, IRQ, state serialization), performance regression guards (dispatch-table equivalence, speaker toggle cap, card slot range checks) |
-| `apple2-core` (integration) | 12    | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution                                                                                                                                                                                                                                                                                                                                              |
+| `apple2-core`               | 294   | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility (handshake/ready/status-register reads), Apple IIc model (INTCXROM, 32K ROM banking, AN3-driven double hi-res), Via6522 (register read/write, timers, IRQ, state serialization), performance regression guards (dispatch-table equivalence, speaker toggle cap, card slot range checks) |
+| `apple2-core` (integration) | 15    | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution, Apple //c 3.5-ROM disk boot (title banner, DOS 3.3, and ProDOS)                                                                                                                                                                                                                                                                              |
 | `apple2-iigs`               | 89    | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP                                                                                                                                                                                                                                                                                              |
 | `apple2-iigs` (integration) | 15    | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches                                                                                                                                                                                                                                                                                                                                               |
 | `apple2-iigs` (peripherals) | 35    | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path)                                                                                                                                                                                                                                                             |
@@ -322,7 +322,9 @@ are remapped via AppleWin's `DoubleHiresPalIndex` (rotate-left-by-1) before pale
 lookup, and the colour modes drive AppleWin's NTSC composite signal chain
 (`initChromaPhaseTables`-equivalent filtered luma/chroma), with scanline-doubling
 for crisp text. DHGR games such as Broderbund's _Airheart_ render with the correct
-sky-blue, orange, and white hues and clean high-resolution text.
+sky-blue, orange, and white hues and clean high-resolution text — on the Apple //c
+as well as the //e, since the //c's AN3 (`$C05E/$C05F`) soft switch now drives
+double hi-res independently of IOUDIS, matching real hardware.
 
 ---
 

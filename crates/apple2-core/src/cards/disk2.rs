@@ -528,6 +528,13 @@ pub struct Disk2Card {
     latch: u8,
     /// Stepper magnet states, bits 0–3 = phases 0–3.
     phases: u8,
+    /// When true, the drive port is driven by the Apple //c's IWM (Integrated
+    /// Woz Machine) firmware rather than the discrete Disk II state machine.
+    /// This enables IWM status-register semantics on Q7L reads (see
+    /// `slot_io_read`) that the //c ROM relies on to boot ProDOS.  Discrete
+    /// Disk II controllers (//e, II+, II) leave this false so that write-protect
+    /// sense and data latch reads behave exactly as the hardware does.
+    iwm: bool,
 
     // ── WOZ LSS (Logic State Sequencer) fields ──────────────────────────
     /// Shift register used by the LSS for WOZ reads/writes.
@@ -550,10 +557,18 @@ impl Disk2Card {
             load_mode: false,
             latch: 0xFF,
             phases: 0,
+            iwm: false,
             shift_reg: 0,
             latch_delay: 0,
             last_update_cycle: 0,
         }
+    }
+
+    /// Mark this controller as driven by the Apple //c IWM (enables IWM
+    /// status-register semantics on Q7L reads).  Call this when installing the
+    /// card in a //c; discrete Disk II controllers leave it disabled.
+    pub fn set_iwm(&mut self, iwm: bool) {
+        self.iwm = iwm;
     }
 
     /// Returns true if the disk motor is on or the drive is still spinning down.
@@ -930,11 +945,14 @@ impl Card for Disk2Card {
         // status-register poll (case 3) Q6 (`load_mode`) is high and the read
         // reflects the IWM *enable* latch, which clears the instant the motor is
         // switched off — even while the drive is still physically spinning down.
-        // So when Q6 is high we ignore the spin-down grace period.
+        // So when Q6 is high we ignore the spin-down grace period — but ONLY for
+        // the //c's IWM.  A discrete Disk II (//e, II+, II) must keep returning
+        // the latch during spin-down so a write-protect sense ($C0ED then $C0EE)
+        // is never misread as "writable" while the drive coasts to a stop.
         if reg == 0x0E
             && !was_write_mode
             && !self.motor_on
-            && (!self.is_spinning() || self.load_mode)
+            && (!self.is_spinning() || (self.iwm && self.load_mode))
         {
             return 0;
         }
@@ -2333,6 +2351,7 @@ mod tests {
         // read must reflect the enable latch (motor off), i.e. return 0 — else
         // the poll (AND #$20 / BNE) loops forever.
         let mut card = Disk2Card::new(6);
+        card.set_iwm(true); // //c IWM controller
         card.load_mode = true; // Q6 high — status-register read
         card.write_mode = false;
         card.motor_on = false;
@@ -2345,6 +2364,45 @@ mod tests {
             val & 0x20,
             0,
             "IWM status bit 5 must be clear when the motor is off"
+        );
+    }
+
+    #[test]
+    fn test_discrete_disk2_keeps_latch_during_spindown() {
+        // A discrete Disk II (non-//c, iwm == false) must NOT adopt the IWM
+        // status-register shortcut: while the motor is off but the drive is still
+        // spinning down, reading Q7L with Q6 high returns the held latch — so a
+        // write-protect sense ($C0ED then $C0EE) is never misread as "writable".
+        let mut card = Disk2Card::new(6);
+        assert!(!card.iwm);
+        card.load_mode = true; // Q6 high
+        card.write_mode = false;
+        card.motor_on = false;
+        card.drives[0].spinning = 1; // still spinning down
+        card.latch = 0xFF; // write-protected sense
+        assert!(card.is_spinning());
+
+        assert_eq!(
+            card.slot_io_read(0x0E, 0),
+            0xFF,
+            "discrete Disk II must hold the latch during spin-down (write-protect safety)"
+        );
+    }
+
+    #[test]
+    fn test_iwm_status_read_returns_latch_when_motor_on() {
+        // The status-register special case must only fire when the motor is off.
+        // With the motor on (Q6 high), Q7L returns the normal latch so that the
+        // Disk II write-protect sense ($C0ED then $C0EE) still works on the //e.
+        let mut card = Disk2Card::new(6);
+        card.load_mode = true; // Q6 high
+        card.write_mode = false;
+        card.motor_on = true;
+        card.latch = 0xFF; // write-protected sense
+        assert_eq!(
+            card.slot_io_read(0x0E, 0),
+            0xFF,
+            "status read must return the latch while the motor is on"
         );
     }
 

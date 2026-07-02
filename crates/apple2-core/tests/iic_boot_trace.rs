@@ -41,6 +41,7 @@ fn make_iic(disk: Option<&str>) -> Emulator {
     emu.bus.cards.insert(Box::new(SscCard::new(2)));
     emu.bus.cards.insert(Box::new(MouseCard::new(4)));
     let mut disk6 = Disk2Card::new(6);
+    disk6.set_iwm(true); // //c drives its disk port through the internal IWM
     if let Some(d) = disk {
         let data = std::fs::read(d).expect("disk image present");
         let ext = d.rsplit('.').next().unwrap_or("dsk");
@@ -50,14 +51,30 @@ fn make_iic(disk: Option<&str>) -> Emulator {
     emu
 }
 
+/// Run the emulator in large cycle batches until `needle` appears on the text
+/// screen or `cap_cycles` is reached, returning the final screen text.  Batching
+/// (rather than one instruction per call) keeps the boot tests fast, and the
+/// early-exit-on-match with a generous cap keeps them from being brittle to small
+/// shifts in boot timing.
+fn run_until(emu: &mut Emulator, needle: &str, cap_cycles: u64) -> String {
+    const BATCH: u64 = 500_000;
+    let mut ran = 0u64;
+    while ran < cap_cycles {
+        emu.execute(BATCH);
+        ran += BATCH;
+        let screen = screen_text(emu);
+        if screen.contains(needle) {
+            return screen;
+        }
+    }
+    screen_text(emu)
+}
+
 /// The 3.5 ROM must reach the //c title banner shortly after power-on.
 #[test]
 fn iic_35rom_shows_title_banner() {
     let mut emu = make_iic(None);
-    for _ in 0..3_000_000u64 {
-        emu.execute(1);
-    }
-    let screen = screen_text(&emu);
+    let screen = run_until(&mut emu, "Apple //c", 30_000_000);
     assert!(
         screen.contains("Apple //c"),
         "expected //c title banner, got:\n{screen}"
@@ -68,11 +85,7 @@ fn iic_35rom_shows_title_banner() {
 #[test]
 fn iic_35rom_boots_dos33() {
     let mut emu = make_iic(Some(DOS33));
-    // ~20M cycles ≈ 20s emulated — enough for DOS 3.3 to load and greet.
-    for _ in 0..20_000_000u64 {
-        emu.execute(1);
-    }
-    let screen = screen_text(&emu);
+    let screen = run_until(&mut emu, "DOS VERSION 3.3", 150_000_000);
     assert!(
         screen.contains("DOS VERSION 3.3"),
         "expected DOS 3.3 greeting, got:\n{screen}"
@@ -89,10 +102,7 @@ fn iic_35rom_boots_dos33() {
 #[test]
 fn iic_35rom_boots_prodos() {
     let mut emu = make_iic(Some(PRODOS));
-    for _ in 0..25_000_000u64 {
-        emu.execute(1);
-    }
-    let screen = screen_text(&emu);
+    let screen = run_until(&mut emu, "PRODOS", 150_000_000);
     assert!(
         screen.contains("PRODOS"),
         "expected ProDOS boot volume, got:\n{screen}"

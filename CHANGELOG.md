@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-07-02
+
 ### Fixed
 
 - **Apple //c: ProDOS disks would not boot (hung on a blank screen).** The //c
@@ -26,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ProDOS never booted on the //c (it booted fine on the //e, which uses the card's
   own boot ROM). The IWM status read now reflects the enable latch — which clears
   the instant the motor is switched off — so `$C0EE` returns bit 5 clear while the
-  motor is off, regardless of physical spin-down. DOS 3.3 and ProDOS now both boot
-  on the //c and //e.
+  motor is off, regardless of physical spin-down. This behaviour is scoped to the
+  //c's IWM controller; discrete Disk II controllers (//e, II+, II) continue to
+  hold the data latch during spin-down so a write-protect sense is never misread
+  as "writable". DOS 3.3 and ProDOS now both boot on the //c and //e.
 - **Apple //c: double hi-res (DHGR) never engaged, garbling //c DHGR software.**
   On the //c the `$C05E/$C05F` (AN3) soft switches were gated behind `IOUDIS`, so
   double hi-res only turned on if a program first set `IOUDIS` via `$C07E`. Real

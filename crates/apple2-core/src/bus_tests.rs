@@ -683,6 +683,31 @@ fn iie_dhires_not_gated_by_ioudis() {
 }
 
 #[test]
+fn iic_ioudis_soft_switch_toggles_independently() {
+    let mut bus = make_iic_bus();
+    // IOUDIS still functions as its own switch — it just no longer gates DHIRES.
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC07E, 0, 0); // IOUDIS on
+    assert!(bus.mode.contains(MemMode::MF_IOUDIS));
+    bus.write(0xC07F, 0, 0); // IOUDIS off
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
+
+    // Toggling IOUDIS must not disturb the DHIRES state.
+    bus.write(0xC05E, 0, 0); // DHIRES on
+    assert!(bus.mode.contains(MemMode::MF_DHIRES));
+    bus.write(0xC07E, 0, 0); // IOUDIS on
+    assert!(
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "IOUDIS must not clear DHIRES"
+    );
+    bus.write(0xC07F, 0, 0); // IOUDIS off
+    assert!(
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "IOUDIS must not clear DHIRES"
+    );
+}
+
+#[test]
 fn iic_32k_rom_reads_standard_bank_by_default() {
     let mut bus = make_iic_bus();
     // Place distinct values in both banks at $F000

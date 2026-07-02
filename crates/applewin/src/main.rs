@@ -3860,7 +3860,11 @@ mod gui {
             // Slot 3: 80-col handled by ROM + bus soft-switches
             emu.bus.cards.insert(Box::new(MouseCard::new(4)));
             // Slot 5: empty
-            emu.bus.cards.insert(Box::new(Disk2Card::new(6)));
+            // The //c drives its disk port through the internal IWM firmware, so
+            // enable IWM status-register semantics on the Disk II controller.
+            let mut disk = Disk2Card::new(6);
+            disk.set_iwm(true);
+            emu.bus.cards.insert(Box::new(disk));
             // Slot 7: empty
             // No aux card — IIc has 128KB built-in (aux_ram is always present)
             return;
