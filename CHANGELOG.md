@@ -17,6 +17,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Apple //c: ProDOS disks would not boot (hung on a blank screen).** The //c
+  forces its internal ROM, whose disk firmware drives the port as an IWM. ProDOS
+  turns the drive motor off and then polls the IWM status register (`$C0EE` read
+  with Q6 high) waiting for the enable bit (bit 5) to clear. Our discrete Disk II
+  model kept returning the stale data latch (bit 5 set) throughout the ~1 s
+  spin-down grace period, so the poll (`AND #$20` / `BNE`) looped forever and
+  ProDOS never booted on the //c (it booted fine on the //e, which uses the card's
+  own boot ROM). The IWM status read now reflects the enable latch — which clears
+  the instant the motor is switched off — so `$C0EE` returns bit 5 clear while the
+  motor is off, regardless of physical spin-down. DOS 3.3 and ProDOS now both boot
+  on the //c and //e.
+- **Apple //c: double hi-res (DHGR) never engaged, garbling //c DHGR software.**
+  On the //c the `$C05E/$C05F` (AN3) soft switches were gated behind `IOUDIS`, so
+  double hi-res only turned on if a program first set `IOUDIS` via `$C07E`. Real
+  //c software (e.g. Broderbund's *Airheart*) enables DHGR with a bare `$C05E`
+  and never touches `IOUDIS`, so on the //c the game's double-hi-res graphics
+  were rendered as single hi-res (wrong colours / garbled). Per the Apple //c
+  Technical Reference, AN3 controls double hi-res **independently of IOUDIS**, so
+  `$C05E/$C05F` now toggle DHIRES on the //c exactly as on the //e. Airheart now
+  renders correctly on the //c.
+
+### Changed
+
+- **Apple //c now uses the 32KB "3.5 ROM" (ROM version 0, 342-0033-A).** The //c
+  model previously embedded ROM version 4 (341-0445-B). The application now
+  embeds the earlier 3.5 ROM — the first 32KB //c firmware, adding UniDisk 3.5
+  support, the Mini-Assembler, and the self-test diagnostic. It is a genuine
+  dual-bank ROM (lower 16KB standard bank, upper 16KB alternate bank via the
+  `$C028` ROM switch). Verified booting the DOS 3.3 System Master to the
+  Applesoft/Integer BASIC greeting in //c mode; covered by new regression tests
+  in `crates/apple2-core/tests/iic_boot_trace.rs`.
+
+### Fixed
+
 - **Double Hi-Res (DHGR) colours were completely wrong.** The 16-colour DHGR
   palette was indexed directly with the raw 4-bit value, but DHGR nibbles must
   first be remapped via AppleWin's `DoubleHiresPalIndex` — a rotate-left-by-1 of

@@ -627,40 +627,39 @@ fn iic_rom_bank_switching_via_c028_read() {
 }
 
 #[test]
-fn iic_dhires_gated_by_ioudis() {
+fn iic_dhires_toggles_independently_of_ioudis() {
     let mut bus = make_iic_bus();
-    // On IIc, DHIRES should NOT toggle when IOUDIS is clear
+    // On the IIc, $C05E/$C05F (AN3) control double hi-res independently of IOUDIS
+    // (per the //c Technical Reference).  DHIRES must toggle with IOUDIS clear —
+    // this is how software such as Airheart enables DHGR with a bare $C05E.
     assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
-    bus.write(0xC05E, 0, 0); // attempt DHIRESON
+    bus.write(0xC05E, 0, 0); // DHIRESON
     assert!(
-        !bus.mode.contains(MemMode::MF_DHIRES),
-        "DHIRES should not activate when IOUDIS is clear on IIc"
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES should activate on IIc even with IOUDIS clear"
     );
+    bus.write(0xC05F, 0, 0); // DHIRESOFF
+    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
 
-    // Set IOUDIS, then DHIRES should work
+    // Still works with IOUDIS set.
     bus.write(0xC07E, 0, 0); // IOUDIS on
     assert!(bus.mode.contains(MemMode::MF_IOUDIS));
     bus.write(0xC05E, 0, 0); // DHIRESON
     assert!(bus.mode.contains(MemMode::MF_DHIRES));
-
-    // Clear DHIRES with IOUDIS still set
-    bus.write(0xC05F, 0, 0); // DHIRESOFF
-    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
 }
 
 #[test]
-fn iic_dhires_read_strobe_gated_by_ioudis() {
+fn iic_dhires_read_strobe_toggles_dhires() {
     let mut bus = make_iic_bus();
-    // Read-strobe at $C05E should also be gated
+    // Read-strobe at $C05E also toggles DHIRES, independently of IOUDIS.
+    assert!(!bus.mode.contains(MemMode::MF_IOUDIS));
     bus.read(0xC05E, 0);
     assert!(
-        !bus.mode.contains(MemMode::MF_DHIRES),
-        "DHIRES read-strobe should be gated by IOUDIS on IIc"
+        bus.mode.contains(MemMode::MF_DHIRES),
+        "DHIRES read-strobe should toggle DHIRES on IIc"
     );
-
-    bus.write(0xC07E, 0, 0); // IOUDIS on
-    bus.read(0xC05E, 0);
-    assert!(bus.mode.contains(MemMode::MF_DHIRES));
+    bus.read(0xC05F, 0);
+    assert!(!bus.mode.contains(MemMode::MF_DHIRES));
 }
 
 #[test]
