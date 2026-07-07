@@ -1061,32 +1061,34 @@ mod gui {
         }
     }
 
-    // ── eframe App impl ───────────────────────────────────────────────────────
+    /// UI actions requested by panel closures during a frame, applied after
+    /// all panels are laid out (so closures never need `&mut self` twice).
+    #[derive(Default)]
+    struct DeferredActions {
+        hard_reset: bool,
+        reset: bool,
+        quit: bool,
+        load_disk1: bool,
+        load_disk2: bool,
+        eject_disk1: bool,
+        eject_disk2: bool,
+        swap: bool,
+        fullscreen: bool,
+        about: bool,
+        show_settings: bool,
+        screenshot: bool,
+        load_hdd1: bool,
+        load_hdd2: bool,
+        eject_hdd1: bool,
+        eject_hdd2: bool,
+        recent_disk: Option<String>,
+        recent_hdd: Option<String>,
+    }
 
-    impl eframe::App for EmulatorApp {
-        fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-            self.frame_no = self.frame_no.wrapping_add(1);
+    // ── update() frame sections ───────────────────────────────────────────────
 
-            // Load icons and logo texture on first frame
-            if self.icons.is_none() {
-                self.icons = Some(Icons::load(ctx));
-            }
-            if self.logo_texture.is_none()
-                && let Some((w, h, rgba)) = decode_bmp24_rgba(BMP_LOGO)
-            {
-                let img = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-                self.logo_texture = Some(ctx.load_texture(
-                    "logo",
-                    img,
-                    TextureOptions {
-                        magnification: egui::TextureFilter::Linear,
-                        minification: egui::TextureFilter::Linear,
-                    },
-                ));
-            }
-
-            let in_logo_mode = self.emu.mode == apple2_core::emulator::AppMode::Logo;
-
+    impl EmulatorApp {
+        fn run_emulation(&mut self, in_logo_mode: bool) {
             // ── Run emulator for elapsed wall-clock time (not during logo) ───
             //
             // We execute cycles proportional to real time elapsed since the last
@@ -1170,7 +1172,9 @@ mod gui {
                 // Keep last_frame_time current so we don't burst when logo exits.
                 self.last_frame_time = frame_now;
             }
+        }
 
+        fn synth_speaker_audio(&mut self) {
             // ── Speaker audio synthesis ───────────────────────────────────────
             // Mirrors AppleWin's UpdateSpkr() / DCFilter() logic from Speaker.cpp.
             {
@@ -1285,7 +1289,9 @@ mod gui {
                     }
                 }
             }
+        }
 
+        fn synth_ensoniq_audio(&mut self) {
             // ── Ensoniq DOC audio (IIgs only) ─────────────────────────────────
             if let Some(ref mut iigs) = self.iigs
                 && let Some(buf) = &self.audio_buf
@@ -1310,7 +1316,9 @@ mod gui {
                     }
                 }
             }
+        }
 
+        fn synth_mockingboard_audio(&mut self) {
             // ── Mockingboard audio ────────────────────────────────────────────
             // Drain audio from any Mockingboard cards and mix into the ring buffer.
             // Collect all card samples first, then lock the ring buffer once for
@@ -1346,7 +1354,9 @@ mod gui {
                     }
                 }
             }
+        }
 
+        fn tap_wav_recording(&mut self) {
             // ── WAV audio recording — tap the ring buffer ────────────────────
             // Feed the latest samples to the WAV recorder if active.
             if let Some(ref mut rec) = self.wav_recorder
@@ -1361,7 +1371,11 @@ mod gui {
                 drop(locked);
                 let _ = rec.write_samples(&self.wav_scratch);
             }
+        }
 
+        /// Keyboard, paste, joystick/gamepad, and key-triggered actions.
+        /// Returns `true` when the user requested quit (Ctrl+Esc).
+        fn handle_input(&mut self, ctx: &egui::Context, in_logo_mode: bool) -> bool {
             // ── Collect input events ──────────────────────────────────────────
             let mut key_queue: Vec<u8> = Vec::new();
             let mut do_reset: bool = false;
@@ -2026,11 +2040,15 @@ mod gui {
             if do_reset {
                 self.reset(false);
             }
-            if do_quit {
-                frame.close();
-                return;
-            }
+            // Quit is applied by the caller (frame.close() + early return).
+            do_quit
+        }
 
+        fn upload_frame_texture(
+            &mut self,
+            ctx: &egui::Context,
+            in_logo_mode: bool,
+        ) -> Option<egui::TextureId> {
             // ── Render display to GPU texture ─────────────────────────────────
             // When debugger is active, render debugger into the framebuffer
             // instead of the Apple II screen, matching original AppleWin.
@@ -2055,51 +2073,17 @@ mod gui {
                     self.texture = Some(ctx.load_texture("apple2", image, tex_opts));
                 }
             }
-            let tex_id = if in_logo_mode {
+            if in_logo_mode {
                 self.logo_texture.as_ref().map(|t| t.id())
             } else {
                 self.texture.as_ref().map(|t| t.id())
-            };
+            }
+        }
 
-            // Snapshot emulator state for use in closures (avoids borrow conflicts)
-            //let pc = self.emu.cpu.pc;
-            //let cycles = self.emu.cpu.cycles;
-            let d1_name = Self::disk_display_name(&self.disk1).to_owned();
+        fn show_menu_bar(&mut self, ctx: &egui::Context, act: &mut DeferredActions) {
+            // Snapshot disk state for use in closures (avoids borrow conflicts)
             let d1_loaded = self.disk1.is_some();
             let d2_loaded = self.disk2.is_some();
-            let d1_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 0);
-            let d2_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 1);
-
-            // HDD activity: check all slots for a hard disk controller
-            let hdd_activity =
-                (0..apple2_core::card::NUM_SLOTS)
-                    .find(|&s| {
-                        self.emu.bus.cards.slot(s).is_some_and(|c| {
-                            c.card_type() == apple2_core::card::CardType::GenericHdd
-                        })
-                    })
-                    .map(|s| self.emu.bus.disk_drive_activity(s, 0))
-                    .unwrap_or_default();
-
-            // ── Deferred actions (set by panel closures, applied after) ───────
-            let mut act_hard_reset = false;
-            let mut act_reset = false;
-            let mut act_quit = false;
-            let mut act_load_disk1 = false;
-            let mut act_load_disk2 = false;
-            let mut act_eject_disk1 = false;
-            let mut act_eject_disk2 = false;
-            let mut act_swap = false;
-            let mut act_fullscreen = false;
-            let mut act_about = false;
-            let mut act_show_settings = false;
-            let mut act_screenshot = false;
-            let mut act_load_hdd1 = false;
-            let mut act_load_hdd2 = false;
-            let mut act_eject_hdd1 = false;
-            let mut act_eject_hdd2 = false;
-            let mut act_recent_disk: Option<String> = None;
-            let mut act_recent_hdd: Option<String> = None;
 
             // ── Menu bar ──────────────────────────────────────────────────────
             egui::TopBottomPanel::top("menubar")
@@ -2113,25 +2097,25 @@ mod gui {
                         ui.menu_button("File", |ui| {
                             // ── Floppy disks ─────────────────────────────────
                             if ui.button("Load Disk 1…").clicked() {
-                                act_load_disk1 = true;
+                                act.load_disk1 = true;
                                 ui.close_menu();
                             }
                             if ui.button("Load Disk 2…").clicked() {
-                                act_load_disk2 = true;
+                                act.load_disk2 = true;
                                 ui.close_menu();
                             }
                             if ui
                                 .add_enabled(d1_loaded, egui::Button::new("Eject Disk 1"))
                                 .clicked()
                             {
-                                act_eject_disk1 = true;
+                                act.eject_disk1 = true;
                                 ui.close_menu();
                             }
                             if ui
                                 .add_enabled(d2_loaded, egui::Button::new("Eject Disk 2"))
                                 .clicked()
                             {
-                                act_eject_disk2 = true;
+                                act.eject_disk2 = true;
                                 ui.close_menu();
                             }
                             // ── Recent Disks submenu ──────────────────────────
@@ -2146,7 +2130,7 @@ mod gui {
                                             .to_string_lossy()
                                             .into_owned();
                                         if ui.button(name).clicked() {
-                                            act_recent_disk = Some(path.clone());
+                                            act.recent_disk = Some(path.clone());
                                             ui.close_menu();
                                         }
                                     }
@@ -2172,25 +2156,25 @@ mod gui {
                                 let hdd1_loaded = self.config.last_hdd1.is_some();
                                 let hdd2_loaded = self.config.last_hdd2.is_some();
                                 if ui.button(format!("Load HDD 1…  [{}]", hdd1_name)).clicked() {
-                                    act_load_hdd1 = true;
+                                    act.load_hdd1 = true;
                                     ui.close_menu();
                                 }
                                 if ui
                                     .add_enabled(hdd1_loaded, egui::Button::new("Eject HDD 1"))
                                     .clicked()
                                 {
-                                    act_eject_hdd1 = true;
+                                    act.eject_hdd1 = true;
                                     ui.close_menu();
                                 }
                                 if ui.button(format!("Load HDD 2…  [{}]", hdd2_name)).clicked() {
-                                    act_load_hdd2 = true;
+                                    act.load_hdd2 = true;
                                     ui.close_menu();
                                 }
                                 if ui
                                     .add_enabled(hdd2_loaded, egui::Button::new("Eject HDD 2"))
                                     .clicked()
                                 {
-                                    act_eject_hdd2 = true;
+                                    act.eject_hdd2 = true;
                                     ui.close_menu();
                                 }
                             }
@@ -2206,7 +2190,7 @@ mod gui {
                                             .to_string_lossy()
                                             .into_owned();
                                         if ui.button(name).clicked() {
-                                            act_recent_hdd = Some(path.clone());
+                                            act.recent_hdd = Some(path.clone());
                                             ui.close_menu();
                                         }
                                     }
@@ -2214,27 +2198,27 @@ mod gui {
                             });
                             ui.separator();
                             if ui.button("Screenshot       F12").clicked() {
-                                act_screenshot = true;
+                                act.screenshot = true;
                                 ui.close_menu();
                             }
                             ui.separator();
                             if ui.button("Exit").clicked() {
-                                act_quit = true;
+                                act.quit = true;
                                 ui.close_menu();
                             }
                         });
                         ui.menu_button("Machine", |ui| {
                             if ui.button("Reset          Ctrl+F2").clicked() {
-                                act_reset = true;
+                                act.reset = true;
                                 ui.close_menu();
                             }
                             if ui.button("Hard Reset          F1").clicked() {
-                                act_hard_reset = true;
+                                act.hard_reset = true;
                                 ui.close_menu();
                             }
                             ui.separator();
                             if ui.button("Settings…").clicked() {
-                                act_show_settings = true;
+                                act.show_settings = true;
                                 ui.close_menu();
                             }
                         });
@@ -2245,7 +2229,7 @@ mod gui {
                                 "Fullscreen       F11"
                             };
                             if ui.button(label).clicked() {
-                                act_fullscreen = true;
+                                act.fullscreen = true;
                                 ui.close_menu();
                             }
                             ui.separator();
@@ -2316,12 +2300,31 @@ mod gui {
                         });
                         ui.menu_button("Help", |ui| {
                             if ui.button("About AppleWin-rs…").clicked() {
-                                act_about = true;
+                                act.about = true;
                                 ui.close_menu();
                             }
                         });
                     });
                 });
+        }
+
+        fn show_status_bar(&mut self, ctx: &egui::Context, in_logo_mode: bool) {
+            // Snapshot disk state for use in closures (avoids borrow conflicts)
+            let d1_name = Self::disk_display_name(&self.disk1).to_owned();
+            let d1_loaded = self.disk1.is_some();
+            let d1_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 0);
+            let d2_activity = self.emu.bus.disk_drive_activity(self.disk_slot, 1);
+
+            // HDD activity: check all slots for a hard disk controller
+            let hdd_activity =
+                (0..apple2_core::card::NUM_SLOTS)
+                    .find(|&s| {
+                        self.emu.bus.cards.slot(s).is_some_and(|c| {
+                            c.card_type() == apple2_core::card::CardType::GenericHdd
+                        })
+                    })
+                    .map(|s| self.emu.bus.disk_drive_activity(s, 0))
+                    .unwrap_or_default();
 
             // ── Status bar (hidden when debugger is active) ──────────────────
             let debugger_fullscreen = self.show_debugger && self.debugger.active;
@@ -2388,6 +2391,10 @@ mod gui {
                         });
                     });
             } // end if !debugger_fullscreen (status bar)
+        }
+
+        fn show_button_strip(&mut self, ctx: &egui::Context, act: &mut DeferredActions) {
+            let debugger_fullscreen = self.show_debugger && self.debugger.active;
 
             // ── Right button strip (hidden when debugger is active) ───────────
             let icons = self.icons.as_ref();
@@ -2416,7 +2423,7 @@ mod gui {
                             )
                             .clicked()
                             {
-                                act_about = true;
+                                act.about = true;
                             }
                             ui.add_space(2.0);
                             // Matches AppleWin BTN_RUN logic:
@@ -2435,9 +2442,9 @@ mod gui {
                                 let ctrl =
                                     ui.ctx().input(|i| i.modifiers.ctrl || i.modifiers.command);
                                 if ctrl {
-                                    act_reset = true;
+                                    act.reset = true;
                                 } else {
-                                    act_hard_reset = true;
+                                    act.hard_reset = true;
                                 }
                             }
                             ui.add_space(2.0);
@@ -2451,7 +2458,7 @@ mod gui {
                             )
                             .clicked()
                             {
-                                act_load_disk1 = true;
+                                act.load_disk1 = true;
                             }
                             ui.add_space(2.0);
                             if icon_btn(
@@ -2464,7 +2471,7 @@ mod gui {
                             )
                             .clicked()
                             {
-                                act_load_disk2 = true;
+                                act.load_disk2 = true;
                             }
                             ui.add_space(2.0);
                             if icon_btn(
@@ -2477,7 +2484,7 @@ mod gui {
                             )
                             .clicked()
                             {
-                                act_swap = true;
+                                act.swap = true;
                             }
                             ui.add_space(2.0);
                             if icon_btn(
@@ -2490,7 +2497,7 @@ mod gui {
                             )
                             .clicked()
                             {
-                                act_fullscreen = true;
+                                act.fullscreen = true;
                             }
                             ui.add_space(2.0);
                             if icon_btn(
@@ -2523,12 +2530,14 @@ mod gui {
                             )
                             .clicked()
                             {
-                                act_show_settings = true;
+                                act.show_settings = true;
                             }
                         });
                     });
             } // end if !debugger_fullscreen (button strip)
+        }
 
+        fn show_reboot_dialog(&mut self, ctx: &egui::Context) {
             // ── Confirm reboot dialog ─────────────────────────────────────────
             if let Some(power_cycle) = self.pending_reset {
                 let mut do_reset = false;
@@ -2563,7 +2572,9 @@ mod gui {
                     self.pending_reset = None;
                 }
             }
+        }
 
+        fn show_debugger_panel(&mut self, ctx: &egui::Context) {
             // ── Debugger (renders into framebuffer, command bar at bottom) ────
             if self.show_debugger && self.debugger.active {
                 use apple2_debugger::commands::{self, CmdResult, CpuRegs};
@@ -2821,7 +2832,9 @@ mod gui {
                     }
                 }
             }
+        }
 
+        fn show_settings_dialog(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
             // ── Settings dialog ───────────────────────────────────────────────
             if self.show_settings {
                 let mut apply_settings = false;
@@ -3329,7 +3342,9 @@ mod gui {
                     self.show_settings = false;
                 }
             }
+        }
 
+        fn show_card_popups(&mut self, ctx: &egui::Context) {
             // ── Per-card options popups ───────────────────────────────────────
             for slot in 0..8usize {
                 if !self.slot_options_open[slot] {
@@ -3389,7 +3404,9 @@ mod gui {
                     });
                 self.slot_options_open[slot] = still_open;
             }
+        }
 
+        fn show_about_dialog(&mut self, ctx: &egui::Context) {
             // ── About dialog ──────────────────────────────────────────────────
             if self.show_about {
                 egui::Window::new("About AppleWin-rs")
@@ -3410,6 +3427,15 @@ mod gui {
                         });
                     });
             }
+        }
+
+        fn show_central_panel(
+            &mut self,
+            ctx: &egui::Context,
+            in_logo_mode: bool,
+            tex_id: Option<egui::TextureId>,
+        ) {
+            let debugger_fullscreen = self.show_debugger && self.debugger.active;
 
             // ── Central panel — Apple II screen / debugger display ─────────────
             let central_bg = if debugger_fullscreen {
@@ -3531,38 +3557,45 @@ mod gui {
                         ui.allocate_rect(outer, Sense::hover());
                     } // end else (normal mode)
                 });
+        }
 
+        fn apply_deferred_actions(
+            &mut self,
+            frame: &mut eframe::Frame,
+            act: DeferredActions,
+            in_logo_mode: bool,
+        ) {
             // ── Apply deferred actions ────────────────────────────────────────
-            if act_hard_reset {
+            if act.hard_reset {
                 if self.config.confirm_reboot {
                     self.pending_reset = Some(true);
                 } else {
                     self.reset(true);
                 }
             }
-            if act_reset {
+            if act.reset {
                 if self.config.confirm_reboot {
                     self.pending_reset = Some(false);
                 } else {
                     self.reset(false);
                 }
             }
-            if act_quit {
+            if act.quit {
                 self.config.save();
                 frame.close();
             }
-            if act_about {
+            if act.about {
                 self.show_about = true;
             }
-            if act_show_settings {
+            if act.show_settings {
                 self.pending_config = self.config.clone();
                 self.show_settings = true;
             }
-            if act_fullscreen {
+            if act.fullscreen {
                 self.fullscreen = !self.fullscreen;
                 frame.set_fullscreen(self.fullscreen);
             }
-            if act_swap {
+            if act.swap {
                 // Swap path names
                 std::mem::swap(&mut self.disk1, &mut self.disk2);
                 std::mem::swap(&mut self.config.last_disk1, &mut self.config.last_disk2);
@@ -3572,19 +3605,19 @@ mod gui {
                 Self::reload_disk(&mut self.emu, self.disk_slot, 0, &d1);
                 Self::reload_disk(&mut self.emu, self.disk_slot, 1, &d2);
             }
-            if act_eject_disk1 {
+            if act.eject_disk1 {
                 self.emu.bus.eject_disk(self.disk_slot, 0);
                 self.disk1 = None;
                 self.config.last_disk1 = None;
                 self.config.save();
             }
-            if act_eject_disk2 {
+            if act.eject_disk2 {
                 self.emu.bus.eject_disk(self.disk_slot, 1);
                 self.disk2 = None;
                 self.config.last_disk2 = None;
                 self.config.save();
             }
-            if act_load_disk1 {
+            if act.load_disk1 {
                 let start_dir = self.config.last_disk_dir.as_deref();
                 if let Some(path) = open_disk_dialog("Load Disk 1", start_dir) {
                     let loaded = if let Some(ref mut iigs) = self.iigs {
@@ -3611,7 +3644,7 @@ mod gui {
                     }
                 }
             }
-            if act_load_disk2 {
+            if act.load_disk2 {
                 let start_dir = self.config.last_disk_dir.as_deref();
                 if let Some(path) = open_disk_dialog("Load Disk 2", start_dir) {
                     let loaded = if let Some(ref mut iigs) = self.iigs {
@@ -3639,7 +3672,7 @@ mod gui {
                 }
             }
             // Load disk from recent list into drive 1
-            if let Some(path_str) = act_recent_disk {
+            if let Some(path_str) = act.recent_disk {
                 let path = PathBuf::from(&path_str);
                 let loaded = if let Some(ref mut iigs) = self.iigs {
                     Self::load_iigs_disk(iigs, 0, &path)
@@ -3665,7 +3698,7 @@ mod gui {
                 }
             }
             // HDD: load / eject
-            if act_load_hdd1 {
+            if act.load_hdd1 {
                 let start_dir = self.config.last_hdd_dir.as_deref();
                 if let Some(path) = open_hdd_dialog("Load HDD 1", start_dir)
                     && let Ok(data) = std::fs::read(&path)
@@ -3692,7 +3725,7 @@ mod gui {
                     self.config.save();
                 }
             }
-            if act_load_hdd2 {
+            if act.load_hdd2 {
                 let start_dir = self.config.last_hdd_dir.as_deref();
                 if let Some(path) = open_hdd_dialog("Load HDD 2", start_dir)
                     && let Ok(data) = std::fs::read(&path)
@@ -3718,15 +3751,15 @@ mod gui {
                     self.config.save();
                 }
             }
-            if act_eject_hdd1 {
+            if act.eject_hdd1 {
                 self.config.last_hdd1 = None;
                 self.config.save();
             }
-            if act_eject_hdd2 {
+            if act.eject_hdd2 {
                 self.config.last_hdd2 = None;
                 self.config.save();
             }
-            if let Some(path_str) = act_recent_hdd {
+            if let Some(path_str) = act.recent_hdd {
                 let path = PathBuf::from(&path_str);
                 if let Ok(data) = std::fs::read(&path) {
                     self.config.add_recent_hdd(&path_str);
@@ -3751,11 +3784,13 @@ mod gui {
             }
 
             // Screenshot from menu or F12 key
-            if act_screenshot && !in_logo_mode {
+            if act.screenshot && !in_logo_mode {
                 self.render_apple2();
                 save_screenshot(self.fb.pixels_as_bytes(), SCREEN_W, SCREEN_H);
             }
+        }
 
+        fn handle_drag_and_drop(&mut self, ctx: &egui::Context) {
             // ── Drag-and-drop disk insertion ─────────────────────────────
             // First dropped file → drive 1, second → drive 2.
             {
@@ -3801,6 +3836,62 @@ mod gui {
                     }
                 }
             }
+        }
+    }
+
+    // ── eframe App impl ───────────────────────────────────────────────────────
+
+    impl eframe::App for EmulatorApp {
+        fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+            self.frame_no = self.frame_no.wrapping_add(1);
+
+            // Load icons and logo texture on first frame
+            if self.icons.is_none() {
+                self.icons = Some(Icons::load(ctx));
+            }
+            if self.logo_texture.is_none()
+                && let Some((w, h, rgba)) = decode_bmp24_rgba(BMP_LOGO)
+            {
+                let img = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                self.logo_texture = Some(ctx.load_texture(
+                    "logo",
+                    img,
+                    TextureOptions {
+                        magnification: egui::TextureFilter::Linear,
+                        minification: egui::TextureFilter::Linear,
+                    },
+                ));
+            }
+
+            let in_logo_mode = self.emu.mode == apple2_core::emulator::AppMode::Logo;
+
+            self.run_emulation(in_logo_mode);
+
+            self.synth_speaker_audio();
+            self.synth_ensoniq_audio();
+            self.synth_mockingboard_audio();
+            self.tap_wav_recording();
+
+            if self.handle_input(ctx, in_logo_mode) {
+                frame.close();
+                return;
+            }
+
+            let tex_id = self.upload_frame_texture(ctx, in_logo_mode);
+
+            // ── UI panels (deferred actions applied after layout) ─────────────
+            let mut act = DeferredActions::default();
+            self.show_menu_bar(ctx, &mut act);
+            self.show_status_bar(ctx, in_logo_mode);
+            self.show_button_strip(ctx, &mut act);
+            self.show_reboot_dialog(ctx);
+            self.show_debugger_panel(ctx);
+            self.show_settings_dialog(ctx, frame);
+            self.show_card_popups(ctx);
+            self.show_about_dialog(ctx);
+            self.show_central_panel(ctx, in_logo_mode, tex_id);
+            self.apply_deferred_actions(frame, act, in_logo_mode);
+            self.handle_drag_and_drop(ctx);
 
             // F11 fullscreen shortcut (supplement to the action already handled above)
             let f11 = ctx.input(|i| i.key_pressed(Key::F11));
