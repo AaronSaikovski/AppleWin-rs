@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Release builds now use fat LTO and `codegen-units = 1`** for better
+  cross-crate inlining in the CPU/bus/video hot paths.
+- **Added `#[inline]` to small hot-path helpers**: `Bus::flag_byte`,
+  `Bus::update_irq_line`, `Bus::process_card_dma`,
+  `CardManager::any_irq_active` (apple2-core); `text_row_offset`,
+  `hgr_row_offset` (apple2-video).
+- **applewin: removed per-frame allocations** — the recent-disk/HDD menu lists
+  are no longer cloned every frame the File menu is open, and the debugger
+  command input is passed by reference instead of cloned per frame.
+- **apple2-audio: removed the SSI-263 no-op render loop** (the stub summed 0.0
+  over the whole output buffer). **apple2-iigs: preallocated the Mega II
+  speaker-toggle buffer** to match apple2-core's bus.
+
 ### Fixed
 
 - **Speaker: PWM sound effects rendered as a loud screech (no sub-sample

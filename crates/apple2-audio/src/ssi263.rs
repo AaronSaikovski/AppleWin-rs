@@ -65,15 +65,12 @@ impl Ssi263 {
     }
 
     /// Render phoneme audio into `out` (simplified stub — real synthesis is complex).
-    pub fn render(&mut self, out: &mut [f32]) {
+    pub fn render(&mut self, _out: &mut [f32]) {
         if !self.speaking {
             return;
         }
         // Stub: produce silence; full implementation ports phoneme waveforms
         // from source/SSI263.cpp phoneme tables and formant synthesis.
-        for s in out.iter_mut() {
-            *s += 0.0;
-        }
         self.speaking = false;
     }
 }

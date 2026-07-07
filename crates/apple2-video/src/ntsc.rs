@@ -1187,12 +1187,14 @@ fn text_addr(row: usize, col: usize) -> usize {
 
 /// Public helper: compute the offset within a 0x400-byte text page for a given row (0–23).
 /// Used by the RGB renderer.
+#[inline]
 pub fn text_row_offset(row: usize) -> usize {
     (row % 8) * 0x80 + (row / 8) * 0x28
 }
 
 /// Public helper: compute the HGR scanline offset within a 0x2000-byte HGR page.
 /// `y` is the scanline (0–191).
+#[inline]
 pub fn hgr_row_offset(y: usize) -> usize {
     (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x80 + (y >> 6) * 0x28
 }

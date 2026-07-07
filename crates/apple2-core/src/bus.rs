@@ -1208,17 +1208,20 @@ impl Bus {
         }
     }
 
+    #[inline]
     fn flag_byte(&self, flag: MemMode) -> u8 {
         if self.mode.contains(flag) { 0x80 } else { 0x00 }
     }
 
     /// Recompute `irq_line` from all IRQ sources: expansion cards, plus the
     /// //c VBL interrupt when enabled via ENVBL ($C05B).
+    #[inline]
     fn update_irq_line(&mut self) {
         self.irq_line = self.cards.any_irq_active() || (self.vbl_irq_enabled && self.vbl_flag);
     }
 
     /// Drain any pending DMA requests from a card and apply them to RAM.
+    #[inline]
     fn process_card_dma(&mut self, slot: usize) {
         // DMA write: card → main RAM
         if let Some(card) = self.cards.slot_mut(slot)

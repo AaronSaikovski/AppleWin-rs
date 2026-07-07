@@ -153,7 +153,7 @@ impl Default for Mega2 {
             lc_prewrite: false,
             lc_last_access: 0,
             speaker_state: false,
-            speaker_toggles: Vec::new(),
+            speaker_toggles: Vec::with_capacity(65536),
             ann: [false; 4],
             vblank: false,
             frame_start_cycles: 0,

@@ -1038,8 +1038,6 @@ mod gui {
                 )
             };
 
-            let cmd_input = self.debugger_cmd_input.clone();
-
             if let Some(ref iigs) = self.iigs {
                 let iigs_ref = iigs;
                 display::render(
@@ -1047,7 +1045,7 @@ mod gui {
                     &self.debugger,
                     &cpu,
                     mode_bits,
-                    &cmd_input,
+                    &self.debugger_cmd_input,
                     |a| iigs_ref.bus.mem.ram_read(0, a),
                 );
             } else {
@@ -1056,7 +1054,7 @@ mod gui {
                     &self.debugger,
                     &cpu,
                     mode_bits,
-                    &cmd_input,
+                    &self.debugger_cmd_input,
                     |a| self.emu.bus.read_raw(a),
                 );
             }
@@ -2141,14 +2139,14 @@ mod gui {
                                 if self.config.recent_disks.is_empty() {
                                     ui.label("(none)");
                                 } else {
-                                    for path in self.config.recent_disks.clone() {
-                                        let name = std::path::Path::new(&path)
+                                    for path in &self.config.recent_disks {
+                                        let name = std::path::Path::new(path)
                                             .file_name()
                                             .unwrap_or_default()
                                             .to_string_lossy()
                                             .into_owned();
                                         if ui.button(name).clicked() {
-                                            act_recent_disk = Some(path);
+                                            act_recent_disk = Some(path.clone());
                                             ui.close_menu();
                                         }
                                     }
@@ -2201,14 +2199,14 @@ mod gui {
                                 if self.config.recent_hdds.is_empty() {
                                     ui.label("(none)");
                                 } else {
-                                    for path in self.config.recent_hdds.clone() {
-                                        let name = std::path::Path::new(&path)
+                                    for path in &self.config.recent_hdds {
+                                        let name = std::path::Path::new(path)
                                             .file_name()
                                             .unwrap_or_default()
                                             .to_string_lossy()
                                             .into_owned();
                                         if ui.button(name).clicked() {
-                                            act_recent_hdd = Some(path);
+                                            act_recent_hdd = Some(path.clone());
                                             ui.close_menu();
                                         }
                                     }
