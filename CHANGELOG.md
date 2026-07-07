@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **applewin: split the 4,400-line `main.rs` into a `gui/` module tree**
+  (`emulation`, `audio`, `input`, `render`, `panels`, `settings`, `widgets`).
+  Pure code motion — the eframe `update()` loop now delegates to named
+  per-section `EmulatorApp` methods called in the same order as before, and
+  the 18 `act_*` deferred-action locals became a `DeferredActions` struct.
+  No behavior change. The headless build is also warning-free now
+  (GUI-only items in `main.rs` are `#[cfg(feature = "gui")]`-gated).
+- **apple2-core: moved the $C000–$C0FF soft-switch dispatch out of `bus.rs`**
+  into `bus/soft_switches.rs` (`bus.rs` → `bus/mod.rs`, 1,481 → 994 lines).
+  Pure code motion; covered by the //c boot-trace and bus unit tests.
+
 ### Performance
 
 - **Release builds now use fat LTO and `codegen-units = 1`** for better
