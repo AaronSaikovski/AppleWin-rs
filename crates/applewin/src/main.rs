@@ -1199,7 +1199,10 @@ mod gui {
 
                 if let Some(buf) = &self.audio_buf {
                     let sr = self.audio_sample_rate as f64;
-                    let clks_per_sample = (CPU_HZ / sr).floor().max(1.0);
+                    // Exact (fractional) cycles per output sample.  Flooring this
+                    // would over-produce samples by ~0.9% and slowly fill the ring
+                    // buffer to its cap (growing latency, then steady drops).
+                    let clks_per_sample = (CPU_HZ / sr).max(1.0);
 
                     let delta = end_cycle.saturating_sub(start_cycle) as f64 + self.spkr_cycle_rem;
                     let n_samples = (delta / clks_per_sample) as usize;
@@ -1218,18 +1221,33 @@ mod gui {
                         self.speaker_scratch.reserve(n_samples);
 
                         for i in 0..n_samples {
-                            let sample_end =
-                                start_cycle as f64 + (i + 1) as f64 * cycles_per_sample;
+                            let sample_start = start_cycle as f64 + i as f64 * cycles_per_sample;
+                            let sample_end = sample_start + cycles_per_sample;
 
+                            // Duty-cycle averaging: accumulate the time-weighted
+                            // speaker level across every toggle inside this sample.
+                            // Games drive the speaker faster than one toggle per
+                            // output sample (PWM audio — e.g. Airheart's start
+                            // sound toggles every 4–22 cycles vs ~23 cycles per
+                            // sample); sampling only the final cone state aliases
+                            // that ultrasonic carrier into a loud screech.
+                            let mut acc = 0.0f64;
+                            let mut seg_start = sample_start;
                             while toggle_idx < toggles.len()
-                                && (toggles[toggle_idx] as f64) <= sample_end
+                                && (toggles[toggle_idx] as f64) < sample_end
                             {
+                                let tc = (toggles[toggle_idx] as f64).max(sample_start);
+                                let level = if self.speaker_state { 0.5f64 } else { -0.5f64 };
+                                acc += (tc - seg_start) / cycles_per_sample * level;
                                 self.speaker_state = !self.speaker_state;
                                 self.dc_filter_ctr = 32_768 + 10_000;
+                                seg_start = tc;
                                 toggle_idx += 1;
                             }
+                            let level = if self.speaker_state { 0.5f64 } else { -0.5f64 };
+                            acc += (sample_end - seg_start) / cycles_per_sample * level;
 
-                            let raw = if self.speaker_state { 0.5f32 } else { -0.5f32 };
+                            let raw = acc as f32;
 
                             let out = if self.dc_filter_ctr == 0 {
                                 0.0f32
@@ -1245,12 +1263,27 @@ mod gui {
                             self.speaker_scratch.push(out * volume_scale);
                         }
 
+                        // Consume any toggles past the last sample boundary so the
+                        // cone position stays in phase for the next frame.
+                        while toggle_idx < toggles.len() {
+                            self.speaker_state = !self.speaker_state;
+                            self.dc_filter_ctr = 32_768 + 10_000;
+                            toggle_idx += 1;
+                        }
+
                         let mut locked = buf.lock().unwrap();
                         for s in &self.speaker_scratch {
                             if locked.len() < AUDIO_BUF_MAX {
                                 locked.push_back(*s);
                             }
                         }
+                    } else if !toggles.is_empty() {
+                        // No samples this frame — still apply toggle parity so the
+                        // speaker state doesn't drift out of phase.
+                        if toggles.len() % 2 == 1 {
+                            self.speaker_state = !self.speaker_state;
+                        }
+                        self.dc_filter_ctr = 32_768 + 10_000;
                     }
                 }
             }

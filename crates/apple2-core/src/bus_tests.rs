@@ -725,3 +725,130 @@ fn iic_32k_rom_reads_standard_bank_by_default() {
     let val = bus.read_raw(0xF000);
     assert_eq!(val, 0x22);
 }
+
+// ===========================================================================
+// Apple //c VBL interrupt flag ($C019 / $C070 / $C05A / $C05B)
+// ===========================================================================
+
+const VBL_CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
+const VBL_CYCLES_VISIBLE: u64 = 65 * 192; // 12480
+
+#[test]
+fn iic_vbl_flag_latches_and_holds_until_c070_ack() {
+    let mut bus = make_iic_bus();
+    // Before the first VBL boundary the flag is clear.
+    assert_eq!(bus.read(0xC019, 100) & 0x80, 0x00);
+
+    // Cross the first VBL boundary (start of vertical blanking).
+    bus.vbl_tick(VBL_CYCLES_VISIBLE);
+    assert_eq!(bus.read(0xC019, VBL_CYCLES_VISIBLE + 1) & 0x80, 0x80);
+
+    // Latched: still set well after blanking has ended (mid next frame).
+    let later = VBL_CYCLES_PER_FRAME + 100;
+    assert_eq!(bus.read(0xC019, later) & 0x80, 0x80);
+
+    // Access $C070 acknowledges the flag.
+    bus.read(0xC070, later + 1);
+    assert_eq!(bus.read(0xC019, later + 2) & 0x80, 0x00);
+
+    // Next frame's VBL sets it again.
+    bus.vbl_tick(bus.next_vbl_cycle);
+    assert_eq!(bus.read(0xC019, later + 3) & 0x80, 0x80);
+
+    // Writing $C070 also acknowledges.
+    bus.write(0xC070, 0, later + 4);
+    assert_eq!(bus.read(0xC019, later + 5) & 0x80, 0x00);
+}
+
+#[test]
+fn iic_vbl_tick_schedules_next_frame_and_skips_missed_frames() {
+    let mut bus = make_iic_bus();
+    assert_eq!(bus.next_vbl_cycle, VBL_CYCLES_VISIBLE);
+
+    bus.vbl_tick(VBL_CYCLES_VISIBLE);
+    assert_eq!(
+        bus.next_vbl_cycle,
+        VBL_CYCLES_VISIBLE + VBL_CYCLES_PER_FRAME
+    );
+
+    // A full-speed burst jumps 10 frames ahead; the schedule must catch up
+    // in one tick instead of firing 10 stale VBLs.
+    let far = VBL_CYCLES_VISIBLE + 10 * VBL_CYCLES_PER_FRAME + 5;
+    bus.vbl_tick(far);
+    assert!(bus.next_vbl_cycle > far);
+    assert!(bus.next_vbl_cycle - far <= VBL_CYCLES_PER_FRAME);
+}
+
+#[test]
+fn iic_vbl_irq_gated_by_envbl() {
+    let mut bus = make_iic_bus();
+
+    // VBL with interrupts masked (power-on default): flag set, no IRQ.
+    bus.vbl_tick(VBL_CYCLES_VISIBLE);
+    assert!(bus.vbl_flag);
+    assert!(!bus.irq_line);
+
+    // ENVBL ($C05B) with the flag already pending raises the IRQ line.
+    bus.read(0xC05B, VBL_CYCLES_VISIBLE + 1);
+    assert!(bus.vbl_irq_enabled);
+    assert!(bus.irq_line);
+
+    // $C070 ack clears the flag and drops the IRQ line.
+    bus.read(0xC070, VBL_CYCLES_VISIBLE + 2);
+    assert!(!bus.vbl_flag);
+    assert!(!bus.irq_line);
+
+    // Next VBL re-asserts while enabled.
+    bus.vbl_tick(bus.next_vbl_cycle);
+    assert!(bus.irq_line);
+
+    // DISVBL ($C05A) masks the IRQ even with the flag pending.
+    bus.write(0xC05A, 0, bus.next_vbl_cycle);
+    assert!(!bus.irq_line);
+    assert!(bus.vbl_flag, "DISVBL must not clear the pending flag");
+}
+
+#[test]
+fn iic_c05a_c05b_do_not_touch_annunciator1() {
+    let mut bus = make_iic_bus();
+    assert!(!bus.ann[1]);
+    bus.read(0xC05B, 0);
+    bus.write(0xC05B, 0, 0);
+    assert!(!bus.ann[1], "//c $C05B is ENVBL, not annunciator 1");
+}
+
+#[test]
+fn iie_vbl_bar_unchanged_and_no_vbl_schedule() {
+    let mut bus = make_bus();
+    // IIe: live VBL bar — bit 7 set during visible lines, clear in blanking.
+    assert_eq!(bus.read(0xC019, 100) & 0x80, 0x80);
+    assert_eq!(bus.read(0xC019, VBL_CYCLES_VISIBLE + 100) & 0x80, 0x00);
+    // No //c VBL schedule on the IIe.
+    assert_eq!(bus.next_vbl_cycle, u64::MAX);
+    // Annunciator 1 still works.
+    bus.read(0xC05B, 0);
+    assert!(bus.ann[1]);
+}
+
+#[test]
+fn iic_reset_vbl_reseeds_schedule_and_clears_state() {
+    let mut bus = make_iic_bus();
+    bus.vbl_tick(VBL_CYCLES_VISIBLE);
+    bus.read(0xC05B, VBL_CYCLES_VISIBLE); // ENVBL
+    assert!(bus.irq_line);
+
+    // Reset at an arbitrary mid-frame cycle: state clears and the next VBL
+    // boundary is at or after the current cycle.
+    let now = 5 * VBL_CYCLES_PER_FRAME + 1234;
+    bus.reset_vbl(now);
+    assert!(!bus.vbl_flag);
+    assert!(!bus.vbl_irq_enabled);
+    assert!(!bus.irq_line);
+    assert!(bus.next_vbl_cycle >= now);
+    assert!(bus.next_vbl_cycle - now <= VBL_CYCLES_PER_FRAME);
+    // Phase preserved: boundary is of the form VISIBLE + n·FRAME.
+    assert_eq!(
+        (bus.next_vbl_cycle - VBL_CYCLES_VISIBLE) % VBL_CYCLES_PER_FRAME,
+        0
+    );
+}

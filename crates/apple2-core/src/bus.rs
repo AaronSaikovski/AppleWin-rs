@@ -20,6 +20,15 @@ const MEM_TRACE_MAX: usize = 1_000_000;
 /// the cap exists purely as a safety valve against pathological programs.
 const SPEAKER_TOGGLES_MAX: usize = 65_536;
 
+// ── NTSC frame timing ─────────────────────────────────────────────────────────
+
+/// CPU cycles per NTSC video frame: 262 scan lines × 65 cycles/line.
+const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
+
+/// CPU cycles in the visible portion of a frame: 192 scan lines × 65 cycles.
+/// Vertical blanking occupies the remaining 70 lines (4550 cycles).
+const CYCLES_VISIBLE: u64 = 65 * 192; // 12480
+
 // ── Memory mode flags ─────────────────────────────────────────────────────────
 
 bitflags! {
@@ -254,8 +263,21 @@ pub struct Bus {
     /// Annunciator outputs 0–2 (annunciator 3 overlaps DHIRES at $C05E/$C05F).
     pub ann: [bool; 4],
 
-    /// Reflects the current state of the card IRQ line (OR of all slots).
+    /// Reflects the current state of the card IRQ line (OR of all slots),
+    /// plus the Apple //c VBL interrupt when enabled.
     pub irq_line: bool,
+
+    // ── Apple //c VBL interrupt (IOU) ────────────────────────────────────────
+    /// //c latched VBL flag: set at the start of each vertical blanking period,
+    /// held until acknowledged by an access to $C070.  Read via $C019 bit 7.
+    /// (The IIe instead returns the live, active-low VBL signal at $C019.)
+    pub vbl_flag: bool,
+    /// //c ENVBL/DISVBL ($C05B/$C05A): when set, `vbl_flag` drives the IRQ line.
+    /// The flag itself latches regardless of this mask (matches MAME).
+    pub vbl_irq_enabled: bool,
+    /// CPU cycle of the next VBL start, checked each instruction by the
+    /// emulator execute loop.  `u64::MAX` on non-//c models (check never fires).
+    pub next_vbl_cycle: u64,
 
     /// Pre-allocated scratch buffer for Saturn LC bank swaps — eliminates a
     /// 16 KB heap allocation on every bank switch.
@@ -318,6 +340,13 @@ impl Bus {
             rw3_extra: Vec::new(),
             ann: [false; 4],
             irq_line: false,
+            vbl_flag: false,
+            vbl_irq_enabled: false,
+            next_vbl_cycle: if model.is_iic() {
+                CYCLES_VISIBLE
+            } else {
+                u64::MAX
+            },
             lc_swap_buf: Box::new([0u8; 16384]),
             lc_prewrite: false,
             lc_last_access: 0,
@@ -349,11 +378,43 @@ impl Bus {
     /// if `advance_frame` is never called — but calling it keeps the counter
     /// well-bounded and avoids drift over very long sessions.
     pub fn advance_frame(&mut self, cycles: u64) {
-        const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
         // Only advance if we are actually past the end of the tracked frame.
         if cycles.wrapping_sub(self.frame_start_cycles) >= CYCLES_PER_FRAME {
             self.frame_start_cycles += CYCLES_PER_FRAME;
         }
+    }
+
+    /// Apple //c: a VBL boundary has been crossed — latch the VBL flag and
+    /// schedule the next one.  Called by the emulator execute loop whenever
+    /// `cycles >= next_vbl_cycle` (never fires on other models, where
+    /// `next_vbl_cycle` is `u64::MAX`).
+    pub fn vbl_tick(&mut self, cycles: u64) {
+        self.vbl_flag = true;
+        // Skip any whole frames missed (e.g. after full-speed disk bursts or a
+        // debugger pause) so we never fire a burst of stale VBLs.
+        let missed = (cycles - self.next_vbl_cycle) / CYCLES_PER_FRAME;
+        self.next_vbl_cycle += (missed + 1) * CYCLES_PER_FRAME;
+        if self.vbl_irq_enabled {
+            self.update_irq_line();
+        }
+    }
+
+    /// Re-seed the //c VBL state.  Called on reset and snapshot restore, where
+    /// the cycle counter may have moved backwards relative to `next_vbl_cycle`.
+    pub fn reset_vbl(&mut self, cycles: u64) {
+        self.vbl_flag = false;
+        self.vbl_irq_enabled = false;
+        self.next_vbl_cycle = if self.model.is_iic() {
+            // Next boundary of the form CYCLES_VISIBLE + n·CYCLES_PER_FRAME
+            // at or after `cycles`.
+            let n = cycles
+                .saturating_sub(CYCLES_VISIBLE)
+                .div_ceil(CYCLES_PER_FRAME);
+            CYCLES_VISIBLE + n * CYCLES_PER_FRAME
+        } else {
+            u64::MAX
+        };
+        self.update_irq_line();
     }
 
     /// Rebuild the page routing tables from the current `mode` state.
@@ -723,16 +784,31 @@ impl Bus {
             0x16 => self.flag_byte(MemMode::MF_ALTZP),
             0x17 => self.flag_byte(MemMode::MF_SLOTC3ROM),
             0x18 => self.flag_byte(MemMode::MF_80STORE),
-            // $C019: VBLANK bar — bit 7 = 1 during visible scan lines, 0 in blanking interval.
-            // NTSC: 192 active lines × 65 CPU cycles/line = 12480; frame = 262 × 65 = 17030.
-            // Matches AppleWin's NTSC_GetVblBar(): true when g_nVideoClockVert < 192.
+            // $C019: VBLANK.
+            //
+            // Apple //c: latched VBL interrupt-pending flag — bit 7 is set at the
+            // start of each vertical blanking period and held until acknowledged
+            // by an access to $C070.  Games frame-sync sound/music with
+            // `LDA $C019 / BPL …` then `STA $C070`; returning the IIe's live
+            // signal here makes those waits fall through instantly (music and
+            // sound effects free-run into a screech).
+            //
+            // IIe: live VBL bar — bit 7 = 1 during visible scan lines, 0 in the
+            // blanking interval.  NTSC: 192 active lines × 65 CPU cycles/line =
+            // 12480; frame = 262 × 65 = 17030.  Matches AppleWin's
+            // NTSC_GetVblBar(): true when g_nVideoClockVert < 192.
             //
             // We avoid the expensive modulo by tracking `frame_start_cycles` and computing
             // the within-frame offset as a simple subtraction.  The frame boundary is
             // advanced lazily here; `advance_frame()` may also be called from the execute loop.
+            0x19 if self.model.is_iic() => {
+                if self.vbl_flag {
+                    0x80
+                } else {
+                    0x00
+                }
+            }
             0x19 => {
-                const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
-                const CYCLES_VISIBLE: u64 = 65 * 192; // 12480
                 let mut offset = cycles.wrapping_sub(self.frame_start_cycles);
                 if offset >= CYCLES_PER_FRAME {
                     // Advance by whole frames so frame_start_cycles stays accurate even if
@@ -795,9 +871,14 @@ impl Bus {
                 }
             }
             0x66 | 0x67 => 0x00, // paddles 2/3 not connected
-            // $C070: paddle strobe — resets timers and returns floating bus
+            // $C070: paddle strobe — resets timers and returns floating bus.
+            // On the //c this also acknowledges (clears) the VBL flag.
             0x70 => {
                 self.gamepad.strobe(cycles);
+                if self.model.is_iic() {
+                    self.vbl_flag = false;
+                    self.update_irq_line();
+                }
                 self.floating_bus
             }
             // $C050–$C057: video soft-switch reads are strobes just like writes
@@ -858,12 +939,24 @@ impl Bus {
                 self.ann[0] = true;
                 self.floating_bus
             }
+            // $C05A/$C05B: annunciator 1 on the IIe; DISVBL/ENVBL on the //c
+            // (mask for the VBL interrupt — the flag still latches either way).
             0x5A => {
-                self.ann[1] = false;
+                if self.model.is_iic() {
+                    self.vbl_irq_enabled = false;
+                    self.update_irq_line();
+                } else {
+                    self.ann[1] = false;
+                }
                 self.floating_bus
             }
             0x5B => {
-                self.ann[1] = true;
+                if self.model.is_iic() {
+                    self.vbl_irq_enabled = true;
+                    self.update_irq_line();
+                } else {
+                    self.ann[1] = true;
+                }
                 self.floating_bus
             }
             0x5C => {
@@ -1007,9 +1100,14 @@ impl Bus {
             0x28 if self.model.is_iic() => {
                 self.mode.toggle(MemMode::MF_ALTROM0);
             }
-            // $C070: paddle strobe — reset one-shot timers
+            // $C070: paddle strobe — reset one-shot timers.
+            // On the //c this also acknowledges (clears) the VBL flag.
             0x70 => {
                 self.gamepad.strobe(cycles);
+                if self.model.is_iic() {
+                    self.vbl_flag = false;
+                    self.update_irq_line();
+                }
             }
             // $C073: RamWorks III bank select
             0x73 => {
@@ -1057,11 +1155,22 @@ impl Bus {
             0x59 => {
                 self.ann[0] = true;
             }
+            // $C05A/$C05B: annunciator 1 on the IIe; DISVBL/ENVBL on the //c.
             0x5A => {
-                self.ann[1] = false;
+                if self.model.is_iic() {
+                    self.vbl_irq_enabled = false;
+                    self.update_irq_line();
+                } else {
+                    self.ann[1] = false;
+                }
             }
             0x5B => {
-                self.ann[1] = true;
+                if self.model.is_iic() {
+                    self.vbl_irq_enabled = true;
+                    self.update_irq_line();
+                } else {
+                    self.ann[1] = true;
+                }
             }
             0x5C => {
                 self.ann[2] = false;
@@ -1103,9 +1212,10 @@ impl Bus {
         if self.mode.contains(flag) { 0x80 } else { 0x00 }
     }
 
-    /// Recompute `irq_line` by polling all cards for active IRQs.
+    /// Recompute `irq_line` from all IRQ sources: expansion cards, plus the
+    /// //c VBL interrupt when enabled via ENVBL ($C05B).
     fn update_irq_line(&mut self) {
-        self.irq_line = self.cards.any_irq_active();
+        self.irq_line = self.cards.any_irq_active() || (self.vbl_irq_enabled && self.vbl_flag);
     }
 
     /// Drain any pending DMA requests from a card and apply them to RAM.

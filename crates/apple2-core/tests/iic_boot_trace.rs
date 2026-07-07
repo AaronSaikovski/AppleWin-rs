@@ -108,3 +108,26 @@ fn iic_35rom_boots_prodos() {
         "expected ProDOS boot volume, got:\n{screen}"
     );
 }
+
+/// The execute loop must latch the //c VBL flag at each vertical-blanking
+/// boundary, and an access to $C070 must acknowledge it.  Games frame-sync
+/// their sound loops on this ($C019 poll + $C070 ack); with IIe VBL-bar
+/// semantics those waits fall through instantly and startup music screeches.
+#[test]
+fn iic_vbl_flag_latched_by_execute_and_acked_by_c070() {
+    let mut emu = make_iic(None);
+    // Run past the first VBL boundary (12480 cycles into the first frame).
+    emu.execute(20_000);
+    let cyc = emu.cpu.cycles;
+    assert_eq!(
+        emu.bus.read(0xC019, cyc) & 0x80,
+        0x80,
+        "VBL flag should be latched after crossing a blanking boundary"
+    );
+    // Acknowledge via $C070 — flag clears until the next VBL.
+    emu.bus.read(0xC070, cyc);
+    assert_eq!(emu.bus.read(0xC019, cyc) & 0x80, 0x00);
+    // One frame later it is pending again.
+    emu.execute(17_030);
+    assert_eq!(emu.bus.read(0xC019, emu.cpu.cycles) & 0x80, 0x80);
+}

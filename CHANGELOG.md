@@ -15,6 +15,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Speaker: PWM sound effects rendered as a loud screech (no sub-sample
+  averaging).** The GUI speaker synthesis emitted each output sample as a flat
+  ±0.5 from the cone state *after* the last toggle in that sample period. Games
+  that drive the speaker faster than the output sample rate — PWM /
+  duty-cycle-modulated audio, e.g. *Airheart*'s start sound, measured toggling
+  every 4–22 CPU cycles against ~23.2 cycles per 44.1 kHz sample — had their
+  ultrasonic carrier aliased straight into the audible band: narrow pulses
+  either vanished or blew up into full-amplitude samples, heard as a harsh
+  screech. Each sample is now the time-weighted average of the speaker level
+  across every toggle inside its period (duty-cycle averaging, as in
+  `apple2-audio`'s `Speaker::render`), which reconstructs the intended sound
+  envelope; normal square-wave beeps are unaffected. Also fixed the
+  cycles-per-sample constant (was `floor()`ed, over-producing samples by ~0.9 %
+  so the audio ring buffer slowly filled to its 2-second cap — growing latency,
+  then steady sample drops), and speaker-state parity is now preserved for
+  toggles that fall outside the rendered sample grid.
+- **Apple //c: screeching sound on startup in some games (wrong VBL semantics).**
+  `$C019` was implemented with Apple IIe semantics for every model: a live,
+  active-low VBL signal (bit 7 = 1 during the visible scan lines). On the //c,
+  `$C019` is instead a *latched* VBL interrupt-pending flag — set at the start of
+  each vertical blanking period and held until acknowledged by an access to
+  `$C070` — and `$C05A`/`$C05B` are the DISVBL/ENVBL interrupt masks (not
+  annunciator 1). //c-aware games frame-sync their sound and music loops on this
+  flag (`LDA $C019` / `BPL` poll, then a `$C070` ack); with the IIe behaviour the
+  poll saw bit 7 set ~73 % of the time, so the once-per-frame wait fell through
+  almost instantly and speaker routines free-ran at kHz rates — heard as a
+  screech during startup music and sound effects. The bus now latches the //c
+  VBL flag at each blanking boundary from the emulator execute loop, clears it on
+  any `$C070` access, treats `$C05A`/`$C05B` as DISVBL/ENVBL on the //c, and
+  raises the CPU IRQ line while the flag is pending with ENVBL set (the flag
+  itself latches regardless of the mask, matching MAME). IIe/IIe-Enhanced
+  `$C019` behaviour is unchanged, and the VBL schedule is re-seeded on reset and
+  snapshot restore so it keeps firing after full-speed disk bursts and state
+  loads.
+
 ## [1.1.5] - 2026-07-02
 
 ### Fixed
