@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**
+  Eliminates the `block v0.1.6` future-incompatibility warning (uninhabited
+  static, [rust#74840](https://github.com/rust-lang/rust/issues/74840)), which
+  was pulled in transitively on macOS via the old `cocoa`/`objc-foundation`
+  stack. eframe 0.30 uses `winit` 0.30 + `objc2`, dropping `cocoa`, `objc`,
+  and `block` entirely. Migration work: window setup moved from the removed
+  `NativeOptions` fields to `egui::ViewportBuilder`; `Frame::close`/
+  `set_fullscreen`/`set_window_size`/`info().window_info` replaced with
+  `ctx.send_viewport_cmd(...)` and `ctx.input(|i| i.viewport())`; the app
+  creator closure now returns `Result`; `ComboBox::from_id_source` renamed to
+  `from_id_salt`; `egui::style::Margin` → `egui::Margin`. No behavior change.
+  (Target 0.30 was chosen deliberately: it is the newest release that drops
+  `block` while staying below egui's 0.31 `Margin`/`StrokeKind` and 0.34
+  `App::ui`/`Panel` rewrites, keeping the migration minimal and low-risk.)
 - **applewin: split the 4,400-line `main.rs` into a `gui/` module tree**
   (`emulation`, `audio`, `input`, `render`, `panels`, `settings`, `widgets`).
   Pure code motion — the eframe `update()` loop now delegates to named
@@ -27,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **apple2-core: moved the $C000–$C0FF soft-switch dispatch out of `bus.rs`**
   into `bus/soft_switches.rs` (`bus.rs` → `bus/mod.rs`, 1,481 → 994 lines).
   Pure code motion; covered by the //c boot-trace and bus unit tests.
+- **applewin: decomposed the `gui/` tree further for maintainability.** The
+  1,235-line `panels.rs` was split by responsibility into `menu`, `toolbar`,
+  `statusbar`, `screen`, `debugger_panel`, and `dialogs`; the 500-line
+  `settings.rs` tab `match` became per-tab `render_*_tab` methods in a new
+  `settings_tabs` module; viewport/window helpers moved to `window.rs`; and
+  the joystick/paddle/mouse polling moved to `joystick.rs`, hoisting the
+  byte-identical keypad-arrows and keypad-numeric handling (previously
+  duplicated between joystick 0 and 1) into shared methods and promoting the
+  paddle-trim clamp to a free function. No module now exceeds ~505 lines.
+  Pure code motion / identical-code deduplication — no behavior change.
 
 ### Performance
 

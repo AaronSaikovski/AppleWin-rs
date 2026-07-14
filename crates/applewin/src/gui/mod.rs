@@ -1,27 +1,49 @@
-//! GUI front end (eframe 0.23 + egui 0.23).
+//! GUI front end (eframe 0.30 + egui 0.30).
 //!
 //! `mod.rs` owns the shared state (`EmulatorApp`), constants, and the
 //! eframe `update()` loop; the per-frame work is implemented as
 //! `EmulatorApp` methods in the sibling modules:
 //!
-//! - [`emulation`] — execution pacing, reset, disk loading, slot cards
-//! - [`audio`]     — cpal stream, ring buffer, per-frame sample synthesis
-//! - [`input`]     — keyboard, paste, joystick/gamepad
-//! - [`render`]    — framebuffer rendering, texture upload, screenshots
-//! - [`panels`]    — menu/status/button panels, dialogs, deferred actions
-//! - [`settings`]  — the tabbed Settings dialog and card option popups
-//! - [`widgets`]   — BMP icon assets and small chrome widgets
+//! - [`emulation`]      — execution pacing, reset, disk loading, slot cards
+//! - [`audio`]          — cpal stream, ring buffer, per-frame sample synthesis
+//! - [`input`]          — keyboard events, clipboard paste, global shortcuts
+//! - [`joystick`]       — gamepad/keyboard/mouse joystick & paddle emulation
+//! - [`render`]         — framebuffer rendering, texture upload, screenshots
+//! - [`menu`]           — the top menu bar (File/Machine/View/Help)
+//! - [`statusbar`]      — the bottom status bar (drive LEDs, hints)
+//! - [`toolbar`]        — the right-hand icon button strip
+//! - [`dialogs`]        — modal dialogs (reboot/about) and file pickers
+//! - [`debugger_panel`] — the debugger command bar and shortcuts
+//! - [`screen`]         — the central Apple II screen panel + drag-and-drop
+//! - [`actions`]        — the `DeferredActions` request struct and its application
+//! - [`settings`]       — the Settings dialog shell + per-card options popups
+//! - [`settings_tabs`]  — the individual Settings tabs (Machine/Video/…)
+//! - [`widgets`]        — BMP icon assets and small chrome widgets
+//! - [`window`]         — native-window / viewport helpers (size, position, fullscreen)
 
+mod actions;
 mod audio;
+mod debugger_panel;
+mod dialogs;
 mod emulation;
 mod input;
-mod panels;
+mod joystick;
+mod menu;
 mod render;
+mod screen;
 mod settings;
+mod settings_tabs;
+mod statusbar;
+mod toolbar;
 mod widgets;
+mod window;
 
 #[allow(unused_imports)]
-use {audio::*, emulation::*, input::*, panels::*, render::*, settings::*, widgets::*};
+use {
+    actions::*, audio::*, debugger_panel::*, dialogs::*, emulation::*, input::*, joystick::*,
+    menu::*, render::*, screen::*, settings::*, settings_tabs::*, statusbar::*, toolbar::*,
+    widgets::*, window::*,
+};
 
 use apple2_core::emulator::Emulator;
 use apple2_video::{
@@ -103,10 +125,7 @@ struct Icons {
 
 impl Icons {
     fn load(ctx: &egui::Context) -> Self {
-        let opts = TextureOptions {
-            magnification: egui::TextureFilter::Nearest,
-            minification: egui::TextureFilter::Nearest,
-        };
+        let opts = TextureOptions::NEAREST;
         let load = |name: &str, raw: &[u8]| -> Option<egui::TextureHandle> {
             let (w, h, rgba) = decode_bmp_rgba(raw)?;
             let img = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
@@ -384,7 +403,7 @@ impl EmulatorApp {
 // ── eframe App impl ───────────────────────────────────────────────────────
 
 impl eframe::App for EmulatorApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_no = self.frame_no.wrapping_add(1);
 
         // Load icons and logo texture on first frame
@@ -395,14 +414,7 @@ impl eframe::App for EmulatorApp {
             && let Some((w, h, rgba)) = decode_bmp24_rgba(BMP_LOGO)
         {
             let img = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-            self.logo_texture = Some(ctx.load_texture(
-                "logo",
-                img,
-                TextureOptions {
-                    magnification: egui::TextureFilter::Linear,
-                    minification: egui::TextureFilter::Linear,
-                },
-            ));
+            self.logo_texture = Some(ctx.load_texture("logo", img, TextureOptions::LINEAR));
         }
 
         let in_logo_mode = self.emu.mode == apple2_core::emulator::AppMode::Logo;
@@ -415,7 +427,7 @@ impl eframe::App for EmulatorApp {
         self.tap_wav_recording();
 
         if self.handle_input(ctx, in_logo_mode) {
-            frame.close();
+            request_close(ctx);
             return;
         }
 
@@ -428,32 +440,20 @@ impl eframe::App for EmulatorApp {
         self.show_button_strip(ctx, &mut act);
         self.show_reboot_dialog(ctx);
         self.show_debugger_panel(ctx);
-        self.show_settings_dialog(ctx, frame);
+        self.show_settings_dialog(ctx);
         self.show_card_popups(ctx);
         self.show_about_dialog(ctx);
         self.show_central_panel(ctx, in_logo_mode, tex_id);
-        self.apply_deferred_actions(frame, act, in_logo_mode);
+        self.apply_deferred_actions(ctx, act, in_logo_mode);
         self.handle_drag_and_drop(ctx);
 
         // F11 fullscreen shortcut (supplement to the action already handled above)
-        let f11 = ctx.input(|i| i.key_pressed(Key::F11));
-        if f11 {
-            self.fullscreen = !self.fullscreen;
-            frame.set_fullscreen(self.fullscreen);
+        if ctx.input(|i| i.key_pressed(Key::F11)) {
+            self.toggle_fullscreen(ctx);
         }
 
-        // Track window state for persistence (restored on next launch).
-        // window_scale is NOT tracked here — it only changes via the Settings
-        // dialog, so the saved value always reflects a deliberate user choice
-        // rather than an accidental resize.
-        let maximized = frame.info().window_info.maximized;
-        self.config.window_maximized = maximized;
-        // Only save position when not maximized; the maximized position is
-        // the OS-managed full-screen rect, which isn't useful to restore.
-        if !maximized && let Some(pos) = frame.info().window_info.position {
-            self.config.window_x = Some(pos.x as i32);
-            self.config.window_y = Some(pos.y as i32);
-        }
+        // Persist window size/position so the next launch restores it.
+        self.track_window_state(ctx);
 
         // Drive continuous animation at the display refresh rate — but skip
         // when the debugger has halted execution (Stepping). In that state
@@ -484,30 +484,8 @@ impl eframe::App for EmulatorApp {
 }
 
 pub fn run_with_core(core: EmuCore, config: Config) {
-    const W_OVERHEAD: f32 = 80.0;
-    const H_OVERHEAD: f32 = 80.0;
-
-    let win_w = SCREEN_W as f32 * 2.0 + W_OVERHEAD;
-    let win_h = SCREEN_H as f32 * 2.0 + H_OVERHEAD;
-
-    let (initial_size, initial_pos) = if config.window_maximized {
-        (None, None)
-    } else {
-        let pos = match (config.window_x, config.window_y) {
-            (Some(x), Some(y)) => Some(egui::Pos2::new(x as f32, y as f32)),
-            _ => None,
-        };
-        (Some(egui::vec2(win_w, win_h)), pos)
-    };
-
     let options = eframe::NativeOptions {
-        initial_window_size: initial_size,
-        initial_window_pos: initial_pos,
-        maximized: config.window_maximized,
-        min_window_size: Some(egui::vec2(
-            SCREEN_W as f32 + W_OVERHEAD,
-            SCREEN_H as f32 + H_OVERHEAD,
-        )),
+        viewport: build_viewport(&config),
         persist_window: false,
         ..Default::default()
     };
@@ -520,7 +498,7 @@ pub fn run_with_core(core: EmuCore, config: Config) {
     eframe::run_native(
         title,
         options,
-        Box::new(move |_cc| Box::new(EmulatorApp::new_with_core(core, config))),
+        Box::new(move |_cc| Ok(Box::new(EmulatorApp::new_with_core(core, config)))),
     )
     .expect("eframe failed");
 }

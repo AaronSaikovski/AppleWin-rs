@@ -154,10 +154,7 @@ impl EmulatorApp {
                 self.render_apple2();
             }
 
-            let tex_opts = TextureOptions {
-                magnification: egui::TextureFilter::Nearest,
-                minification: egui::TextureFilter::Nearest,
-            };
+            let tex_opts = TextureOptions::NEAREST;
             let image =
                 ColorImage::from_rgba_unmultiplied([SCREEN_W, SCREEN_H], self.fb.pixels_as_bytes());
             if let Some(t) = &mut self.texture {
