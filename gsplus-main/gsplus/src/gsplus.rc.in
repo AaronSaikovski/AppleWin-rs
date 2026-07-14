@@ -1,0 +1,3 @@
+/* Windows resource script (configured by CMake). Embeds the GSplus icon into
+ * the .exe so Explorer / the taskbar show it. Resource ID 1 = the app icon. */
+1 ICON "@GSPLUS_ICO_PATH@"

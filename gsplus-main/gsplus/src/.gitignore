@@ -1,0 +1,8 @@
+# CMake out-of-source build directory (generated; never committed)
+build/
+# Runtime config written by the emulator
+config.kegs
+# CMake stray artifacts if anyone configures in-tree by mistake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake

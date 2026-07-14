@@ -1,0 +1,162 @@
+name: build
+
+# Build the SDL3 cross-platform app on macOS, Linux, and Windows. On a version
+# tag (v*) the artifacts are attached to a GitHub Release.
+#
+# NOTE: this is the first iteration of the CI and is expected to need tuning
+# against real runner output (especially Linux SDL3-from-source build deps and
+# the Windows toolchain). The macOS path mirrors the locally-verified build.
+
+on:
+  push:
+    branches: [ main, sdl3-driver ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install cmake ninja sdl3
+      - name: Configure
+        run: |
+          ARGS=""
+          case "$GITHUB_REF" in
+            refs/tags/v*) ARGS="-DGSPLUS_VERSION=${GITHUB_REF_NAME#v}" ;;
+          esac
+          cmake -G Ninja -B build -S gsplus/src $ARGS
+      - name: Build
+        run: cmake --build build --target gsplus-sdl
+      - name: Package (.dmg)
+        run: cd build && cpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gsplus-macos
+          path: build/*.dmg
+
+  macos-universal:
+    # Second macOS build producing a UNIVERSAL (arm64 + x86_64) app, alongside
+    # the arm64-only `macos` job above. Key difference: we do NOT install
+    # Homebrew's SDL3 (it ships a single-arch arm64 dylib you can't link into a
+    # universal binary). With no system SDL3, CMake's FetchContent path builds
+    # SDL3 from source, and CMAKE_OSX_ARCHITECTURES makes that build -- and ours
+    # -- universal. fixup_bundle then embeds the universal SDL3 into the .app.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        # NB: intentionally no `sdl3` here -- see the comment above.
+        run: brew install cmake ninja
+      - name: Configure (universal, SDL3 built from source)
+        run: |
+          ARGS=""
+          case "$GITHUB_REF" in
+            refs/tags/v*) ARGS="-DGSPLUS_VERSION=${GITHUB_REF_NAME#v}" ;;
+          esac
+          cmake -G Ninja -B build -S gsplus/src \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" $ARGS
+      - name: Build
+        run: cmake --build build --target gsplus-sdl
+      - name: Package (.dmg) and label universal
+        run: |
+          cd build && cpack
+          # CPack names it GSplus-<ver>-Darwin.dmg; rename so it doesn't collide
+          # with the arm64-only dmg when both attach to the same Release.
+          for f in GSplus-*-Darwin.dmg; do
+            mv "$f" "${f/-Darwin.dmg/-macOS-universal.dmg}"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gsplus-macos-universal
+          path: build/*.dmg
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools + SDL3 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build build-essential git \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libxtst-dev libxinerama-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libpulse-dev libasound2-dev libpipewire-0.3-dev libsndio-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev
+      - name: Configure (SDL3 built from source via FetchContent)
+        run: |
+          ARGS=""
+          case "$GITHUB_REF" in
+            refs/tags/v*) ARGS="-DGSPLUS_VERSION=${GITHUB_REF_NAME#v}" ;;
+          esac
+          cmake -G Ninja -B build -S gsplus/src $ARGS
+      - name: Build
+        run: cmake --build build --target gsplus-sdl
+      - name: Package (.tar.gz)
+        run: cd build && cpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gsplus-linux
+          path: build/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          # No SDL3 package here: it may be unavailable under that exact name,
+          # and FetchContent builds SDL3 from source (as the Linux job does),
+          # so we only need the gcc/cmake/ninja toolchain.
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+      - name: Configure (SDL3 built from source via FetchContent)
+        run: |
+          ARGS=""
+          case "$GITHUB_REF" in
+            refs/tags/v*) ARGS="-DGSPLUS_VERSION=${GITHUB_REF_NAME#v}" ;;
+          esac
+          cmake -G Ninja -B build -S gsplus/src $ARGS
+      - name: Build
+        run: cmake --build build --target gsplus-sdl
+      - name: Package (.zip)
+        run: cd build && cpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gsplus-windows
+          path: build/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ macos, macos-universal, linux, windows ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # required for the token to create a Release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Attach artifacts to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          # Derive the release flags from the tag name: a plain version tag
+          # (v1.38.0) is a full release and becomes "Latest"; a pre-release tag
+          # carrying a suffix (v1.38.0-beta1, -alpha0, -rc1) stays a pre-release
+          # and is never marked Latest.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
+          generate_release_notes: true

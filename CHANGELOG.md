@@ -15,6 +15,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **apple2-iigs: Apple IIgs firmware now boots past the cold-start dead-loop.**
+  Two bugs prevented the ROM firmware from starting. (1) Some 128KB ROM 01
+  dumps (e.g. `342-0077-B`) store their two 64KB halves swapped, leaving the
+  CPU vectors in the wrong half so the reset vector at `$00/FFFC` read as
+  `$0000` and the machine dead-looped at `$00/0000`. `IIgsMemory::new` now
+  normalizes such images on load (`normalize_rom_layout`) so bank `$FF` holds
+  the vectors. (2) Banks `$E0`/`$E1` were routed straight to fast RAM with no
+  I/O aperture, but the firmware runs its cold-start with `DBR=$E1` and polls
+  hardware registers (e.g. `$C034`) through the `$E0`/`$E1` window — those
+  reads returned RAM garbage and the poll spun forever. The bus now decodes
+  the `$C000-$CFFF` I/O aperture, `$C100-$CFFF` slot ROM, and `$D000-$FFFF`
+  language card for banks `$E0`/`$E1` (shared `io_read_reg`/`io_write_reg`
+  helpers). With both fixes the firmware resets to `$FA62`, enters native
+  mode, runs the self-test, and writes to the screen. Added regression tests
+  for ROM-half normalization and the `$E0`/`$E1` I/O aperture.
+
+- **apple2-iigs: implemented the Mega II / VGC interrupt system (heartbeat +
+  scan-line).** The VBL, quarter-second, one-second, and VGC scan-line
+  interrupts were never generated, so any firmware that waits on them stalled.
+  The Mega II now models the interrupt registers with correct hardware
+  semantics — `$C023` (VGCINT: scan-line/one-second status + enable), `$C032`
+  (VGCINT clear), `$C041` (INTEN: VBL / quarter-second enable), `$C046`
+  (INTFLAG status, with the mouse-button latch), and `$C047` (INTCLEAR) — and
+  `IIgsBus::update_interrupts` drives a 60 Hz heartbeat that raises each source
+  through its enable gate (quarter-second every 16 VBLs, one-second every 60,
+  scan-line when an SHR scan-line control byte requests it). The composed IRQ
+  line now reflects these sources plus the ADB keyboard interrupt. Verified
+  against real ROM 01: the firmware reaches its interrupt-init code, enables
+  the one-second interrupt (`$C023 = $05`), and the IRQ line asserts and is
+  serviced. Added four regression tests (VBL, quarter-second, one-second, and
+  the disabled-quiet case).
+
+- **apple2-iigs: fixed inverted language-card read-source switches — GS/OS and
+  ProDOS 16 now pass their "Apple IIgs hardware" check.** The `$C08x`
+  soft-switch handler set the `HIGHRAM` (read-from-RAM) flag for the wrong
+  registers: `$C080` (read RAM) was treated as read-ROM and `$C082` (read ROM)
+  as read-RAM — modes 0 and 2 were swapped versus the Apple II truth table
+  (`$C080`/`$C083` = read RAM, `$C081`/`$C082` = read ROM). The GS/OS and
+  ProDOS 16 loaders identify the machine with `LDA $C082 : SEC : JSR $FE1F :
+  BCC ok` — selecting read-ROM so the ROM identity routine (which does `CLC`)
+  runs. With the inverted switch, `$C082` selected read-RAM, so `$FE1F` executed
+  uninitialised language-card RAM instead of the ROM routine, carry stayed set,
+  and the loaders aborted with "GS/OS REQUIRES APPLE IIGS HARDWARE" /
+  "PRODOS 16 REQUIRES APPLE IIGS HARDWARE". The handler now matches the working
+  Apple IIe core (`0/3 → read RAM`, `1/2 → read ROM`). Verified against the real
+  ROM identity routine and the exact loader instruction sequence; added
+  regression tests for the read-source truth table and the `HIGHRAM` flag.
+
+- **apple2-iigs: fixed STATEREG ($C068) bit layout — ROM 03 no longer crashes at
+  boot.** The register packs the IIgs memory-mode flags as
+  `[7]ALTZP [6]PAGE2 [5]RAMRD [4]RAMWRT [3]RDROM [2]LCBANK2 [1]ROMBANK [0]INTCXROM`,
+  but the handler mapped bits 3-0 to the wrong flags — critically treating bit 3
+  as `BANK2` instead of `RDROM` (read-ROM) and putting `HIGHRAM` on bit 2. The
+  ROM 03 reset code does `LDA #$0C : STA $C068` ("read ROM, language-card bank 2")
+  and immediately continues executing from ROM; the mis-decode flipped `$F000-
+  $FFFF` to read-RAM, so the next instruction fetch hit uninitialised RAM (`BRK`)
+  and the machine crashed to a garbage screen. `read_state_reg`/`write_state_reg`
+  now use the correct layout (`RDROM` = inverse of `HIGHRAM`). Added a regression
+  test.
+
+- **apple2-iigs: ROM banks ($FC-$FF) no longer overlay the I/O aperture on
+  $C000-$CFFF.** ROM banks are a linear image — `$C000-$CFFF` is ROM, and the
+  firmware runs real code there (e.g. `JSR $C085` in bank `$FF`), reaching I/O
+  only via explicit bank-`$E0`/`$E1`/`$00` long addressing. `read_rom_bank`
+  wrongly decoded `$C000-$C0FF` as I/O registers and `$C100-$CFFF` as the slot
+  ROM cache, so `JSR $C085` jumped into an I/O read (returning a soft-switch
+  value instead of the ROM opcode) and derailed into a `BRK` loop. It now reads
+  pure ROM for the whole bank, matching GSplus (I/O pages are mapped only in
+  banks `$00`/`$01`/`$E0`/`$E1`). With this and the STATEREG fix, ROM 03 runs its
+  entire self-test/init instead of crashing. Added a regression test.
+
 ### Changed
 
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**

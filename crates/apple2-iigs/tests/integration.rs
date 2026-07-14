@@ -283,3 +283,262 @@ fn iigs_emulator_key_press() {
     assert!(emu.bus.mega2.key_strobe);
     assert_eq!(emu.bus.mega2.keyboard_data, b'Z');
 }
+
+/// A 128KB ROM dump whose two 64KB halves are swapped (vectors in the low half,
+/// zeros where bank $FF's vectors should be) must be normalized on load so the
+/// reset vector at $00/FFFC resolves correctly. Regression for the ROM 01
+/// (342-0077-B) boot failure.
+#[test]
+fn swapped_rom_halves_are_normalized() {
+    // Build a 128KB ROM with the reset vector ($FA62) in the LOW half at the
+    // bank-top offset, and zeros in the HIGH half — i.e. halves swapped.
+    let mut rom = vec![0x00u8; 131072];
+    rom[0x0_FFFC] = 0x62;
+    rom[0x0_FFFD] = 0xFA;
+    // Put a recognizable byte at bank $FF $0000 (low half offset 0) to confirm
+    // the swap actually moved the high bank into place.
+    rom[0x0_0000] = 0xAB;
+
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    // After normalization bank $FF holds the vectors.
+    assert_eq!(mem.rom_read(0xFF, 0xFFFC), 0x62);
+    assert_eq!(mem.rom_read(0xFF, 0xFFFD), 0xFA);
+    assert_eq!(mem.rom_read(0xFF, 0x0000), 0xAB);
+
+    // Full emulator: reset must land on the real vector, not $0000.
+    let mut rom2 = vec![0x00u8; 131072];
+    rom2[0x0_FFFC] = 0x62;
+    rom2[0x0_FFFD] = 0xFA;
+    let emu = apple2_iigs::emulator::IIgsEmulator::new(256, rom2).unwrap();
+    assert_eq!(emu.cpu.pc, 0xFA62);
+}
+
+/// A canonical 128KB ROM (vectors already in bank $FF) must be left untouched.
+#[test]
+fn canonical_rom_layout_is_not_swapped() {
+    let mut rom = vec![0x00u8; 131072];
+    rom[0x1_FFFC] = 0x62; // bank $FF $FFFC
+    rom[0x1_FFFD] = 0xFA;
+    rom[0x1_0000] = 0xCD; // bank $FF $0000
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    assert_eq!(mem.rom_read(0xFF, 0xFFFC), 0x62);
+    assert_eq!(mem.rom_read(0xFF, 0x0000), 0xCD);
+}
+
+/// Banks $E0/$E1 expose the Mega II I/O aperture (not raw fast RAM). A keypress
+/// must be readable at $E0/$C000 just as at $00/$C000, and $C010 clears the
+/// strobe. Regression for the DBR=$E1 cold-start poll hang.
+#[test]
+fn fast_bank_has_io_aperture() {
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    bus.mega2.key_press(b'A');
+    // Keyboard data register visible through the $E0 aperture.
+    assert_eq!(bus.read(0xE0_C000, 0), b'A' | 0x80);
+    // $C010 (any-key-up / strobe clear) reached via the $E1 aperture.
+    let _ = bus.read(0xE1_C010, 0);
+    assert!(!bus.mega2.key_strobe);
+
+    // Below the aperture, $E0/$E1 are still plain fast RAM.
+    bus.write(0xE0_2000, 0x5A, 0);
+    assert_eq!(bus.read(0xE0_2000, 0), 0x5A);
+}
+
+/// One video frame in reference cycles.
+const FRAME: u64 = apple2_iigs::mega2::CYCLES_PER_FRAME;
+
+/// Build a bus with a stub ROM for interrupt tests.
+fn interrupt_test_bus() -> IIgsBus {
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    IIgsBus::new(mem)
+}
+
+/// Enabling VBL interrupts ($C041 bit 3) makes the 60 Hz heartbeat assert the
+/// CPU IRQ line and set the $C046 VBL flag; $C047 acknowledges it.
+#[test]
+fn vbl_interrupt_fires_and_clears() {
+    let mut bus = interrupt_test_bus();
+
+    bus.write(0x00_C041, 0x08, 0); // enable VBL interrupts
+    bus.update_interrupts(0);
+    assert!(!bus.irq_line, "no interrupt before a frame elapses");
+
+    bus.update_interrupts(FRAME);
+    assert!(bus.irq_line, "VBL interrupt after one frame");
+    assert_ne!(bus.read(0x00_C046, 0) & 0x08, 0, "$C046 VBL status set");
+
+    // $C047 acknowledges the VBL (and quarter-second) interrupt.
+    let _ = bus.read(0x00_C047, 0);
+    bus.update_interrupts(FRAME); // same frame index → no new heartbeat
+    assert!(!bus.irq_line, "IRQ line drops after acknowledge");
+}
+
+/// The quarter-second interrupt ($C041 bit 4) fires once every 16 VBLs.
+#[test]
+fn quarter_second_interrupt_fires_every_16_frames() {
+    let mut bus = interrupt_test_bus();
+
+    bus.write(0x00_C041, 0x10, 0); // enable quarter-second only
+    for f in 1..=15 {
+        bus.update_interrupts(f * FRAME);
+    }
+    assert!(!bus.irq_line, "must not fire before 16 frames");
+
+    bus.update_interrupts(16 * FRAME);
+    assert!(bus.irq_line, "quarter-second interrupt at frame 16");
+    assert_ne!(bus.read(0x00_C046, 0) & 0x10, 0, "$C046 1/4-sec status set");
+}
+
+/// The one-second interrupt ($C023 bit 2) fires once every 60 VBLs and is
+/// acknowledged through $C032.
+#[test]
+fn one_second_interrupt_fires_after_60_frames() {
+    let mut bus = interrupt_test_bus();
+
+    bus.write(0x00_C023, 0x04, 0); // enable one-second interrupt
+    for f in 1..=59 {
+        bus.update_interrupts(f * FRAME);
+    }
+    assert!(!bus.irq_line, "must not fire before 60 frames");
+
+    bus.update_interrupts(60 * FRAME);
+    assert!(bus.irq_line, "one-second interrupt at frame 60");
+    let c023 = bus.read(0x00_C023, 0);
+    assert_ne!(c023 & 0x80, 0, "$C023 VGC-interrupt bit set");
+    assert_ne!(c023 & 0x40, 0, "$C023 one-second status set");
+
+    // $C032 with the one-second clear bit low acknowledges the interrupt.
+    bus.write(0x00_C032, 0x00, 0);
+    bus.update_interrupts(60 * FRAME); // same frame index → no new heartbeat
+    assert!(!bus.irq_line, "IRQ line drops after acknowledge");
+}
+
+/// A disabled interrupt source never asserts the line even as frames elapse.
+#[test]
+fn disabled_interrupts_stay_quiet() {
+    let mut bus = interrupt_test_bus();
+    for f in 1..=120 {
+        bus.update_interrupts(f * FRAME);
+    }
+    assert!(
+        !bus.irq_line,
+        "no interrupts while all sources are disabled"
+    );
+}
+
+/// Language-card read-source truth table: `$C080`/`$C083` select read-from-RAM,
+/// `$C081`/`$C082` select read-from-ROM. Regression for the inverted `$C082`
+/// case that made the GS/OS / ProDOS 16 loader's `LDA $C082 : SEC : JSR $FE1F`
+/// identity check read RAM garbage → "REQUIRES APPLE IIGS HARDWARE".
+#[test]
+fn language_card_read_source_switches() {
+    // Canonical 128KB ROM (vectors in bank $FF) with a marker byte at $FF/$FE1F.
+    let mut rom = vec![0x00u8; 131072];
+    rom[0x1FFFC] = 0x00;
+    rom[0x1FFFD] = 0xFA; // valid reset vector → no half-swap
+    rom[0x1_0000 + 0xFE1F] = 0xCC; // bank $FF, $FE1F
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // Put a distinct value in bank $00 language-card RAM at $FE1F.
+    // ($C083 = read RAM / write enable after two reads.)
+    bus.read(0x00_C083, 0);
+    bus.read(0x00_C083, 0);
+    bus.write(0x00_FE1F, 0x42, 0);
+
+    // $C082: read ROM, write-protect → must see the ROM marker, not RAM.
+    bus.read(0x00_C082, 0);
+    assert_eq!(bus.read(0x00_FE1F, 0), 0xCC, "$C082 must read ROM");
+
+    // $C080: read RAM, write-protect → must see the RAM value.
+    bus.read(0x00_C080, 0);
+    assert_eq!(bus.read(0x00_FE1F, 0), 0x42, "$C080 must read RAM");
+
+    // $C081: read ROM (write enable) → ROM again.
+    bus.read(0x00_C081, 0);
+    assert_eq!(bus.read(0x00_FE1F, 0), 0xCC, "$C081 must read ROM");
+
+    // $C083: read RAM → RAM again.
+    bus.read(0x00_C083, 0);
+    assert_eq!(bus.read(0x00_FE1F, 0), 0x42, "$C083 must read RAM");
+}
+
+/// The `HIGHRAM` (read-from-RAM) memory-mode flag tracks the language-card
+/// read source: set for `$C080`/`$C083`, clear for `$C081`/`$C082`.
+#[test]
+fn language_card_highram_flag_matches_hardware() {
+    use apple2_core::bus::MemMode;
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    let highram = |bus: &IIgsBus| bus.mega2.mem_mode.contains(MemMode::MF_HIGHRAM);
+
+    bus.read(0x00_C080, 0);
+    assert!(highram(&bus), "$C080 → read RAM");
+    bus.read(0x00_C081, 0);
+    assert!(!highram(&bus), "$C081 → read ROM");
+    bus.read(0x00_C082, 0);
+    assert!(!highram(&bus), "$C082 → read ROM");
+    bus.read(0x00_C083, 0);
+    assert!(highram(&bus), "$C083 → read RAM");
+}
+
+/// STATEREG ($C068) bit layout: `[7]ALTZP [6]PAGE2 [5]RAMRD [4]RAMWRT [3]RDROM
+/// [2]LCBANK2 [1]ROMBANK [0]INTCXROM`. Bit 3 (RDROM) is the *inverse* of
+/// HIGHRAM. Regression for the crash where `STATEREG = $0C` ("read ROM, bank 2")
+/// was decoded as read-RAM, so the next ROM fetch hit uninitialised RAM (BRK).
+#[test]
+fn statereg_read_rom_bit() {
+    use apple2_core::bus::MemMode;
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // $0C = RDROM (bit 3) + LCBANK2 (bit 2): read ROM, language-card bank 2.
+    bus.write(0x00_C068, 0x0C, 0);
+    assert!(
+        !bus.mega2.mem_mode.contains(MemMode::MF_HIGHRAM),
+        "RDROM set → read ROM (HIGHRAM clear)"
+    );
+    assert!(
+        bus.mega2.mem_mode.contains(MemMode::MF_BANK2),
+        "LCBANK2 set"
+    );
+    // Read-back reports RDROM (bit 3) set, LCBANK2 (bit 2) set.
+    assert_eq!(bus.read(0x00_C068, 0) & 0x0C, 0x0C);
+
+    // $00 = RDROM clear → read RAM (HIGHRAM set).
+    bus.write(0x00_C068, 0x00, 0);
+    assert!(
+        bus.mega2.mem_mode.contains(MemMode::MF_HIGHRAM),
+        "RDROM clear → read RAM (HIGHRAM set)"
+    );
+    assert_eq!(bus.read(0x00_C068, 0) & 0x08, 0x00, "read-back RDROM clear");
+
+    // INTCXROM is bit 0.
+    bus.write(0x00_C068, 0x01, 0);
+    assert!(bus.mega2.mem_mode.contains(MemMode::MF_INTCXROM));
+    assert_eq!(bus.read(0x00_C068, 0) & 0x01, 0x01);
+}
+
+/// ROM banks ($FC-$FF) are a linear image: `$C000-$CFFF` reads ROM, not the I/O
+/// aperture or slot cache. The firmware runs real code at `$FF/$C0xx`.
+/// Regression for the `JSR $C085`-into-I/O crash.
+#[test]
+fn rom_bank_c0xx_reads_rom_not_io() {
+    let mut rom = vec![0x00u8; 131072];
+    rom[0x1FFFC] = 0x00;
+    rom[0x1FFFD] = 0xFA; // valid vector → no half-swap; bank $FF = second half
+    rom[0x1_0000 + 0xC085] = 0xA4; // marker byte at $FF/$C085 (real ROM would be code)
+    rom[0x1_0000 + 0xC0EE] = 0x5A; // marker at $FF/$C0EE (an "I/O" address)
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // Reading through bank $FF must return the ROM bytes, not I/O register values.
+    assert_eq!(bus.read(0xFF_C085, 0), 0xA4, "$FF/$C085 is ROM");
+    assert_eq!(bus.read(0xFF_C0EE, 0), 0x5A, "$FF/$C0EE is ROM, not I/O");
+}

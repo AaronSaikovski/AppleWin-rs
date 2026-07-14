@@ -47,6 +47,31 @@ pub struct IIgsMemory {
     pub fast_ram: Vec<u8>,
 }
 
+/// Fix up ROM dumps whose two 64KB halves are stored in the wrong order.
+///
+/// The 65C816 fetches its reset vector from bank `$FF`, offset `$FFFC` — for a
+/// 128KB image (banks `$FE-$FF`) that is file offset `0x1FFFC`. Some ROM 01
+/// dumps (e.g. `342-0077-B`) store the halves swapped, leaving the CPU vectors
+/// in the low half and zeros where the vectors should be, so the machine resets
+/// to `$0000` and dies. When we detect a blank vector in the expected half but a
+/// valid one in the other, swap the halves so bank `$FF` holds the vectors.
+///
+/// Only the 128KB case is handled; 256KB (ROM 03) dumps in circulation use the
+/// canonical layout, so they are left untouched.
+fn normalize_rom_layout(rom: &mut [u8]) {
+    if rom.len() != 0x20000 {
+        return;
+    }
+    let vec_high = u16::from_le_bytes([rom[0x1_FFFC], rom[0x1_FFFD]]);
+    if vec_high != 0 {
+        return; // vectors already in bank $FF — canonical layout
+    }
+    let vec_low = u16::from_le_bytes([rom[0x0_FFFC], rom[0x0_FFFD]]);
+    if vec_low != 0 {
+        rom.rotate_left(0x1_0000); // swap the two 64KB halves
+    }
+}
+
 impl IIgsMemory {
     /// Create a new IIgs memory subsystem.
     ///
@@ -55,6 +80,20 @@ impl IIgsMemory {
     pub fn new(ram_kb: usize, rom_data: Vec<u8>) -> Result<Self, String> {
         let ram_kb = ram_kb.clamp(256, 8192);
         let ram_size = ram_kb * 1024;
+
+        // Reject unexpected sizes up front, then fix up dumps whose 64KB halves
+        // are stored in the wrong order (see `normalize_rom_layout`).
+        let mut rom_data = rom_data;
+        match rom_data.len() {
+            0x20000 | 0x40000 => {}
+            other => {
+                return Err(format!(
+                    "Invalid IIgs ROM size: {} bytes (expected 131072 for ROM 00/01 or 262144 for ROM 03)",
+                    other
+                ));
+            }
+        }
+        normalize_rom_layout(&mut rom_data);
 
         let rom_version = match rom_data.len() {
             0x20000 => {
@@ -68,13 +107,7 @@ impl IIgsMemory {
                     IIgsRomVersion::Rom01
                 }
             }
-            0x40000 => IIgsRomVersion::Rom03,
-            other => {
-                return Err(format!(
-                    "Invalid IIgs ROM size: {} bytes (expected 131072 for ROM 00/01 or 262144 for ROM 03)",
-                    other
-                ));
-            }
+            _ => IIgsRomVersion::Rom03,
         };
 
         let mut ram = vec![0u8; ram_size];

@@ -39,12 +39,9 @@ pub struct IIgsBus {
     /// IRQ line state — true when any interrupt source is active.
     pub irq_line: bool,
 
-    /// VBL interrupt enable and state.
-    pub vbl_irq_enabled: bool,
-    /// One-second interrupt enable.
-    pub one_sec_irq_enabled: bool,
-    /// Quarter-second interrupt counter.
-    pub qsec_counter: u64,
+    /// Absolute video-frame index last processed by the interrupt heartbeat.
+    /// Used to fire VBL/heartbeat interrupts once per 60 Hz frame.
+    last_frame: u64,
 
     /// Slot ROM area: internal ROM for slots when INTCXROM is set.
     slot_rom_cache: Vec<u8>,
@@ -75,9 +72,7 @@ impl IIgsBus {
             smartport: SmartPort::default(),
             bram: bram::factory_default_bram(),
             irq_line: false,
-            vbl_irq_enabled: false,
-            one_sec_irq_enabled: false,
-            qsec_counter: 0,
+            last_frame: 0,
             slot_rom_cache,
         }
     }
@@ -101,17 +96,14 @@ impl IIgsBus {
                 }
             }
 
-            // Banks $E0-$E1: Fast RAM (no I/O)
-            0xE0 | 0xE1 => {
-                let bank_offset = bank - 0xE0;
-                self.mem.fast_ram_read(bank_offset, offset)
-            }
+            // Banks $E0-$E1: Fast RAM with the Mega II I/O aperture
+            0xE0 | 0xE1 => self.read_fast_bank(bank - 0xE0, offset, cycles),
 
             // Banks $E2-$FB: unused / mirrors
             0xE2..=0xFB => 0x00,
 
             // Banks $FC-$FF: ROM
-            0xFC..=0xFF => self.read_rom_bank(bank, offset, cycles),
+            0xFC..=0xFF => self.read_rom_bank(bank, offset),
         }
     }
 
@@ -134,11 +126,8 @@ impl IIgsBus {
                 }
             }
 
-            // Banks $E0-$E1: Fast RAM (no I/O, no shadowing)
-            0xE0 | 0xE1 => {
-                let bank_offset = bank - 0xE0;
-                self.mem.fast_ram_write(bank_offset, offset, val);
-            }
+            // Banks $E0-$E1: Fast RAM with the Mega II I/O aperture
+            0xE0 | 0xE1 => self.write_fast_bank(bank - 0xE0, offset, val, cycles),
 
             // Banks $E2-$FB: unused
             0xE2..=0xFB => {}
@@ -148,32 +137,70 @@ impl IIgsBus {
         }
     }
 
+    /// Read an I/O register in the `$C000-$C0FF` aperture.
+    ///
+    /// Shared by every bank that exposes the I/O aperture — the "slow" banks
+    /// `$00`/`$01`, the "fast" banks `$E0`/`$E1`, and the ROM banks `$FC-$FF`.
+    fn io_read_reg(&mut self, io_offset: u8, cycles: u64) -> u8 {
+        self.fpi.io_access();
+
+        // ADB and Ensoniq registers are handled by the bus directly.
+        let val = match io_offset {
+            0x24 => self.adb.mouse_data,
+            0x25 => self.adb.modifiers,
+            0x26 => self.adb.read_data(),
+            0x27 => {
+                self.adb.update(cycles);
+                self.adb.read_status()
+            }
+            // Ensoniq DOC registers
+            0x3C => self.ensoniq.read_control(),
+            0x3D => self.ensoniq.read_data(),
+            0x3E => self.ensoniq.read_addr_lo(),
+            0x3F => self.ensoniq.read_addr_hi(),
+            _ => self.mega2.io_read(io_offset, cycles),
+        };
+
+        self.fpi.io_complete();
+        val
+    }
+
+    /// Write an I/O register in the `$C000-$C0FF` aperture. Shared by every bank
+    /// that exposes the I/O aperture (see [`io_read_reg`](Self::io_read_reg)).
+    fn io_write_reg(&mut self, io_offset: u8, val: u8, cycles: u64) {
+        self.fpi.io_access();
+
+        match io_offset {
+            0x26 => {
+                // ADB command write — handle BRAM commands specially
+                self.adb.write_command(val, cycles);
+                self.handle_bram_command();
+            }
+            0x27 => {
+                // Writing to $C027 clears interrupt flags
+                self.adb.status &= !val;
+            }
+            // Speed register — update FPI after Mega2 stores the value
+            0x36 => {
+                self.mega2.io_write(io_offset, val, cycles);
+                self.fpi.set_speed_from_reg(self.mega2.speed_reg);
+            }
+            // Ensoniq DOC registers
+            0x3C => self.ensoniq.write_control(val),
+            0x3D => self.ensoniq.write_data(val),
+            0x3E => self.ensoniq.write_addr_lo(val),
+            0x3F => self.ensoniq.write_addr_hi(val),
+            _ => self.mega2.io_write(io_offset, val, cycles),
+        }
+
+        self.fpi.io_complete();
+    }
+
     /// Read from a "slow" bank ($00 or $01) with I/O aperture handling.
     fn read_slow_bank(&mut self, bank: u8, offset: u16, cycles: u64) -> u8 {
         // I/O aperture: $C000-$C0FF
         if (0xC000..=0xC0FF).contains(&offset) {
-            self.fpi.io_access();
-            let io_offset = (offset & 0xFF) as u8;
-
-            // ADB and Ensoniq registers are handled by the bus directly
-            let val = match io_offset {
-                0x24 => self.adb.mouse_data,
-                0x25 => self.adb.modifiers,
-                0x26 => self.adb.read_data(),
-                0x27 => {
-                    self.adb.update(cycles);
-                    self.adb.read_status()
-                }
-                // Ensoniq DOC registers
-                0x3C => self.ensoniq.read_control(),
-                0x3D => self.ensoniq.read_data(),
-                0x3E => self.ensoniq.read_addr_lo(),
-                0x3F => self.ensoniq.read_addr_hi(),
-                _ => self.mega2.io_read(io_offset, cycles),
-            };
-
-            self.fpi.io_complete();
-            return val;
+            return self.io_read_reg((offset & 0xFF) as u8, cycles);
         }
 
         // Slot ROM area: $C100-$CFFF
@@ -196,33 +223,7 @@ impl IIgsBus {
     fn write_slow_bank(&mut self, bank: u8, offset: u16, val: u8, cycles: u64) {
         // I/O aperture: $C000-$C0FF
         if (0xC000..=0xC0FF).contains(&offset) {
-            self.fpi.io_access();
-            let io_offset = (offset & 0xFF) as u8;
-
-            match io_offset {
-                0x26 => {
-                    // ADB command write — handle BRAM commands specially
-                    self.adb.write_command(val, cycles);
-                    self.handle_bram_command();
-                }
-                0x27 => {
-                    // Writing to $C027 clears interrupt flags
-                    self.adb.status &= !val;
-                }
-                // Speed register — update FPI after Mega2 stores the value
-                0x36 => {
-                    self.mega2.io_write(io_offset, val, cycles);
-                    self.fpi.set_speed_from_reg(self.mega2.speed_reg);
-                }
-                // Ensoniq DOC registers
-                0x3C => self.ensoniq.write_control(val),
-                0x3D => self.ensoniq.write_data(val),
-                0x3E => self.ensoniq.write_addr_lo(val),
-                0x3F => self.ensoniq.write_addr_hi(val),
-                _ => self.mega2.io_write(io_offset, val, cycles),
-            }
-
-            self.fpi.io_complete();
+            self.io_write_reg((offset & 0xFF) as u8, val, cycles);
             return;
         }
 
@@ -251,6 +252,87 @@ impl IIgsBus {
             self.mem.fast_ram_write(0, offset, val);
         } else if bank == 1 && self.mega2.shadow.should_shadow_bank1(offset) {
             self.mem.fast_ram_write(1, offset, val);
+        }
+    }
+
+    /// Read from a "fast" bank ($E0 or $E1).
+    ///
+    /// On real hardware banks $E0/$E1 are the Mega II side of memory and expose
+    /// the same `$C000-$CFFF` I/O aperture and `$D000-$FFFF` language-card window
+    /// as banks $00/$01, backed by fast RAM. The IIgs firmware runs its
+    /// cold-start with `DBR=$E1` and polls hardware registers through this
+    /// aperture, so it must be decoded here rather than read as plain RAM.
+    fn read_fast_bank(&mut self, bank_offset: u8, offset: u16, cycles: u64) -> u8 {
+        // I/O aperture: $C000-$C0FF
+        if (0xC000..=0xC0FF).contains(&offset) {
+            return self.io_read_reg((offset & 0xFF) as u8, cycles);
+        }
+
+        // Slot ROM area: $C100-$CFFF
+        if (0xC100..=0xCFFF).contains(&offset) {
+            let idx = (offset - 0xC100) as usize;
+            return self.slot_rom_cache.get(idx).copied().unwrap_or(0);
+        }
+
+        // Language Card area: $D000-$FFFF
+        if offset >= 0xD000 {
+            return self.read_language_card_fast(bank_offset, offset);
+        }
+
+        self.mem.fast_ram_read(bank_offset, offset)
+    }
+
+    /// Write to a "fast" bank ($E0 or $E1). See [`read_fast_bank`](Self::read_fast_bank).
+    fn write_fast_bank(&mut self, bank_offset: u8, offset: u16, val: u8, cycles: u64) {
+        // I/O aperture: $C000-$C0FF
+        if (0xC000..=0xC0FF).contains(&offset) {
+            self.io_write_reg((offset & 0xFF) as u8, val, cycles);
+            return;
+        }
+
+        // Slot ROM area: $C100-$CFFF — writes ignored (ROM)
+        if (0xC100..=0xCFFF).contains(&offset) {
+            return;
+        }
+
+        // Language Card area: $D000-$FFFF
+        if offset >= 0xD000 {
+            self.write_language_card_fast(bank_offset, offset, val);
+            return;
+        }
+
+        self.mem.fast_ram_write(bank_offset, offset, val);
+    }
+
+    /// Language-card read for the fast banks — mirrors [`read_language_card`](Self::read_language_card)
+    /// but backed by fast RAM ($E0/$E1).
+    fn read_language_card_fast(&self, bank_offset: u8, offset: u16) -> u8 {
+        use apple2_core::bus::MemMode;
+
+        if self.mega2.mem_mode.contains(MemMode::MF_HIGHRAM) {
+            if offset < 0xE000 && !self.mega2.mem_mode.contains(MemMode::MF_BANK2) {
+                self.mem
+                    .fast_ram_read(bank_offset, offset.wrapping_sub(0x1000))
+            } else {
+                self.mem.fast_ram_read(bank_offset, offset)
+            }
+        } else {
+            self.mem.rom_read(0xFF, offset)
+        }
+    }
+
+    /// Language-card write for the fast banks — mirrors [`write_language_card`](Self::write_language_card)
+    /// but backed by fast RAM ($E0/$E1).
+    fn write_language_card_fast(&mut self, bank_offset: u8, offset: u16, val: u8) {
+        use apple2_core::bus::MemMode;
+
+        if self.mega2.mem_mode.contains(MemMode::MF_WRITERAM) {
+            if offset < 0xE000 && !self.mega2.mem_mode.contains(MemMode::MF_BANK2) {
+                self.mem
+                    .fast_ram_write(bank_offset, offset.wrapping_sub(0x1000), val);
+            } else {
+                self.mem.fast_ram_write(bank_offset, offset, val);
+            }
         }
     }
 
@@ -292,24 +374,13 @@ impl IIgsBus {
     }
 
     /// Read from a ROM bank ($FC-$FF).
-    /// In ROM banks, the lower portion ($0000-$BFFF) may also map to RAM
-    /// on some configurations. For simplicity, we return ROM for the entire bank.
-    /// The I/O aperture at $C000-$C0FF in ROM banks mirrors bank $00 I/O.
-    fn read_rom_bank(&mut self, bank: u8, offset: u16, cycles: u64) -> u8 {
-        // I/O aperture in ROM banks — same as bank $00
-        if (0xC000..=0xC0FF).contains(&offset) {
-            self.fpi.io_access();
-            let val = self.mega2.io_read((offset & 0xFF) as u8, cycles);
-            self.fpi.io_complete();
-            return val;
-        }
-
-        // Slot ROM in ROM banks
-        if (0xC100..=0xCFFF).contains(&offset) {
-            let idx = (offset - 0xC100) as usize;
-            return self.slot_rom_cache.get(idx).copied().unwrap_or(0);
-        }
-
+    ///
+    /// ROM banks are a linear image — the entire 64KB, including `$C000-$CFFF`,
+    /// is ROM. Unlike banks `$00`/`$01`/`$E0`/`$E1`, the I/O aperture and slot
+    /// ROM are *not* overlaid here: the firmware runs real code at `$FF/$C0xx`
+    /// (e.g. `JSR $C085`) and reaches I/O via explicit bank-`$E0`/`$E1`/`$00`
+    /// long addressing.
+    fn read_rom_bank(&self, bank: u8, offset: u16) -> u8 {
         self.mem.rom_read(bank, offset)
     }
 
@@ -339,19 +410,48 @@ impl IIgsBus {
         // Update VBL state
         self.mega2.update_vblank(cycles);
 
-        // Check for VBL interrupt
-        let mut irq = false;
-        if self.vbl_irq_enabled && self.mega2.vblank {
-            self.mega2.vgc_int |= 0x80; // VGC interrupt occurred
-            irq = true;
+        // Drive the interrupt heartbeat once per elapsed video frame (60 Hz):
+        // VBL, quarter-second, one-second, and VGC scan-line interrupts.
+        let frame = cycles / crate::mega2::CYCLES_PER_FRAME;
+        if frame != self.last_frame {
+            // Cap the catch-up so a large cycle jump can't spin here.
+            let elapsed = (frame - self.last_frame).min(4);
+            self.last_frame = frame;
+            let scan_wanted = self.scan_line_int_requested();
+            for _ in 0..elapsed {
+                self.mega2.heartbeat_vbl(scan_wanted);
+            }
         }
 
-        // Check for ADB keyboard interrupt
+        // Compose the CPU IRQ line from the Mega II/VGC sources plus the ADB
+        // keyboard interrupt.
+        let mut irq = self.mega2.irq_asserted();
         if self.adb.status & crate::adb::status::KEY_IRQ != 0 {
             irq = true;
         }
 
         self.irq_line = irq;
+    }
+
+    /// True when Super Hi-Res is active and at least one scan-line control byte
+    /// requests a scan-line interrupt (bit 6 of the SCB).
+    ///
+    /// The SCBs live in bank `$E1` at `$9D00-$9DC7` (200 lines). This is an
+    /// approximation of the real per-scan-line timing: the interrupt is raised
+    /// once per frame if any enabled line requests it, which is what heartbeat-
+    /// driven software depends on.
+    fn scan_line_int_requested(&self) -> bool {
+        if !self.mega2.is_shr_enabled() {
+            return false;
+        }
+        const SCB_BASE: usize = 0x1_9D00; // bank $E1 offset $9D00
+        let fast = &self.mem.fast_ram;
+        if fast.len() < SCB_BASE + 200 {
+            return false;
+        }
+        fast[SCB_BASE..SCB_BASE + 200]
+            .iter()
+            .any(|&scb| scb & 0x40 != 0)
     }
 
     /// Reset the bus state (power cycle or warm reset).
@@ -361,8 +461,7 @@ impl IIgsBus {
         self.adb = Adb::default();
         self.ensoniq = Ensoniq::default();
         self.irq_line = false;
-        self.vbl_irq_enabled = false;
-        self.one_sec_irq_enabled = false;
+        self.last_frame = 0;
         // Reinitialize BRAM with factory defaults if needed
         if !bram::validate_bram_checksum(&self.bram) {
             self.bram = bram::factory_default_bram();

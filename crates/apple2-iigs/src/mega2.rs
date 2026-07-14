@@ -16,6 +16,20 @@ const SPEAKER_TOGGLES_MAX: usize = 65_536;
 
 use crate::shadowing::ShadowReg;
 
+/// `$C041` INTEN — enable VBL interrupts (Mega II).
+pub const C041_EN_VBL_INTS: u8 = 0x08;
+/// `$C041` INTEN — enable quarter-second interrupts (Mega II).
+pub const C041_EN_25SEC_INTS: u8 = 0x10;
+
+/// Interrupt source: VBL (`$C046` bit 3, gated by `$C041`).
+pub const IRQ_VBL: u8 = 0x01;
+/// Interrupt source: quarter-second (`$C046` bit 4, gated by `$C041`).
+pub const IRQ_QSEC: u8 = 0x02;
+/// Interrupt source: one-second (`$C023` bit 6, gated by `$C023` bit 2).
+pub const IRQ_1SEC: u8 = 0x04;
+/// Interrupt source: VGC scan-line (`$C023` bit 5, gated by `$C023` bit 1).
+pub const IRQ_SCAN: u8 = 0x08;
+
 /// Mega II state — IIe-compatible and IIgs-specific soft-switch registers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mega2 {
@@ -122,11 +136,24 @@ pub struct Mega2 {
     /// Cycle count at start of current frame (for VBLANK timing).
     pub frame_start_cycles: u64,
 
-    /// Mega II interrupt flags ($C041).
-    pub mega2_int: u8,
+    /// Mega II interrupt-enable register / INTEN ($C041).
+    /// Bit 4: quarter-second interrupt enable.
+    /// Bit 3: VBL interrupt enable.
+    pub mega2_inten: u8,
 
-    /// Diagnostic speed register ($C046) - read-only.
-    pub diag_speed: u8,
+    /// Mega II interrupt-flag register / INTFLAG ($C046).
+    /// Bit 4: quarter-second interrupt occurred.
+    /// Bit 3: VBL interrupt occurred.
+    pub mega2_intflag: u8,
+
+    /// Active interrupt sources — OR of the `IRQ_*` bits. Drives the CPU IRQ line.
+    pub irq_pending: u8,
+
+    /// VBL counter for the quarter-second heartbeat (fires every 16 VBLs).
+    pub qsec_counter: u32,
+
+    /// VBL counter for the one-second heartbeat (fires every 60 VBLs).
+    pub sec_counter: u32,
 }
 
 impl Default for Mega2 {
@@ -157,14 +184,17 @@ impl Default for Mega2 {
             ann: [false; 4],
             vblank: false,
             frame_start_cycles: 0,
-            mega2_int: 0,
-            diag_speed: 0,
+            mega2_inten: 0,
+            mega2_intflag: 0,
+            irq_pending: 0,
+            qsec_counter: 0,
+            sec_counter: 0,
         }
     }
 }
 
 /// Total cycles per NTSC frame (262 lines * 65 cycles/line).
-const CYCLES_PER_FRAME: u64 = 17_030;
+pub const CYCLES_PER_FRAME: u64 = 17_030;
 /// Cycles in the visible region (192 lines * 65 cycles/line).
 const CYCLES_VISIBLE: u64 = 12_480;
 
@@ -223,11 +253,8 @@ impl Mega2 {
                 0x00
             }
 
-            // ── VGC interrupt clear ($C032) ──────────────────────────────
-            0x32 => {
-                self.vgc_int &= !0x80; // clear interrupt flag
-                0x00
-            }
+            // ── VGC interrupt clear ($C032) — read has no effect ─────────
+            0x32 => 0x00,
 
             // ── Border + shadow + speed ──────────────────────────────────
             0x34 => self.border_color,
@@ -243,12 +270,20 @@ impl Mega2 {
             // ── Diagnostic strobe ($C040) ────────────────────────────────
             0x40 => 0x00,
 
-            // ── Mega II interrupt flags ──────────────────────────────────
-            0x41 => self.mega2_int,
-
-            // ── Diagnostic speed ─────────────────────────────────────────
-            0x46 if self.speed_reg & 0x80 != 0 => 0x01,
-            0x46 => 0x00,
+            // ── Mega II interrupt enable / flags ($C041/$C046/$C047) ─────
+            0x41 => self.mega2_inten,
+            0x46 => {
+                let tmp = self.mega2_intflag;
+                // Mouse-button latch: copy bit 7 into bit 6, clear bit 7.
+                self.mega2_intflag = (tmp & 0xBF) | ((tmp & 0x80) >> 1);
+                tmp
+            }
+            0x47 => {
+                // INTCLEAR — clear VBL and quarter-second interrupts.
+                self.irq_pending &= !(IRQ_VBL | IRQ_QSEC);
+                self.mega2_intflag &= 0xE7;
+                0x00
+            }
 
             // ── Game I/O (paddles/buttons) ───────────────────────────────
             0x61 => 0x00,        // PB0 (open apple) - not pressed
@@ -349,17 +384,47 @@ impl Mega2 {
             // ── IIgs-specific registers ──────────────────────────────────
             0x22 => self.text_color = val,
             0x23 => {
-                // VGC interrupt register — enable bits
-                // Bit 4: scanline interrupt enable
-                // Bit 5: one-second interrupt enable
-                self.vgc_int = (self.vgc_int & 0xE0) | (val & 0x1F);
+                // VGC interrupt register ($C023).
+                // Keeps status bits 6/5/4, takes enable bits 3-0 from the write.
+                // Bit 2: one-second enable, bit 1: scan-line enable.
+                let mut tmp = (self.vgc_int & 0x70) | (val & 0x0F);
+                // Enable+status → assert; disable → clear the pending source.
+                if tmp & 0x22 == 0x22 {
+                    self.irq_pending |= IRQ_SCAN;
+                }
+                if tmp & 0x02 == 0 {
+                    self.irq_pending &= !IRQ_SCAN;
+                }
+                if tmp & 0x44 == 0x44 {
+                    self.irq_pending |= IRQ_1SEC;
+                }
+                if tmp & 0x04 == 0 {
+                    self.irq_pending &= !IRQ_1SEC;
+                }
+                if self.irq_pending & (IRQ_SCAN | IRQ_1SEC) != 0 {
+                    tmp |= 0x80;
+                }
+                self.vgc_int = tmp;
             }
             // $C026-$C027: ADB writes — handled by the bus, not here
             0x29 => self.new_video = val,
             0x2D => self.slot_rom_select = val,
             0x32 => {
-                // VGC interrupt clear
-                self.vgc_int &= !0x80;
+                // VGC interrupt clear ($C032). Writing a 0 to a status bit
+                // clears that interrupt (one-second = bit 6, scan-line = bit 5).
+                let mut tmp = self.vgc_int & 0x7F;
+                if val & 0x40 == 0 && tmp & 0x40 != 0 {
+                    self.irq_pending &= !IRQ_1SEC;
+                    tmp &= 0xBF;
+                }
+                if val & 0x20 == 0 && tmp & 0x20 != 0 {
+                    self.irq_pending &= !IRQ_SCAN;
+                    tmp &= 0xDF;
+                }
+                if self.irq_pending & (IRQ_1SEC | IRQ_SCAN) != 0 {
+                    tmp |= 0x80;
+                }
+                self.vgc_int = tmp;
             }
 
             // ── Speaker ──────────────────────────────────────────────────
@@ -380,6 +445,23 @@ impl Mega2 {
             0x3D => self.sound_data = val,
             0x3E => self.sound_addr_lo = val,
             0x3F => self.sound_addr_hi = val,
+
+            // ── Mega II interrupt enable / clear ($C041/$C047) ───────────
+            0x41 => {
+                self.mega2_inten = val & 0x1F;
+                // Disabling a source drops any pending interrupt from it.
+                if val & C041_EN_VBL_INTS == 0 {
+                    self.irq_pending &= !IRQ_VBL;
+                }
+                if val & C041_EN_25SEC_INTS == 0 {
+                    self.irq_pending &= !IRQ_QSEC;
+                }
+            }
+            0x47 => {
+                // INTCLEAR — clear VBL and quarter-second interrupts.
+                self.irq_pending &= !(IRQ_VBL | IRQ_QSEC);
+                self.mega2_intflag &= 0xE7;
+            }
 
             // ── Video switches (IIe compatible) ──────────────────────────
             0x50 => self.mem_mode.insert(MemMode::MF_GRAPHICS),
@@ -418,43 +500,44 @@ impl Mega2 {
             self.mem_mode.remove(MemMode::MF_BANK2);
         }
 
-        // Bits 0-1 determine read/write mode:
-        // 00: read ROM, write protect
-        // 01: read ROM, write enable (needs 2 reads)
-        // 10: read RAM, write protect
-        // 11: read RAM, write enable (needs 2 reads)
+        // Bits 0-1 select the read source and write-enable, per the Apple II
+        // language-card truth table ($C08x, low nibble):
+        //   00 ($C080): read RAM, write protect
+        //   01 ($C081): read ROM, write enable (needs 2 reads)
+        //   10 ($C082): read ROM, write protect
+        //   11 ($C083): read RAM, write enable (needs 2 reads)
+        // HIGHRAM (read from RAM) is set for modes 0 and 3, clear for 1 and 2.
         let mode_bits = reg & 0x03;
+
+        // Read source: RAM when bit0 == bit1, else ROM.
         match mode_bits {
-            0 => {
-                self.mem_mode.remove(MemMode::MF_HIGHRAM);
-                self.mem_mode.remove(MemMode::MF_WRITERAM);
-                self.lc_prewrite = false;
-            }
-            1 => {
-                self.mem_mode.remove(MemMode::MF_HIGHRAM);
-                if self.lc_prewrite && self.lc_last_access == reg {
-                    self.mem_mode.insert(MemMode::MF_WRITERAM);
-                }
-                self.lc_prewrite = true;
-            }
-            2 => {
-                self.mem_mode.insert(MemMode::MF_HIGHRAM);
-                self.mem_mode.remove(MemMode::MF_WRITERAM);
-                self.lc_prewrite = false;
-            }
-            3 => {
-                self.mem_mode.insert(MemMode::MF_HIGHRAM);
-                if self.lc_prewrite && self.lc_last_access == reg {
-                    self.mem_mode.insert(MemMode::MF_WRITERAM);
-                }
-                self.lc_prewrite = true;
-            }
+            0 | 3 => self.mem_mode.insert(MemMode::MF_HIGHRAM),
+            1 | 2 => self.mem_mode.remove(MemMode::MF_HIGHRAM),
             _ => unreachable!(),
+        }
+
+        // Write-enable: only odd registers ($C081/$C083) arm WRITERAM, and only
+        // after two consecutive accesses of the same register. Even registers
+        // clear the pre-write latch and write-protect the card.
+        if mode_bits & 1 == 0 {
+            self.mem_mode.remove(MemMode::MF_WRITERAM);
+            self.lc_prewrite = false;
+        } else {
+            if self.lc_prewrite && self.lc_last_access == reg {
+                self.mem_mode.insert(MemMode::MF_WRITERAM);
+            }
+            self.lc_prewrite = true;
         }
         self.lc_last_access = reg;
     }
 
-    /// Read the STATEREG ($C068) — packs multiple memory mode flags into one byte.
+    /// Read the STATEREG ($C068) — packs the IIgs memory-mode flags into one byte.
+    ///
+    /// Bit layout (Apple IIgs Hardware Reference / GSplus):
+    ///   7 ALTZP  6 PAGE2  5 RAMRD  4 RAMWRT  3 RDROM  2 LCBANK2  1 ROMBANK  0 INTCXROM
+    ///
+    /// `RDROM` (bit 3) is the inverse of `HIGHRAM`: it is set when the language
+    /// card reads ROM, i.e. when `HIGHRAM` (read-RAM) is clear.
     fn read_state_reg(&self) -> u8 {
         let mut val = 0u8;
         if self.mem_mode.contains(MemMode::MF_ALTZP) {
@@ -469,31 +552,35 @@ impl Mega2 {
         if self.mem_mode.contains(MemMode::MF_AUXWRITE) {
             val |= 0x10;
         }
-        if self.mem_mode.contains(MemMode::MF_BANK2) {
+        // Bit 3 = RDROM: set when NOT reading language-card RAM.
+        if !self.mem_mode.contains(MemMode::MF_HIGHRAM) {
             val |= 0x08;
         }
-        if self.mem_mode.contains(MemMode::MF_HIGHRAM) {
+        // Bit 2 = LCBANK2.
+        if self.mem_mode.contains(MemMode::MF_BANK2) {
             val |= 0x04;
         }
+        // Bit 1 = ROMBANK (ROM bank select — not modelled, reads 0).
+        // Bit 0 = INTCXROM.
         if self.mem_mode.contains(MemMode::MF_INTCXROM) {
-            val |= 0x02;
-        }
-        if self.mem_mode.contains(MemMode::MF_SLOTC3ROM) {
             val |= 0x01;
         }
         val
     }
 
-    /// Write the STATEREG ($C068) — sets multiple memory mode flags at once.
+    /// Write the STATEREG ($C068) — sets the IIgs memory-mode flags at once.
+    /// See [`read_state_reg`](Self::read_state_reg) for the bit layout.
     fn write_state_reg(&mut self, val: u8) {
         self.mem_mode.set(MemMode::MF_ALTZP, val & 0x80 != 0);
         self.mem_mode.set(MemMode::MF_PAGE2, val & 0x40 != 0);
         self.mem_mode.set(MemMode::MF_AUXREAD, val & 0x20 != 0);
         self.mem_mode.set(MemMode::MF_AUXWRITE, val & 0x10 != 0);
-        self.mem_mode.set(MemMode::MF_BANK2, val & 0x08 != 0);
-        self.mem_mode.set(MemMode::MF_HIGHRAM, val & 0x04 != 0);
-        self.mem_mode.set(MemMode::MF_INTCXROM, val & 0x02 != 0);
-        self.mem_mode.set(MemMode::MF_SLOTC3ROM, val & 0x01 != 0);
+        // Bit 3 = RDROM (1 = read ROM). HIGHRAM (read RAM) is its inverse.
+        self.mem_mode.set(MemMode::MF_HIGHRAM, val & 0x08 == 0);
+        // Bit 2 = LCBANK2.
+        self.mem_mode.set(MemMode::MF_BANK2, val & 0x04 != 0);
+        // Bit 1 = ROMBANK (not modelled). Bit 0 = INTCXROM.
+        self.mem_mode.set(MemMode::MF_INTCXROM, val & 0x01 != 0);
     }
 
     /// Process a key press from the host.
@@ -516,6 +603,56 @@ impl Mega2 {
             }
         }
         self.vblank = new_vblank;
+    }
+
+    /// Advance the interrupt heartbeat by one VBL (60 Hz).
+    ///
+    /// Sets the VBL, quarter-second, one-second, and (if `scan_wanted`) VGC
+    /// scan-line interrupt sources, each gated by its enable bit. Called once
+    /// per elapsed video frame from the bus.
+    pub fn heartbeat_vbl(&mut self, scan_wanted: bool) {
+        // VBL interrupt ($C046 bit 3), gated by $C041 VBL enable.
+        if self.mega2_inten & C041_EN_VBL_INTS != 0 {
+            self.mega2_intflag |= 0x08;
+            self.irq_pending |= IRQ_VBL;
+        }
+
+        // Quarter-second interrupt: every 16 VBLs ($C046 bit 4).
+        self.qsec_counter += 1;
+        if self.qsec_counter >= 16 {
+            self.qsec_counter = 0;
+            if self.mega2_inten & C041_EN_25SEC_INTS != 0 {
+                self.mega2_intflag |= 0x10;
+                self.irq_pending |= IRQ_QSEC;
+            }
+        }
+
+        // One-second interrupt: every 60 VBLs ($C023 bit 6 status).
+        self.sec_counter += 1;
+        if self.sec_counter >= 60 {
+            self.sec_counter = 0;
+            self.vgc_int |= 0x40; // one-second status
+            if self.vgc_int & 0x04 != 0 {
+                self.vgc_int |= 0x80; // VGC interrupt occurred
+                self.irq_pending |= IRQ_1SEC;
+            }
+        }
+
+        // VGC scan-line interrupt ($C023 bit 5 status): fires when a scan-line
+        // control byte requests it and the scan-line enable bit is set.
+        if scan_wanted {
+            self.vgc_int |= 0x20; // scan-line status
+            if self.vgc_int & 0x02 != 0 {
+                self.vgc_int |= 0x80;
+                self.irq_pending |= IRQ_SCAN;
+            }
+        }
+    }
+
+    /// True when any Mega II / VGC interrupt source is currently asserted.
+    #[inline]
+    pub fn irq_asserted(&self) -> bool {
+        self.irq_pending != 0
     }
 
     /// Check if the system is in fast mode (2.8 MHz).
