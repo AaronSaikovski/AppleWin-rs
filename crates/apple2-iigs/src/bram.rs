@@ -18,14 +18,17 @@ pub fn factory_default_bram() -> [u8; 256] {
 
     // Slot assignments ($01-$07):
     // $00 = your card, $01 = ROM (built-in firmware)
-    // Default: slots 1-6 = your card, slot 7 = AppleTalk (built-in)
+    // Default slot assignments. Slot 7 is left as "your card" rather than the
+    // factory built-in AppleTalk: with no network to emulate, enabling AppleTalk
+    // only makes ProDOS 8 disks that lack the `ATINIT` file abort at boot with
+    // "UNABLE TO LOAD ATINIT FILE".
     bram[0x01] = 0x00; // slot 1: your card
     bram[0x02] = 0x00; // slot 2: your card
     bram[0x03] = 0x00; // slot 3: your card
     bram[0x04] = 0x00; // slot 4: your card
     bram[0x05] = 0x00; // slot 5: your card
     bram[0x06] = 0x00; // slot 6: your card
-    bram[0x07] = 0x01; // slot 7: built-in (AppleTalk)
+    bram[0x07] = 0x00; // slot 7: your card (was built-in AppleTalk)
 
     // Display settings ($08):
     // Bit 7: 0 = color, 1 = monochrome
