@@ -88,6 +88,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   banks `$00`/`$01`/`$E0`/`$E1`). With this and the STATEREG fix, ROM 03 runs its
   entire self-test/init instead of crashing. Added a regression test.
 
+- **apple2-iigs: `$C071-$C07F` reads ROM (interrupt-vector dispatch), and the
+  IWM self-test registers are implemented — the firmware now boots to the
+  Apple IIgs banner.** (1) `$C071-$C07F` is not I/O: the IIgs exposes ROM bank
+  `$FF` there, holding the native interrupt-vector dispatch (the ROM's IRQ
+  vector points at `$C074 = CLV; JML …`). Returning I/O (`$00` = BRK) trapped
+  the CPU in a BRK loop the instant any interrupt fired; the I/O aperture now
+  returns the ROM byte for that range. (2) Added a minimal IWM (slot-6 disk
+  controller, `iwm.rs`) implementing the mode/status/handshake registers so the
+  power-on self-test — which writes the IWM mode register and polls it back,
+  then probes for a 5.25" drive — completes and reports "no disk" instead of
+  spinning forever. Added regression tests.
+
+- **apple2-iigs: rewrote the ADB micro-controller command set to match the real
+  GLU — fixes the "Fatal system error $0911" during boot.** The command numbers,
+  parameter counts, and responses were wrong (e.g. `$07` Sync took 0 bytes
+  instead of 4, so its parameters were misparsed as fresh commands and
+  desynced the whole stream; `$0D`/`$0E`/`$0F`/`$0B` — GetVersion / ReadCharSets
+  / ReadKbdLayouts / ReadConfig — were mis-mapped or missing, so the firmware's
+  init read timed out and died). The command decoder, parameter-length table,
+  and responses now follow the IIgs ADB micro-controller (per GSplus `adb.c`),
+  with a `rom03` flag selecting the 4-vs-8-byte `Sync` length and the version
+  byte. Removed the incorrect ADB-based BRAM shortcut (BRAM is a clock-chip
+  function, not ADB). With this fix both ROM 01 and ROM 03 boot the firmware to
+  the Apple IIgs banner. Added a regression test for the command responses.
+
+- **apple2-iigs: the IIgs now boots GS/OS from a SmartPort disk.** Three fixes to
+  the SmartPort boot path: (1) the `.2mg` parser read the data offset/length from
+  the wrong header fields (`$08`/`$0C` instead of `$18`/`$1C`), producing a
+  zero-block disk so nothing loaded; it now reads the correct 2IMG fields. (2) The
+  slot-5 firmware stub had no boot loader — the firmware's `JMP $C500` ran the
+  identification bytes and returned to a garbage address (BRK → Monitor). The
+  stub now has a real boot loader that reads block 0 into `$0800` (via a boot
+  trap) and `JMP $0801`, plus a ProDOS 8 block-driver entry (`$42-$47`
+  convention). (3) The SmartPort dispatch entry is three bytes *higher* than the
+  ProDOS entry (`ProDOS + 3`), per the SmartPort ERS — it had been placed three
+  bytes lower, so the P16 loader's `JSR` to it hit an empty byte and crashed.
+  With these fixes the boot chain runs end-to-end — firmware → ProDOS 16 loader
+  → GS/OS "Welcome to the IIgs" startup screen (Super Hi-Res). Added regression
+  tests for the 2IMG header parsing and the block-0 boot load.
+
 ### Changed
 
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**

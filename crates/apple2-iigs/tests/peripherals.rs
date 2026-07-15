@@ -326,11 +326,12 @@ fn smartport_eject() {
 
 #[test]
 fn smartport_2mg_format() {
-    // Create a minimal 2IMG file
+    // Create a minimal 2IMG file. The data offset is a 4-byte field at $18 and
+    // the data length at $1C (per the 2IMG spec).
     let mut raw = vec![0u8; 64 + 512]; // 64-byte header + 1 block
     raw[0..4].copy_from_slice(b"2IMG"); // magic
-    raw[8..12].copy_from_slice(&64u32.to_le_bytes()); // data offset
-    raw[12..16].copy_from_slice(&512u32.to_le_bytes()); // data length
+    raw[0x18..0x1C].copy_from_slice(&64u32.to_le_bytes()); // data offset
+    raw[0x1C..0x20].copy_from_slice(&512u32.to_le_bytes()); // data length
     raw[64] = 0xCC; // first byte of block data
 
     let disk = apple2_iigs::smartport::SmartPortDisk::from_2mg(&raw, None).unwrap();
@@ -346,22 +347,27 @@ fn smartport_firmware_stub_installed() {
     let mem = apple2_iigs::memory::IIgsMemory::new(256, rom).unwrap();
     let bus = apple2_iigs::bus::IIgsBus::new(mem);
 
-    // ProDOS/SmartPort identification pattern ($20, $00, $03, $3C)
+    // SmartPort block-device identification pattern ($20, $00, $03, $00).
     assert_eq!(bus.read_raw(0x00_C501), 0x20);
     assert_eq!(bus.read_raw(0x00_C503), 0x00);
     assert_eq!(bus.read_raw(0x00_C505), 0x03);
-    assert_eq!(bus.read_raw(0x00_C507), 0x3C);
+    assert_eq!(bus.read_raw(0x00_C507), 0x00);
 
-    // SmartPort entry point: WDM $FE, RTS
+    // Boot loader at $C508: WDM $FD (read block 0) then LDX/LDY/JMP $0801.
     assert_eq!(bus.read_raw(0x00_C508), 0x42);
-    assert_eq!(bus.read_raw(0x00_C509), 0xFE);
-    assert_eq!(bus.read_raw(0x00_C50A), 0x60);
+    assert_eq!(bus.read_raw(0x00_C509), 0xFD);
 
-    // Device info byte has capability flags set (should be non-zero, indicating
-    // the slot is populated with a SmartPort-capable device)
+    // ProDOS block entry ($C523) and SmartPort entry ($C526 = ProDOS + 3).
+    assert_eq!(bus.read_raw(0x00_C523), 0x42);
+    assert_eq!(bus.read_raw(0x00_C524), 0xFC); // ProDOS trap
+    assert_eq!(bus.read_raw(0x00_C526), 0x42);
+    assert_eq!(bus.read_raw(0x00_C527), 0xFE); // SmartPort trap
+
+    // Device info byte has capability flags set, and $CnFF points to the ProDOS
+    // block-driver entry ($23 → $C523).
     let info = bus.read_raw(0x00_C5FE);
     assert_ne!(info, 0x00, "device info should have capability bits set");
-    assert_eq!(bus.read_raw(0x00_C5FF), 0x05); // Offset to SmartPort entry
+    assert_eq!(bus.read_raw(0x00_C5FF), 0x23);
 }
 
 #[test]

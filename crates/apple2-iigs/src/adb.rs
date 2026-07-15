@@ -10,35 +10,43 @@ use serde::{Deserialize, Serialize};
 
 // ── ADB command types ───────────────────────────────────────────────────────
 
-/// ADB GLU commands written to $C026.
-/// The ROM firmware writes command bytes and reads results.
+/// ADB GLU (keyboard micro-controller) commands written to `$C026`.
+///
+/// Command numbers match the real Apple IIgs ADB micro-controller as documented
+/// in the IIgs Firmware Reference and implemented by KEGS/GSplus (`adb.c`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AdbCmd {
-    /// Abort current operation.
+    /// Abort the current operation.
     Abort = 0x01,
-    /// Reset the ADB bus and all devices.
-    ResetBus = 0x02,
-    /// Flush keyboard buffer.
+    /// Flush the keyboard buffer.
     FlushKbd = 0x03,
-    /// Set ADB modes.
+    /// Set ADB mode bits (1 byte follows).
     SetModes = 0x04,
-    /// Clear ADB modes.
+    /// Clear ADB mode bits (1 byte follows).
     ClearModes = 0x05,
     /// Set ADB configuration (3 bytes follow).
     SetConfig = 0x06,
-    /// Sync (used during ROM init).
+    /// Synchronise (4 bytes on ROM 01, 8 bytes on ROM 03).
     Sync = 0x07,
-    /// Write to BRAM byte.
-    WriteBram = 0x09,
-    /// Read BRAM byte.
-    ReadBram = 0x0A,
-    /// Read/write ADB device register (Talk/Listen).
-    AdbCommand = 0x0B,
-    /// Read modifier keys.
-    ReadModifiers = 0x0C,
-    /// Read config bytes.
-    ReadConfig = 0x0D,
+    /// Write micro-controller memory (2 bytes follow).
+    WriteMem = 0x08,
+    /// Read micro-controller memory (2 bytes follow, responds 1 byte).
+    ReadMem = 0x09,
+    /// Read the ADB mode byte (responds 1 byte).
+    ReadModes = 0x0A,
+    /// Read the configuration bytes (responds 4 bytes).
+    ReadConfig = 0x0B,
+    /// Read the micro-controller version/revision (responds 1 byte).
+    GetVersion = 0x0D,
+    /// Read available character sets (responds 2 bytes).
+    ReadCharSets = 0x0E,
+    /// Read available keyboard layouts (responds 2 bytes).
+    ReadKbdLayouts = 0x0F,
+    /// Reset the micro-controller.
+    Reset = 0x10,
+    /// Send ADB key codes (1 byte follows).
+    SendKeycodes = 0x11,
     /// Unknown / NOP.
     Unknown = 0xFF,
 }
@@ -47,17 +55,20 @@ impl From<u8> for AdbCmd {
     fn from(val: u8) -> Self {
         match val {
             0x01 => AdbCmd::Abort,
-            0x02 => AdbCmd::ResetBus,
             0x03 => AdbCmd::FlushKbd,
             0x04 => AdbCmd::SetModes,
             0x05 => AdbCmd::ClearModes,
             0x06 => AdbCmd::SetConfig,
             0x07 => AdbCmd::Sync,
-            0x09 => AdbCmd::WriteBram,
-            0x0A => AdbCmd::ReadBram,
-            0x0B => AdbCmd::AdbCommand,
-            0x0C => AdbCmd::ReadModifiers,
-            0x0D => AdbCmd::ReadConfig,
+            0x08 => AdbCmd::WriteMem,
+            0x09 => AdbCmd::ReadMem,
+            0x0A => AdbCmd::ReadModes,
+            0x0B => AdbCmd::ReadConfig,
+            0x0D => AdbCmd::GetVersion,
+            0x0E => AdbCmd::ReadCharSets,
+            0x0F => AdbCmd::ReadKbdLayouts,
+            0x10 => AdbCmd::Reset,
+            0x11 => AdbCmd::SendKeycodes,
             _ => AdbCmd::Unknown,
         }
     }
@@ -130,8 +141,9 @@ pub struct Adb {
     /// Cycle count at which the current command completes.
     pub cmd_done_at: u64,
 
-    /// Mouse X delta for the next mouse Talk register 0 response.
-    mouse_x_delta: u8,
+    /// True on ROM 03 machines: the `Sync` command takes 8 parameter bytes
+    /// (versus 4 on ROM 00/01) and `GetVersion` reports revision 6 (versus 5).
+    pub rom03: bool,
 }
 
 impl Adb {
@@ -154,13 +166,20 @@ impl Adb {
         self.status |= status::CMD_FULL;
         self.status &= !status::CMD_IRQ;
 
-        // Determine how many parameter bytes this command needs
+        // Determine how many parameter bytes this command needs. Getting these
+        // right is essential: an undercount makes the GLU treat the following
+        // parameter bytes as fresh commands, desynchronising the whole stream.
         let params_needed = match cmd {
-            AdbCmd::SetModes | AdbCmd::ClearModes => 1,
+            AdbCmd::SetModes | AdbCmd::ClearModes | AdbCmd::SendKeycodes => 1,
             AdbCmd::SetConfig => 3,
-            AdbCmd::WriteBram => 2,  // address + data
-            AdbCmd::ReadBram => 1,   // address
-            AdbCmd::AdbCommand => 1, // ADB command byte
+            AdbCmd::WriteMem | AdbCmd::ReadMem => 2,
+            AdbCmd::Sync => {
+                if self.rom03 {
+                    8
+                } else {
+                    4
+                }
+            }
             _ => 0,
         };
 
@@ -187,12 +206,6 @@ impl Adb {
 
         match cmd {
             AdbCmd::Abort => {
-                // Cancel current operation
-                self.response_queue.clear();
-            }
-            AdbCmd::ResetBus => {
-                // Reset all ADB devices
-                self.key_buffer.clear();
                 self.response_queue.clear();
             }
             AdbCmd::FlushKbd => {
@@ -210,107 +223,55 @@ impl Adb {
             }
             AdbCmd::SetConfig => {
                 if self.cmd_params.len() >= 3 {
-                    self.config[0] = self.cmd_params[0];
-                    self.config[1] = self.cmd_params[1];
-                    self.config[2] = self.cmd_params[2];
+                    self.config.copy_from_slice(&self.cmd_params[..3]);
                 }
             }
-            AdbCmd::Sync => {
-                // ROM uses this during init — just acknowledge
+            // Sync / WriteMem / SendKeycodes: consume params, no response.
+            AdbCmd::Sync | AdbCmd::WriteMem | AdbCmd::SendKeycodes => {}
+            AdbCmd::ReadMem => {
+                // Micro-controller memory read — respond with one byte.
                 self.response_queue.push(0x00);
             }
-            AdbCmd::WriteBram => {
-                // Handled by the caller (bus.rs) which has access to BRAM
-                // The params are: [address, data]
-                // We just acknowledge
-            }
-            AdbCmd::ReadBram => {
-                // Handled by the caller (bus.rs) which has access to BRAM
-                // The param is: [address]
-                // Response will be pushed by the caller
-            }
-            AdbCmd::AdbCommand => {
-                // ADB bus command — device address + command type + register
-                // Params: [adb_cmd_byte]
-                if let Some(&adb_byte) = self.cmd_params.first() {
-                    self.handle_adb_bus_command(adb_byte);
-                }
-            }
-            AdbCmd::ReadModifiers => {
-                self.response_queue.push(self.modifiers);
+            AdbCmd::ReadModes => {
+                self.response_queue.push(self.modes);
             }
             AdbCmd::ReadConfig => {
+                // 4 bytes: [$82, (mouse<<4)|kbd, (charset<<4)|layout, repeat].
+                // Mouse ADB address 3, keyboard ADB address 2 (standard).
+                self.response_queue.push(0x82);
+                self.response_queue.push(0x32);
                 self.response_queue.push(self.config[0]);
                 self.response_queue.push(self.config[1]);
-                self.response_queue.push(self.config[2]);
             }
-            AdbCmd::Unknown => {
-                // Unknown command — just acknowledge
+            AdbCmd::GetVersion => {
+                // ROM 01 reports revision 5; ROM 03 requires >= 6.
+                self.response_queue.push(if self.rom03 { 6 } else { 5 });
             }
+            AdbCmd::ReadCharSets => {
+                // Number of available character sets = 8.
+                self.response_queue.push(0x08);
+                self.response_queue.push(0x00);
+            }
+            AdbCmd::ReadKbdLayouts => {
+                // Number of available keyboard layouts = 10.
+                self.response_queue.push(0x0A);
+                self.response_queue.push(0x00);
+            }
+            AdbCmd::Reset => {
+                self.key_buffer.clear();
+                self.response_queue.clear();
+            }
+            AdbCmd::Unknown => {}
+        }
+
+        // If the command produced a response, flag it immediately so the ROM's
+        // tight poll of $C027 (DATA_VALID) sees it without waiting on `update`.
+        if !self.response_queue.is_empty() {
+            self.status |= status::DATA_VALID;
+            self.data_reg = self.response_queue[0];
         }
 
         self.cmd_params.clear();
-    }
-
-    /// Handle an ADB bus command (Talk/Listen/Flush/SendReset to a device).
-    fn handle_adb_bus_command(&mut self, adb_byte: u8) {
-        let _device = (adb_byte >> 4) & 0x0F;
-        let cmd_type = (adb_byte >> 2) & 0x03;
-        let register = adb_byte & 0x03;
-
-        match cmd_type {
-            0x00 => {
-                // SendReset — reset all devices
-            }
-            0x01 => {
-                // Flush — clear device register
-            }
-            0x02 => {
-                // Talk — device sends register data to host
-                // For keyboard (device 2) register 0: return key data
-                // For mouse (device 3) register 0: return position data
-                match (_device, register) {
-                    (2, 0) => {
-                        // Keyboard Talk Register 0 — return keycode if available
-                        if let Some(key) = self.key_buffer.first().copied() {
-                            self.key_buffer.remove(0);
-                            self.response_queue.push(key);
-                            self.response_queue.push(0xFF); // key up
-                        } else {
-                            // No data — SRQ not asserted, empty response
-                        }
-                    }
-                    (2, 3) => {
-                        // Keyboard Talk Register 3 — device info
-                        // Handler ID for Apple Standard Keyboard = $02
-                        self.response_queue.push(0x62); // flags + handler
-                        self.response_queue.push(0x02); // handler ID
-                    }
-                    (3, 0) => {
-                        // Mouse Talk Register 0 — return current mouse state
-                        self.response_queue.push(self.mouse_data);
-                        self.response_queue.push(self.mouse_x_delta);
-                        // Reset mouse state after reading
-                        self.mouse_data = 0x80; // no button, no movement
-                        self.mouse_x_delta = 0x80;
-                        self.status &= !(status::MOUSE_DATA | status::MOUSE_IRQ);
-                    }
-                    (3, 3) => {
-                        // Mouse Talk Register 3 — device info
-                        self.response_queue.push(0x63);
-                        self.response_queue.push(0x01); // handler ID for mouse
-                    }
-                    _ => {
-                        // Unknown device/register — no response
-                    }
-                }
-            }
-            0x03 => {
-                // Listen — host sends data to device
-                // Consume parameter bytes
-            }
-            _ => {}
-        }
     }
 
     /// Read from the ADB data register ($C026).
@@ -391,13 +352,9 @@ impl Adb {
         // Byte 0: bit 7 = !button, bits 6-0 = Y delta (signed, clamped)
         // Byte 1: bit 7 = always 1, bits 6-0 = X delta (signed, clamped)
         let y_clamped = dy.clamp(-63, 63);
-        let x_clamped = dx.clamp(-63, 63);
 
+        // Mouse register-0 low byte read at $C024: bit 7 = !button, bits 6-0 = Y.
         self.mouse_data = if button { 0x00 } else { 0x80 } | ((y_clamped as u8) & 0x7F);
-
-        // Store X delta for when mouse Talk register 0 is read
-        // (The second byte returned in handle_adb_bus_command)
-        self.mouse_x_delta = (x_clamped as u8) & 0x7F | 0x80;
 
         if dx != 0 || dy != 0 || button {
             self.status |= status::MOUSE_DATA | status::MOUSE_IRQ;

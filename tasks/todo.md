@@ -88,7 +88,67 @@ repro of ROM 03 is still incomplete (separate boot-path gaps), so verify in-GUI.
 - [x] Regression tests: `statereg_read_rom_bit`, `rom_bank_c0xx_reads_rom_not_io`.
 - [x] fmt / clippy / release / full suite green.
 
-## NEXT BLOCKER — IWM (5.25" disk controller) self-test  ⛔
+## Blocker 6 — IWM self-test + $C07x vectors + ADB GLU (firmware boots!)  ✅
+- [x] `$C071-$C07F` reads ROM bank $FF (native interrupt-vector dispatch: IRQ
+      vector → `$C074 = CLV; JML $E10010`). Was returning I/O → BRK loop on the
+      first interrupt.
+- [x] Minimal IWM (`iwm.rs`): mode/status/handshake registers so the POST IWM
+      self-test and 5.25" drive probe complete (report "no disk").
+- [x] Rewrote the ADB GLU command set to match the real micro-controller
+      (correct command numbers, parameter lengths incl. 4/8-byte Sync, and
+      responses for GetVersion/ReadConfig/ReadCharSets/ReadKbdLayouts). Fixes
+      the "Fatal system error $0911" death; removed the wrong ADB-BRAM shortcut.
+- [x] Result: **ROM 01 and ROM 03 both boot the firmware to the Apple IIgs
+      banner** ("ROM Version 01 / 03"), then drop to the Monitor (`BRK $0003`)
+      because no boot device is loaded yet.
+- [x] GUI now prefers ROM 01 (342-0077-B), the standard/most-compatible image.
+- [x] Regression tests: `c07x_vector_area_reads_rom`, `iwm_mode_register_selftest`,
+      `adb_glu_commands_respond`. fmt/clippy/release/tests green.
+
+## Blocker 7 — SmartPort boot: GS/OS boots! 🎉  ✅
+- [x] Fixed `.2mg` parser: data offset at header `$18`, length at `$1C` (was
+      reading `$08`/`$0C` → 0-block disk). This was why nothing loaded.
+- [x] Added a real boot loader to the slot-5 stub: `JMP $C500` → ID bytes →
+      `WDM $FD` boot trap (reads block 0 → `$0800`) → `JMP $0801`.
+- [x] Added a ProDOS 8 block-driver entry ($C523, `$42-$47` convention) and put
+      the SmartPort entry at ProDOS + 3 = $C526 (SmartPort ERS), fixing the P16
+      loader's `JSR $C526` crash.
+- [x] **Result: firmware → ProDOS 16 v1.5 loader → GS/OS "Welcome to the IIgs"
+      Super Hi-Res startup screen.** The IIgs boots a SmartPort disk end-to-end.
+- [x] Regression tests: `parses_2mg_header_offsets`, `smartport_boot_loads_block0`;
+      updated `smartport_2mg_format` and `smartport_firmware_stub_installed`.
+
+## NEXT — GS/OS crashes in the P16 → GS/OS handoff  ⛔
+GS/OS reaches the "Welcome to the IIgs" Super Hi-Res screen (SHR on, no BRK),
+then the P16 loader crashes: code at `$00/2568` does `JMP $0080`, but bank-0
+`$0080+` is filled with a repeating `AF 57 00 84` (`LDA $840057`) pattern — GS/OS's
+wild-jump catch-fill — so the CPU runs garbage until a `BRK` at `$00C3`, which the
+`$C074`→`$E10010`→`$FFB7CC` interrupt handler catches and loops. Not a Monitor
+drop. Root cause is upstream of the jump: GS/OS expected valid code at `$0080`
+that was never installed (likely a SmartPort/ProDOS read subtlety, an ALTZP/zero-
+page-shadow mismatch, or a missing GS/OS prerequisite — clock chip RTC/BRAM is
+still unimplemented). Trace back from the `JMP $0080` at `$00/2568` to find what
+should have populated `$0080`.
+
+## LATER — Ensoniq DOC sound (games are silent)  ⛔
+The `synth_ensoniq_audio` path exists (`fill_audio`) but games produce no sound.
+Likely: the DOC sound-RAM isn't populated by the firmware writes (verify
+`$C03C-$C03F` → `ensoniq.write_data` routes to sound RAM in RAM-access mode), and
+the speaker/DOC/Mockingboard streams append separate blocks to the ring buffer
+rather than mixing per-sample (fine when one source is active, wrong when both
+are). The IIgs has no boot chime, so silence on the "Welcome" screen is expected;
+test with a game (e.g. Silpheed) that drives the DOC.
+
+## (resolved) old boot-scan note
+Both ROMs reach the banner then drop to the Monitor via `BRK $00/0003` — the
+firmware isn't scanning/booting slot 5 (SmartPort): slot-5 firmware ($C500) is
+never executed and the SmartPort WDM trap never fires. Likely needs: correct
+boot-slot handling (BRAM startup slot / the real BRAM layout is a guess), the
+slot-firmware scan finding the SmartPort signature, and the SmartPort block-0
+boot handoff. Secondary: clock-chip ($C033/$C034) BRAM + RTC (currently the
+ADB-BRAM shortcut was removed; BRAM reads go through the unimplemented clock).
+
+## (old) IWM self-test note — resolved above
 ROM 03 now runs init and reaches a polling loop at `$FF/4720` (DBR=`$E1`) that
 reads the IWM registers `$C0E8-$C0EF` (slot 6) — motor/phase/Q6/Q7 handshake:
 ```

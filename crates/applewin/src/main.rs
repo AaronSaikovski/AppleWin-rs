@@ -135,16 +135,19 @@ fn find_iigs_rom(configured_path: &Option<String>) -> Option<Vec<u8>> {
         }
     }
 
-    // Search common locations for IIgs ROMs (prefer ROM 03, then ROM 01)
+    // Search common locations for IIgs ROMs. Prefer ROM 01 (342-0077-B): it is
+    // the standard, most widely compatible image and the default target of every
+    // major IIgs emulator. ROM 00 is the fallback; the various ROM 3 dumps
+    // (Tenspeed/BT/Alpha/Mark Twain) are non-standard collector images.
     let search_names = [
-        // ROM 03 (256KB) — latest and most compatible
-        "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v25.bin",
-        "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v16.bin",
-        // ROM 01 (128KB) — widely available
+        // ROM 01 (128KB) — standard, most compatible.
         "Apple IIGS ROM 01 - 342-0077-B.bin",
         "Apple IIgs ROM1 - 342-0077-B -  27C1001.bin",
-        // ROM 00 (128KB) — original
+        // ROM 00 (128KB) — original.
         "Apple IIGS ROM 00 - 342-0077-A.bin",
+        // ROM 3 (256KB, combined image) — later 2 MB machine.
+        "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v25.bin",
+        "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v16.bin",
     ];
 
     // Search directories relative to the executable and in common locations

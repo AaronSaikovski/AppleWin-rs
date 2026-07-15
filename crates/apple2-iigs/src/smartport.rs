@@ -69,12 +69,13 @@ impl SmartPortDisk {
             return None;
         }
 
-        // Data offset (4 bytes at offset 8, little-endian)
-        let data_offset = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]) as usize;
-        // Data length (4 bytes at offset 12)
-        let data_len = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]) as usize;
+        // 2IMG header layout: data offset is a 4-byte field at $18 and the data
+        // length (in bytes) at $1C, both little-endian. (Bytes $08/$0C hold the
+        // header size and image-format fields — not the data pointers.)
+        let data_offset = u32::from_le_bytes([raw[0x18], raw[0x19], raw[0x1A], raw[0x1B]]) as usize;
+        let data_len = u32::from_le_bytes([raw[0x1C], raw[0x1D], raw[0x1E], raw[0x1F]]) as usize;
 
-        if data_offset + data_len > raw.len() {
+        if data_offset == 0 || data_len == 0 || data_offset + data_len > raw.len() {
             return None;
         }
 

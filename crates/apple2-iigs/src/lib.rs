@@ -11,6 +11,7 @@ pub mod cpu65816;
 pub mod emulator;
 pub mod ensoniq;
 pub mod fpi;
+pub mod iwm;
 pub mod mega2;
 pub mod memory;
 pub mod shadowing;

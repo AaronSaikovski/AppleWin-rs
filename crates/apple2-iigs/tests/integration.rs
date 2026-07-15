@@ -542,3 +542,176 @@ fn rom_bank_c0xx_reads_rom_not_io() {
     assert_eq!(bus.read(0xFF_C085, 0), 0xA4, "$FF/$C085 is ROM");
     assert_eq!(bus.read(0xFF_C0EE, 0), 0x5A, "$FF/$C0EE is ROM, not I/O");
 }
+
+/// $C071-$C07F reads ROM bank $FF (the native interrupt-vector dispatch), not
+/// I/O — even through the bank $00/$E0/$E1 apertures. The ROM's IRQ vector
+/// points here (e.g. $C074 = `CLV; JML ...`); returning I/O ($00 = BRK) would
+/// trap the CPU in a BRK loop the moment any interrupt fired.
+#[test]
+fn c07x_vector_area_reads_rom() {
+    let mut rom = vec![0x00u8; 131072];
+    rom[0x1FFFC] = 0x00;
+    rom[0x1FFFD] = 0xFA; // valid vector → bank $FF = second half
+    rom[0x1_0000 + 0xC074] = 0xB8; // bank $FF, $C074 (CLV) — the IRQ dispatch
+    rom[0x1_0000 + 0xC071] = 0x4C; // bank $FF, $C071 (BRK vector target)
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // Through the bank $00 I/O aperture and the bank $E1 aperture.
+    assert_eq!(bus.read(0x00_C074, 0), 0xB8, "$00/$C074 → ROM $FF/$C074");
+    assert_eq!(bus.read(0x00_C071, 0), 0x4C, "$00/$C071 → ROM $FF/$C071");
+    assert_eq!(bus.read(0xE1_C074, 0), 0xB8, "$E1/$C074 → ROM $FF/$C074");
+    // $C070 (paddle trigger) and $C080 (language card) are NOT in the ROM window.
+    assert_ne!(bus.read(0x00_C070, 0), 0xB8);
+}
+
+/// The IWM mode register ($C0EF write / $C0EE status read-back) round-trips, and
+/// the status register reports the no-disk SENSE bit. Regression for the IIgs
+/// power-on self-test that writes the mode register and polls it back.
+#[test]
+fn iwm_mode_register_selftest() {
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // Select Q6 (status/mode), then write the mode register via $C0EF (Q7 high).
+    let _ = bus.read(0x00_C0ED, 0); // Q6 = 1
+    bus.write(0x00_C0EF, 0x0F, 0); // Q7 = 1, write mode = $0F
+
+    // Read the status register ($C0EE sets Q7 = 0, Q6 still 1): low 5 bits echo
+    // the mode register, and bit 7 (SENSE) is high (no disk).
+    let status = bus.read(0x00_C0EE, 0);
+    assert_eq!(
+        status & 0x1F,
+        0x0F,
+        "mode register reads back through status"
+    );
+    assert_ne!(status & 0x80, 0, "no-disk SENSE bit set");
+}
+
+/// The ADB micro-controller decodes GLU commands with the correct parameter
+/// counts and responses. Regression for the boot init: a wrong `Sync` ($07)
+/// length desynced the command stream, and a missing `ReadKbdLayouts` ($0F)
+/// response timed out into the "Fatal system error $0911" death.
+#[test]
+fn adb_glu_commands_respond() {
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem); // ROM 01 → 4-byte Sync
+
+    // Helper: send a command byte, run enough cycles for it to complete, then
+    // read one response byte via $C026 (checking DATA_VALID in $C027 first).
+    let read_response = |bus: &mut IIgsBus, cmd: u8, params: &[u8]| -> Vec<u8> {
+        bus.write(0x00_C026, cmd, 0); // command
+        for &p in params {
+            bus.write(0x00_C026, p, 0);
+        }
+        bus.update_interrupts(1000);
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            if bus.read(0x00_C027, 0) & 0x20 == 0 {
+                break; // no more DATA_VALID
+            }
+            out.push(bus.read(0x00_C026, 0));
+        }
+        out
+    };
+
+    // GetVersion ($0D) → revision 5 on ROM 01.
+    assert_eq!(read_response(&mut bus, 0x0D, &[]), vec![0x05]);
+    // ReadKbdLayouts ($0F) → 2 bytes: count = 10, 0.
+    assert_eq!(read_response(&mut bus, 0x0F, &[]), vec![0x0A, 0x00]);
+    // ReadCharSets ($0E) → 2 bytes: count = 8, 0.
+    assert_eq!(read_response(&mut bus, 0x0E, &[]), vec![0x08, 0x00]);
+    // ReadConfig ($0B) → 4 bytes starting with $82.
+    let cfg = read_response(&mut bus, 0x0B, &[]);
+    assert_eq!(cfg.len(), 4);
+    assert_eq!(cfg[0], 0x82);
+
+    // Sync ($07) consumes 4 parameter bytes on ROM 01 and produces no response,
+    // so a following command is decoded correctly (stream stays in sync).
+    assert_eq!(
+        read_response(&mut bus, 0x07, &[0x00, 0x00, 0x00, 0x00]),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        read_response(&mut bus, 0x0D, &[]),
+        vec![0x05],
+        "stream still aligned after Sync"
+    );
+}
+
+/// The 2IMG (`.2mg`) parser reads the data offset from header byte `$18` and the
+/// data length from `$1C`. Regression for reading the wrong header fields
+/// (`$08`/`$0C`), which yielded a 1-byte disk with zero blocks so nothing booted.
+#[test]
+fn parses_2mg_header_offsets() {
+    use apple2_iigs::smartport::SmartPortDisk;
+
+    // Two 512-byte blocks; block 0 begins with a recognisable marker.
+    let mut payload = vec![0u8; 1024];
+    payload[0] = 0x01;
+    payload[1] = 0x38;
+    payload[512] = 0xAA;
+
+    let mut img = vec![0u8; 64];
+    img[0..4].copy_from_slice(b"2IMG");
+    img[8] = 64; // header size
+    img[0x0C] = 0x01; // format = ProDOS (deliberately non-zero: must NOT be read as length)
+    img[0x14..0x18].copy_from_slice(&2u32.to_le_bytes()); // block count
+    img[0x18..0x1C].copy_from_slice(&64u32.to_le_bytes()); // data offset
+    img[0x1C..0x20].copy_from_slice(&1024u32.to_le_bytes()); // data length
+    img.extend_from_slice(&payload);
+
+    let disk = SmartPortDisk::from_2mg(&img, None).expect("valid 2mg");
+    assert_eq!(disk.read_block(0).map(|b| &b[..2]), Some(&[0x01, 0x38][..]));
+    assert_eq!(disk.read_block(1).map(|b| b[0]), Some(0xAA));
+    assert_eq!(disk.read_block(2), None, "only 2 blocks");
+}
+
+/// Booting slot 5: the firmware `JMP $C500` runs the stub's boot loader, whose
+/// `WDM $FD` trap reads block 0 into `$0800`. This checks the trap wiring by
+/// driving the stub's boot entry directly.
+#[test]
+fn smartport_boot_loads_block0() {
+    use apple2_iigs::smartport::SmartPortDisk;
+
+    // Minimal 2-block disk; block 0 carries a marker byte.
+    let mut payload = vec![0u8; 1024];
+    payload[0] = 0x99;
+    payload[1] = 0x42;
+    let mut img = vec![0u8; 64];
+    img[0..4].copy_from_slice(b"2IMG");
+    img[8] = 64;
+    img[0x18..0x1C].copy_from_slice(&64u32.to_le_bytes());
+    img[0x1C..0x20].copy_from_slice(&1024u32.to_le_bytes());
+    img.extend_from_slice(&payload);
+
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(1024, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+    bus.smartport
+        .insert(0, SmartPortDisk::from_2mg(&img, None).unwrap());
+
+    // Execute the boot entry ($C500) — LDX/LDY/LDA ID bytes then WDM $FD boot
+    // trap — via a tiny 65C816 CPU run. After the trap, $0800 holds block 0.
+    let mut cpu = Cpu65816::new();
+    cpu.reset(&mut bus);
+    cpu.pbr = 0;
+    cpu.pc = 0xC500;
+    cpu.emulation = true;
+    cpu.stopped = false;
+    for _ in 0..12 {
+        if cpu.stopped {
+            break;
+        }
+        // Stop once the boot loader reaches its JMP $0801.
+        if cpu.pbr == 0 && cpu.pc == 0x0801 {
+            break;
+        }
+        cpu65816::step(&mut cpu, &mut bus);
+    }
+
+    assert_eq!(bus.read(0x0800, 0), 0x99, "block 0 byte 0 loaded to $0800");
+    assert_eq!(bus.read(0x0801, 0), 0x42, "block 0 byte 1 loaded to $0801");
+}

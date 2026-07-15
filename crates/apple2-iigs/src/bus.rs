@@ -9,6 +9,7 @@ use crate::bram;
 use crate::cpu65816::Bus816;
 use crate::ensoniq::Ensoniq;
 use crate::fpi::Fpi;
+use crate::iwm::Iwm;
 use crate::mega2::Mega2;
 use crate::memory::IIgsMemory;
 use crate::smartport::SmartPort;
@@ -32,6 +33,9 @@ pub struct IIgsBus {
 
     /// SmartPort disk controller (3.5" and hard disk).
     pub smartport: SmartPort,
+
+    /// IWM (slot-6 5.25"/3.5" disk controller) — self-test registers only.
+    pub iwm: Iwm,
 
     /// Battery-backed parameter RAM (256 bytes).
     pub bram: [u8; 256],
@@ -63,13 +67,17 @@ impl IIgsBus {
             cache
         };
 
+        let mut adb = Adb::default();
+        adb.rom03 = matches!(mem.rom_version, crate::memory::IIgsRomVersion::Rom03);
+
         Self {
             mem,
             mega2: Mega2::default(),
             fpi: Fpi::default(),
-            adb: Adb::default(),
+            adb,
             ensoniq: Ensoniq::default(),
             smartport: SmartPort::default(),
+            iwm: Iwm::default(),
             bram: bram::factory_default_bram(),
             irq_line: false,
             last_frame: 0,
@@ -158,6 +166,12 @@ impl IIgsBus {
             0x3D => self.ensoniq.read_data(),
             0x3E => self.ensoniq.read_addr_lo(),
             0x3F => self.ensoniq.read_addr_hi(),
+            // $C071-$C07F: not I/O — the IIgs exposes ROM bank $FF here, holding
+            // the native interrupt-vector dispatch (e.g. the IRQ vector $C074 =
+            // `CLV; JML $E10010`). Reads return the ROM byte.
+            0x71..=0x7F => self.mem.rom_read(0xFF, 0xC000 | io_offset as u16),
+            // IWM (slot 6 disk controller) — $C0E0-$C0EF.
+            0xE0..=0xEF => self.iwm.access(io_offset & 0x0F, false, 0),
             _ => self.mega2.io_read(io_offset, cycles),
         };
 
@@ -172,9 +186,8 @@ impl IIgsBus {
 
         match io_offset {
             0x26 => {
-                // ADB command write — handle BRAM commands specially
+                // ADB micro-controller command / data write.
                 self.adb.write_command(val, cycles);
-                self.handle_bram_command();
             }
             0x27 => {
                 // Writing to $C027 clears interrupt flags
@@ -190,6 +203,10 @@ impl IIgsBus {
             0x3D => self.ensoniq.write_data(val),
             0x3E => self.ensoniq.write_addr_lo(val),
             0x3F => self.ensoniq.write_addr_hi(val),
+            // IWM (slot 6 disk controller) — $C0E0-$C0EF.
+            0xE0..=0xEF => {
+                self.iwm.access(io_offset & 0x0F, true, val);
+            }
             _ => self.mega2.io_write(io_offset, val, cycles),
         }
 
@@ -389,19 +406,6 @@ impl IIgsBus {
         (0..4).any(|i| self.smartport.has_disk(i))
     }
 
-    /// Handle BRAM read/write after an ADB command is processed.
-    fn handle_bram_command(&mut self) {
-        // Check if the last command was a BRAM read
-        if let Some(addr) = self.adb.bram_read_addr() {
-            let val = self.bram[addr as usize];
-            self.adb.push_response(val);
-        }
-        // Check if the last command was a BRAM write
-        if let Some((addr, data)) = self.adb.bram_write_params() {
-            self.bram[addr as usize] = data;
-        }
-    }
-
     /// Update interrupt state. Called periodically from the emulator loop.
     pub fn update_interrupts(&mut self, cycles: u64) {
         // Update ADB controller
@@ -458,8 +462,11 @@ impl IIgsBus {
     pub fn reset(&mut self, _power_cycle: bool) {
         self.mega2 = Mega2::default();
         self.fpi = Fpi::default();
+        let rom03 = self.adb.rom03;
         self.adb = Adb::default();
+        self.adb.rom03 = rom03;
         self.ensoniq = Ensoniq::default();
+        self.iwm.reset();
         self.irq_line = false;
         self.last_frame = 0;
         // Reinitialize BRAM with factory defaults if needed
@@ -510,10 +517,11 @@ impl Bus816 for IIgsBus {
     }
 
     fn wdm_trap(&mut self, signature: u8, sp: u16, pbr: u8, emulation: bool) -> Option<(u8, bool)> {
-        if signature == SMARTPORT_TRAP_SIG {
-            Some(self.smartport_trap(sp, pbr, emulation))
-        } else {
-            None
+        match signature {
+            SMARTPORT_TRAP_SIG => Some(self.smartport_trap(sp, pbr, emulation)),
+            SMARTPORT_BOOT_SIG => Some(self.smartport_boot()),
+            SMARTPORT_PRODOS_SIG => Some(self.smartport_prodos()),
+            _ => None,
         }
     }
 }
@@ -522,6 +530,12 @@ impl Bus816 for IIgsBus {
 
 /// WDM signature byte used to mark a SmartPort firmware trap.
 pub const SMARTPORT_TRAP_SIG: u8 = 0xFE;
+
+/// WDM signature byte used to mark the SmartPort boot trap ($C508).
+pub const SMARTPORT_BOOT_SIG: u8 = 0xFD;
+
+/// WDM signature byte marking the ProDOS 8 block-driver trap ($C523).
+pub const SMARTPORT_PRODOS_SIG: u8 = 0xFC;
 
 /// Install a SmartPort firmware stub into the slot ROM cache at slot 5 ($C500-$C5FF).
 fn install_smartport_stub(cache: &mut [u8]) {
@@ -533,33 +547,57 @@ fn install_smartport_stub(cache: &mut [u8]) {
     let slot = &mut cache[base..base + 0x100];
     slot.fill(0x00);
 
-    // Standard ProDOS/SmartPort identification pattern (signature bytes at odd offsets):
-    //   LDX #$20; LDY #$00; LDX #$03; STX $3C
+    // ── Boot entry / identification ($C500) ─────────────────────────────
+    // The firmware boots this slot by `JMP $C500`. The identification bytes
+    // ($Cn01=$20, $Cn03=$00, $Cn05=$03, $Cn07=$00) double as the operands of
+    // harmless LDX/LDY/LDA immediates, then execution falls into the loader.
+    //   C500: A2 20  LDX #$20
+    //   C502: A0 00  LDY #$00
+    //   C504: A2 03  LDX #$03
+    //   C506: A9 00  LDA #$00        ($Cn07 = $00 → SmartPort/block device)
     slot[0x00] = 0xA2;
     slot[0x01] = 0x20;
     slot[0x02] = 0xA0;
     slot[0x03] = 0x00;
     slot[0x04] = 0xA2;
     slot[0x05] = 0x03;
-    slot[0x06] = 0x86;
-    slot[0x07] = 0x3C;
+    slot[0x06] = 0xA9;
+    slot[0x07] = 0x00;
 
-    // $C508: SmartPort entry — WDM $FE (trap) + RTS
+    // ── Boot loader ($C508) ─────────────────────────────────────────────
+    //   C508: 42 FD  WDM $FD         (read block 0 → $0800)
+    //   C50A: A2 50  LDX #$50        (unit: slot 5, drive 1 — for the boot block)
+    //   C50C: A0 00  LDY #$00
+    //   C50E: 4C 01 08  JMP $0801    (execute the loaded boot block)
     slot[0x08] = 0x42;
-    slot[0x09] = SMARTPORT_TRAP_SIG;
-    slot[0x0A] = 0x60;
+    slot[0x09] = SMARTPORT_BOOT_SIG;
+    slot[0x0A] = 0xA2;
+    slot[0x0B] = 0x50;
+    slot[0x0C] = 0xA0;
+    slot[0x0D] = 0x00;
+    slot[0x0E] = 0x4C;
+    slot[0x0F] = 0x01;
+    slot[0x10] = 0x08;
 
-    // $C50B: ProDOS 8 entry (same trap)
-    slot[0x0B] = 0x42;
-    slot[0x0C] = SMARTPORT_TRAP_SIG;
-    slot[0x0D] = 0x60;
+    // ── ProDOS block entry ($C523) + SmartPort entry ($C526) ────────────
+    // The ProDOS block-driver entry is at $Cn00 + [$CnFF]; the SmartPort
+    // dispatch entry is three bytes *higher* (ProDOS entry + 3), per the
+    // Apple IIgs SmartPort ERS.
+    //   C523: 42 FC 60  WDM $FC ; RTS   (ProDOS 8 — $42-$47 parameters)
+    //   C526: 42 FE 60  WDM $FE ; RTS   (SmartPort — inline parameters)
+    slot[0x23] = 0x42;
+    slot[0x24] = SMARTPORT_PRODOS_SIG;
+    slot[0x25] = 0x60;
+    slot[0x26] = 0x42;
+    slot[0x27] = SMARTPORT_TRAP_SIG;
+    slot[0x28] = 0x60;
 
-    // Pascal/SmartPort signature bytes at $CsFB-$CsFF
+    // Pascal/SmartPort signature bytes at $CsFB-$CsFF.
     slot[0xFB] = 0x20;
     slot[0xFC] = 0x00;
     slot[0xFD] = 0x00;
     slot[0xFE] = 0xBC; // SmartPort + extended status + read + write + format
-    slot[0xFF] = 0x05; // Offset from $Cs00 to SmartPort entry
+    slot[0xFF] = 0x23; // Offset from $Cs00 to the ProDOS block-driver entry
 }
 
 impl IIgsBus {
@@ -601,6 +639,40 @@ impl IIgsBus {
 
         let error = self.dispatch_smartport_command(cmd, cmdlist_ptr, pbr);
         (error, error != 0)
+    }
+
+    /// Boot trap ($C508): read block 0 of the first SmartPort device into
+    /// `$00/0800` so the following `JMP $0801` runs the ProDOS/GS-OS boot block.
+    fn smartport_boot(&mut self) -> (u8, bool) {
+        let err = self.smartport_read_block(1, 0x0800, 0, 0x00);
+        (err, err != 0)
+    }
+
+    /// ProDOS 8 block-driver trap ($C523). Parameters come from zero page:
+    /// `$42` command, `$43` unit (`DSSS0000`), `$44-45` buffer, `$46-47` block.
+    /// Returns (A = error code, carry = error).
+    fn smartport_prodos(&mut self) -> (u8, bool) {
+        let cmd = self.read_raw(0x42);
+        let unit = self.read_raw(0x43);
+        let buf = (self.read_raw(0x44) as u16) | ((self.read_raw(0x45) as u16) << 8);
+        let block = (self.read_raw(0x46) as u32) | ((self.read_raw(0x47) as u32) << 8);
+        // ProDOS unit byte: bit 7 selects the drive; map to SmartPort device.
+        let device = (unit >> 7) as usize;
+        let sp_unit = device as u8 + 1;
+
+        let err = match cmd {
+            0x00 => {
+                if self.smartport.has_disk(device) {
+                    0x00
+                } else {
+                    0x28
+                }
+            }
+            0x01 => self.smartport_read_block(sp_unit, buf, block, 0x00),
+            0x02 => self.smartport_write_block(sp_unit, buf, block, 0x00),
+            _ => 0x00, // FORMAT/other — succeed
+        };
+        (err, err != 0)
     }
 
     /// Dispatch a SmartPort MLI command. Returns error code (0 = success).
