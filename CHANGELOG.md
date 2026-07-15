@@ -150,6 +150,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous crash (into ProDOS 8 / GS-OS system startup). Added a regression test
   for BRAM access through the GLU.
 
+- **apple2-iigs: Ensoniq DOC active-oscillator count reads the correct register.**
+  The number of active oscillators comes from DOC register `$E1` (oscillator
+  enable), but the audio engine watched `$E0` (the interrupt register), so the
+  mixer only ever ran the default 1-2 oscillators regardless of what software
+  configured. It now tracks `$E1` with the correct `((val >> 1) & 0x1F) + 1`
+  decode, so the full oscillator bank is mixed.
+
 ### Changed
 
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**

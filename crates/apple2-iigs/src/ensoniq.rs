@@ -68,7 +68,7 @@ pub struct Ensoniq {
     /// IRQ pending flag.
     pub irq_pending: bool,
 
-    /// Number of enabled oscillators (from register $E0).
+    /// Number of enabled oscillators (from register $E1).
     enabled_count: u8,
 }
 
@@ -118,12 +118,12 @@ impl Ensoniq {
             let reg = (self.address & 0xFF) as usize;
             self.regs[reg] = val;
 
-            // Update enabled count when register $E0 is written.
-            // Bits 4-1 encode (N/2 - 1) where N is the number of active oscillators.
-            // So value 0x00 = 2 osc, 0x02 = 4 osc, ..., 0x1E = 32 osc.
-            if reg == 0xE0 {
-                self.enabled_count = (((val >> 1) & 0x0F) + 1) * 2;
-                self.enabled_count = self.enabled_count.clamp(2, 32);
+            // Update the active-oscillator count when the DOC oscillator-enable
+            // register ($E1) is written. ($E0 is the interrupt register.) The
+            // value is `(number_of_oscillators - 1) << 1`, so the count is
+            // `((val >> 1) & 0x1F) + 1`, clamped to 1..=32.
+            if reg == 0xE1 {
+                self.enabled_count = (((val >> 1) & 0x1F) + 1).clamp(1, 32);
             }
         }
 
