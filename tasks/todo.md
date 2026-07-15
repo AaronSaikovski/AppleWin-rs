@@ -123,7 +123,26 @@ Removed the `$80-$DF` → `$00-$5F` mirror (real bug: made GS/OS mis-size RAM an
 corrupt bank $00). Verified vs GSplus dummy-memory. Did NOT fully fix the GS/OS
 crash below, but is a correctness fix.
 
-## NEXT — GS/OS crashes after the "Welcome" screen (deep runaway)  ⛔
+## Fixed — clock GLU ($C033/$C034) implemented  ✅
+GS/OS reads the RTC + BRAM thousands of times during startup; returning a
+floating bus corrupted its stack and caused the post-"Welcome" runaway. Added
+`clock.rs` (GLU state machine per GSplus). Boot now progresses well past the
+crash — into ProDOS 8 / GS-OS system startup in the GUI.
+
+## Remaining IIgs items (post-clock-fix)  ⛔
+- "UNABLE TO LOAD ATINIT FILE" (ProDOS 8): AppleTalk INIT — slot 7 is AppleTalk
+  in our (guessed) BRAM layout; the disk has no ATINIT. Investigate the real
+  BRAM slot-config offsets / make slot 7 non-AppleTalk.
+- Super Hi-Res shows horizontal stripes with some colour blocks — SHR rendering
+  (SCB/palette handling) needs review against the GS/OS screen.
+- Ensoniq DOC sound still silent — verify DOC sound-RAM is populated by the
+  firmware's $C03C-$C03F writes; the speaker/DOC/Mockingboard streams append
+  rather than mix.
+- GUI disk-status bar shows IIe drives, not the IIgs SmartPort disk activity.
+- Headless boot still diverges earlier than the GUI (timing-sensitive); the
+  reference-trace-diff vs GSplus is still the way to chase remaining divergence.
+
+## (was) GS/OS post-Welcome runaway — clock fix addressed the main cause
 GS/OS reaches the "Welcome to the IIgs" SHR screen, then the CPU runs away into
 GS/OS's memory-fill catcher pattern (`AF 57 00 84` = `LDA $840057`) in bank-0
 low memory, with the stack pointer corrupted into the `$C0xx` I/O region. By the

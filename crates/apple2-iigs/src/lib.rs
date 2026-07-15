@@ -7,6 +7,7 @@
 pub mod adb;
 pub mod bram;
 pub mod bus;
+pub mod clock;
 pub mod cpu65816;
 pub mod emulator;
 pub mod ensoniq;

@@ -721,3 +721,32 @@ fn smartport_boot_loads_block0() {
     assert_eq!(bus.read(0x0800, 0), 0x99, "block 0 byte 0 loaded to $0800");
     assert_eq!(bus.read(0x0801, 0), 0x42, "block 0 byte 1 loaded to $0801");
 }
+
+/// The clock GLU ($C033/$C034) reads and writes battery RAM. GS/OS reads its
+/// configuration through this interface during startup; returning a floating
+/// bus here made it run away and crash. Exercises a BRAM write-then-read.
+#[test]
+fn clock_glu_bram_access() {
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // Write BRAM location $05 = $AB.
+    // Command byte: bit7=0 (write), addr $05 in bits 2-5 → $05<<2 = $14, with
+    // bit 6 set (op 4-7 = BRAM $00-$0F) → $54.
+    bus.write(0x00_C033, 0x54, 0); // command (write, addr 5)
+    bus.write(0x00_C034, 0x80, 0); // start — parse command
+    bus.write(0x00_C033, 0xAB, 0); // data
+    bus.write(0x00_C034, 0x80, 0); // start — write phase
+    assert_eq!(bus.bram[5], 0xAB, "BRAM $05 written via the clock GLU");
+
+    // Read BRAM location $05 back (command bit7=1 = read).
+    bus.write(0x00_C033, 0xD4, 0); // command (read, addr 5)
+    bus.write(0x00_C034, 0x80, 0); // start — parse command
+    bus.write(0x00_C034, 0xC0, 0); // start (bit6 = read) — read phase
+    assert_eq!(
+        bus.read(0x00_C033, 0),
+        0xAB,
+        "BRAM $05 read back via the clock GLU"
+    );
+}

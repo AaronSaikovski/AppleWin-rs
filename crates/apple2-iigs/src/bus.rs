@@ -6,6 +6,7 @@
 
 use crate::adb::Adb;
 use crate::bram;
+use crate::clock::Clock;
 use crate::cpu65816::Bus816;
 use crate::ensoniq::Ensoniq;
 use crate::fpi::Fpi;
@@ -39,6 +40,9 @@ pub struct IIgsBus {
 
     /// Battery-backed parameter RAM (256 bytes).
     pub bram: [u8; 256],
+
+    /// Clock GLU (real-time clock + BRAM access via $C033/$C034).
+    pub clock: Clock,
 
     /// IRQ line state — true when any interrupt source is active.
     pub irq_line: bool,
@@ -79,6 +83,7 @@ impl IIgsBus {
             smartport: SmartPort::default(),
             iwm: Iwm::default(),
             bram: bram::factory_default_bram(),
+            clock: Clock::default(),
             irq_line: false,
             last_frame: 0,
             slot_rom_cache,
@@ -157,6 +162,9 @@ impl IIgsBus {
             0x3D => self.ensoniq.read_data(),
             0x3E => self.ensoniq.read_addr_lo(),
             0x3F => self.ensoniq.read_addr_hi(),
+            // Clock GLU ($C033 data / $C034 control).
+            0x33 => self.clock.read_data(),
+            0x34 => (self.clock.read_ctl() & 0xF0) | (self.mega2.border_color & 0x0F),
             // $C071-$C07F: not I/O — the IIgs exposes ROM bank $FF here, holding
             // the native interrupt-vector dispatch (e.g. the IRQ vector $C074 =
             // `CLV; JML $E10010`). Reads return the ROM byte.
@@ -194,6 +202,13 @@ impl IIgsBus {
             0x3D => self.ensoniq.write_data(val),
             0x3E => self.ensoniq.write_addr_lo(val),
             0x3F => self.ensoniq.write_addr_hi(val),
+            // Clock GLU ($C033 data / $C034 control). $C034's low nibble is the
+            // video border colour, so update that too.
+            0x33 => self.clock.write_data(val),
+            0x34 => {
+                self.mega2.border_color = val & 0x0F;
+                self.clock.write_ctl(val, &mut self.bram);
+            }
             // IWM (slot 6 disk controller) — $C0E0-$C0EF.
             0xE0..=0xEF => {
                 self.iwm.access(io_offset & 0x0F, true, val);

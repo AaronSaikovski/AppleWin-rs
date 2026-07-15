@@ -137,6 +137,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (0) with writes discarded, matching GSplus's dummy-memory behaviour. Updated
   the bank-mapping test accordingly.
 
+- **apple2-iigs: implemented the clock GLU ($C033/$C034) — RTC + battery RAM.**
+  GS/OS reads its configuration and the date/time from the clock chip during
+  startup (thousands of accesses). The chip was unimplemented ($C033 returned 0,
+  $C034 was treated purely as the border-colour register), so GS/OS read a
+  floating bus, corrupted its stack, and ran away into its wild-jump catcher
+  pattern shortly after the "Welcome to the IIgs" screen. Added a `clock.rs`
+  module implementing the GLU transaction state machine (seconds counter,
+  internal registers, and battery-RAM read/write, including the extended
+  256-byte addressing) per KEGS/GSplus. `$C034`'s low nibble still drives the
+  video border colour. With the clock working the boot progresses well past the
+  previous crash (into ProDOS 8 / GS-OS system startup). Added a regression test
+  for BRAM access through the GLU.
+
 ### Changed
 
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**
