@@ -114,8 +114,61 @@ fn make_emulator(
     // Card insertion is handled by apply_slot_cards() in the gui module.
 }
 
-/// Default IIgs ROM search paths (checked in order).
-/// The latest ROM (ROM 03, 256KB) is preferred.
+/// Combine the split-bank Apple IIgs ROM 3 dumps into a single 256KB image.
+///
+/// ROM 3 ships as two 128KB halves — banks `$FC-$FD` (341-0728) and banks
+/// `$FE-$FF` (341-0748). A combined image must be ordered `[FC][FD][FE][FF]` so
+/// that bank `$FF` (holding the reset vector `$FA62` at `$FFFC`) lands last. The
+/// `$FE`/`$FF` dump exists in both `[FE][FF]` and `[FF][FE]` orderings, so the
+/// half carrying the reset vector is detected and placed as bank `$FF`.
+#[cfg(feature = "gui")]
+fn combine_rom3_split(dir: &std::path::Path) -> Option<Vec<u8>> {
+    // Accepted dump names for each half (including the "(new)" alternates).
+    let fc_fd_names = [
+        "Apple IIGS ROM 3 Banks FC-FD - 341-0728.bin",
+        "Apple IIGS ROM 3 Banks FC-FD - 341-0728 (new).bin",
+        "Apple IIGS ROM 3 Banks FC-FD - 341-0737.bin",
+    ];
+    let ff_fe_names = [
+        "Apple IIGS ROM 3 Banks FF-FE - 341-0748.bin",
+        "Apple IIGS ROM 3 Banks FF-FE - 341-0748 (new).bin",
+        "Apple IIGS ROM 3 Banks FF-FE - 341-0749.bin",
+    ];
+    let load = |names: &[&str]| -> Option<(std::path::PathBuf, Vec<u8>)> {
+        names.iter().find_map(|n| {
+            let p = dir.join(n);
+            std::fs::read(&p)
+                .ok()
+                .filter(|d| d.len() == 131072)
+                .map(|d| (p, d))
+        })
+    };
+
+    let (fc_path, fc_fd) = load(&fc_fd_names)?;
+    let (ff_path, mut fe_ff) = load(&ff_fe_names)?;
+
+    // Ensure bank $FF (the half with the reset vector) is the second 64KB.
+    let vec_first_half = u16::from_le_bytes([fe_ff[0xFFFC], fe_ff[0xFFFD]]);
+    if vec_first_half != 0 {
+        fe_ff.rotate_left(0x10000); // was [FF][FE] → make it [FE][FF]
+    }
+
+    let mut combined = fc_fd; // [FC][FD]
+    combined.extend_from_slice(&fe_ff); // + [FE][FF] → [FC][FD][FE][FF]
+    if combined.len() == 262144 {
+        println!(
+            "Combined ROM 3 from split banks:\n  {}\n  {}",
+            fc_path.display(),
+            ff_path.display()
+        );
+        Some(combined)
+    } else {
+        None
+    }
+}
+
+/// Locate an Apple IIgs ROM: an explicit configured path, else the proper
+/// combined ROM 3 (split-bank pair), else a single-file ROM 01/00/prototype.
 #[cfg(feature = "gui")]
 fn find_iigs_rom(configured_path: &Option<String>) -> Option<Vec<u8>> {
     // If user configured an explicit path, try that first
@@ -135,17 +188,18 @@ fn find_iigs_rom(configured_path: &Option<String>) -> Option<Vec<u8>> {
         }
     }
 
-    // Search common locations for IIgs ROMs. Prefer ROM 01 (342-0077-B): it is
-    // the standard, most widely compatible image and the default target of every
-    // major IIgs emulator. ROM 00 is the fallback; the various ROM 3 dumps
-    // (Tenspeed/BT/Alpha/Mark Twain) are non-standard collector images.
+    // Single-file ROM images to search for, in order of preference. The proper
+    // combined ROM 3 (from the split 341-0728 + 341-0748 dumps) is tried first
+    // per-directory below; these are the fallbacks. ROM 01 (342-0077-B) is the
+    // standard, most widely compatible image. The Tenspeed ROM 3 dumps are
+    // prototype/beta images and come last.
     let search_names = [
         // ROM 01 (128KB) — standard, most compatible.
         "Apple IIGS ROM 01 - 342-0077-B.bin",
         "Apple IIgs ROM1 - 342-0077-B -  27C1001.bin",
         // ROM 00 (128KB) — original.
         "Apple IIGS ROM 00 - 342-0077-A.bin",
-        // ROM 3 (256KB, combined image) — later 2 MB machine.
+        // ROM 3 (256KB, prototype/beta combined images) — last resort.
         "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v25.bin",
         "Apple IIGS ROM 3 Tenspeed Late 1988 Early 1989 v16.bin",
     ];
@@ -170,6 +224,11 @@ fn find_iigs_rom(configured_path: &Option<String>) -> Option<Vec<u8>> {
     }
 
     for dir in &search_dirs {
+        // Prefer the proper ROM 3: the standard final revision, assembled from
+        // the split 128KB bank dumps into a combined 256KB image.
+        if let Some(rom) = combine_rom3_split(dir) {
+            return Some(rom);
+        }
         for name in &search_names {
             let path = dir.join(name);
             if let Ok(data) = std::fs::read(&path)

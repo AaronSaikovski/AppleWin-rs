@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **applewin: load the standard Apple IIgs ROM 3 from its split-bank dumps.**
+  ROM 3 (the final production IIgs firmware) is commonly distributed as two 128KB
+  halves — banks `$FC-$FD` (341-0728) and banks `$FE-$FF` (341-0748). The ROM
+  auto-detection now finds this pair and combines it into a properly ordered
+  256KB `[FC][FD][FE][FF]` image (handling both `[FE][FF]` and `[FF][FE]`
+  orderings of the `$FE`/`$FF` dump by locating the reset-vector half). This
+  combined ROM 3 is preferred over the single-file ROM 01/00 and the
+  prototype/beta Tenspeed dumps. Verified 99% byte-identical to a known-good
+  ROM 3 with byte-identical boot code.
+
 ### Fixed
 
 - **apple2-iigs: Apple IIgs firmware now boots past the cold-start dead-loop.**
