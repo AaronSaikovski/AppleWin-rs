@@ -201,15 +201,21 @@ fn bus_expansion_ram() {
 }
 
 #[test]
-fn bus_bank_mirror() {
+fn bus_banks_80_df_not_populated() {
+    // A 1 MB machine has RAM in banks $00-$0F. Banks $80-$DF are NOT RAM (and
+    // must NOT alias $00-$5F — that would make GS/OS mis-size memory and corrupt
+    // bank $00). Writes there are discarded; reads return 0.
     let rom = vec![0xEA; 131072];
     let mem = IIgsMemory::new(1024, rom).unwrap();
     let mut bus = IIgsBus::new(mem);
 
-    // Write to bank $02
     bus.write(0x02_5678, 0xCC, 0);
-    // Bank $82 should mirror bank $02
-    assert_eq!(bus.read(0x82_5678, 0), 0xCC);
+    // Bank $82 must NOT reflect bank $02 (no mirror).
+    assert_eq!(bus.read(0x82_5678, 0), 0x00);
+    // Writes to $80-$DF must not leak into $00-$5F.
+    bus.write(0x84_1234, 0x99, 0);
+    assert_eq!(bus.read(0x04_1234, 0), 0x00);
+    assert_eq!(bus.read(0x84_1234, 0), 0x00);
 }
 
 #[test]

@@ -94,15 +94,12 @@ impl IIgsBus {
             // Banks $02-$7F: Expansion RAM (direct access)
             0x02..=0x7F => self.mem.ram_read(bank, offset),
 
-            // Banks $80-$DF: Mirror of $00-$5F (ROM 03 behavior)
-            0x80..=0xDF => {
-                let mirrored_bank = bank - 0x80;
-                if mirrored_bank <= 0x01 {
-                    self.read_slow_bank(mirrored_bank, offset, cycles)
-                } else {
-                    self.mem.ram_read(mirrored_bank, offset)
-                }
-            }
+            // Banks $80-$DF: not populated on the IIgs — RAM lives in $00-$7F
+            // (fast) and $E0-$E1 (slow). Reads return 0 (dummy memory) unless
+            // the machine actually has RAM this high. Do NOT alias to $00-$5F:
+            // GS/OS sizes RAM by probing banks, and an alias makes it detect
+            // phantom RAM, then use it and corrupt the real bank $00.
+            0x80..=0xDF => self.mem.ram_read(bank, offset),
 
             // Banks $E0-$E1: Fast RAM with the Mega II I/O aperture
             0xE0 | 0xE1 => self.read_fast_bank(bank - 0xE0, offset, cycles),
@@ -124,15 +121,9 @@ impl IIgsBus {
             // Banks $02-$7F: Expansion RAM
             0x02..=0x7F => self.mem.ram_write(bank, offset, val),
 
-            // Banks $80-$DF: Mirror of $00-$5F
-            0x80..=0xDF => {
-                let mirrored_bank = bank - 0x80;
-                if mirrored_bank <= 0x01 {
-                    self.write_slow_bank(mirrored_bank, offset, val, cycles);
-                } else {
-                    self.mem.ram_write(mirrored_bank, offset, val);
-                }
-            }
+            // Banks $80-$DF: not populated — writes beyond installed RAM are
+            // discarded (see the read path). No aliasing to $00-$5F.
+            0x80..=0xDF => self.mem.ram_write(bank, offset, val),
 
             // Banks $E0-$E1: Fast RAM with the Mega II I/O aperture
             0xE0 | 0xE1 => self.write_fast_bank(bank - 0xE0, offset, val, cycles),

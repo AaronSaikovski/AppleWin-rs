@@ -118,7 +118,25 @@ repro of ROM 03 is still incomplete (separate boot-path gaps), so verify in-GUI.
 - [x] Regression tests: `parses_2mg_header_offsets`, `smartport_boot_loads_block0`;
       updated `smartport_2mg_format` and `smartport_firmware_stub_installed`.
 
-## NEXT — GS/OS crashes in the P16 → GS/OS handoff  ⛔
+## Fixed — banks $80-$DF aliased $00-$5F  ✅
+Removed the `$80-$DF` → `$00-$5F` mirror (real bug: made GS/OS mis-size RAM and
+corrupt bank $00). Verified vs GSplus dummy-memory. Did NOT fully fix the GS/OS
+crash below, but is a correctness fix.
+
+## NEXT — GS/OS crashes after the "Welcome" screen (deep runaway)  ⛔
+GS/OS reaches the "Welcome to the IIgs" SHR screen, then the CPU runs away into
+GS/OS's memory-fill catcher pattern (`AF 57 00 84` = `LDA $840057`) in bank-0
+low memory, with the stack pointer corrupted into the `$C0xx` I/O region. By the
+time any symptom is detectable (SP in `$C0xx`, executing `$AF`/`$84` fill, BRK
+dispatch through the garbage `$03F0` vector) the CPU has already been lost for
+600+ instructions — the true divergence is far upstream. Iterative single-symptom
+tracing isn't converging; this needs a **reference-trace diff** against GSplus
+(run the same ROM+disk in GSplus with instruction logging, diff PC streams to
+find the first divergence). Likely suspects: the unimplemented clock chip
+(`$C033`/`$C034` RTC + BRAM — GS/OS reads config from it), a GS/OS toolset call
+hitting unimplemented hardware, or a subtle 65C816/memory edge case.
+
+## (was) P16 → GS/OS handoff note — superseded
 GS/OS reaches the "Welcome to the IIgs" Super Hi-Res screen (SHR on, no BRK),
 then the P16 loader crashes: code at `$00/2568` does `JMP $0080`, but bank-0
 `$0080+` is filled with a repeating `AF 57 00 84` (`LDA $840057`) pattern — GS/OS's

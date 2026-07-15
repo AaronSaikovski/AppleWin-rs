@@ -128,6 +128,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   → GS/OS "Welcome to the IIgs" startup screen (Super Hi-Res). Added regression
   tests for the 2IMG header parsing and the block-0 boot load.
 
+- **apple2-iigs: banks `$80-$DF` no longer alias `$00-$5F`.** On the IIgs, RAM
+  lives in banks `$00-$7F` (fast) and `$E0-$E1` (slow); banks `$80-$DF` are not
+  populated. The bus had been mirroring `$80-$DF` onto `$00-$5F`, so GS/OS's
+  RAM-sizing probe saw phantom RAM there (writes appeared to "stick" via the
+  alias), mis-sized memory, and then used the aliased region — corrupting the
+  real bank `$00` (code and stack). Banks `$80-$DF` now read as unpopulated
+  (0) with writes discarded, matching GSplus's dummy-memory behaviour. Updated
+  the bank-mapping test accordingly.
+
 ### Changed
 
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**
