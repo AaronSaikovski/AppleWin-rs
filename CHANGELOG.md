@@ -157,6 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured. It now tracks `$E1` with the correct `((val >> 1) & 0x1F) + 1`
   decode, so the full oscillator bank is mixed.
 
+- **apple2-iigs: DOC sound RAM initialises to the sample mid-point (128).** An
+  8-bit DOC sample is centred at 128; leaving sound RAM zeroed meant any
+  oscillator un-halted before its waveform loaded read a full-scale −1.0 DC
+  level and buzzed. Initialising to 128 makes unconfigured oscillators output
+  silence.
+
 ### Changed
 
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**

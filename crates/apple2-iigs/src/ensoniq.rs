@@ -84,7 +84,11 @@ impl Default for Ensoniq {
 
         Self {
             regs,
-            sound_ram: vec![0u8; 65536],
+            // Initialise sound RAM to the mid-point (128). An 8-bit DOC sample
+            // is centred at 128, so an oscillator that is un-halted before its
+            // waveform is loaded reads silence (0) rather than a full-scale
+            // −1.0 DC level, which otherwise buzzes loudly.
+            sound_ram: vec![128u8; 65536],
             address: 0,
             control: 0,
             accum: [0u32; 32],
