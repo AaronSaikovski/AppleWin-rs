@@ -29,6 +29,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **apple2-iigs: implement the VGC video counters ($C02E/$C02F).** The vertical
+  ($C02E) and horizontal ($C02F) scanline-position registers returned a constant
+  `0x00`. Games and demos that time raster effects or wait for a specific scanline
+  by polling these registers spun forever (freeze after the title screen renders).
+  The bus now returns a live raster position derived from the cycle count
+  (65 cycles/line, 262 lines/frame), including the vertical-counter wrap. Ported
+  from the KEGS VGC model (`read_vid_counters`, `moremem.c`). Regression test:
+  `vgc_video_counters_advance`.
+
+- **apple2-iigs: implement auxiliary-memory (bank $01) switching in the IIgs bus.**
+  The IIgs slow-RAM bus routed every bank-`$00` access straight to main RAM,
+  completely ignoring the IIe-compatible aux-memory soft switches (RAMRD/RAMWRT
+  at `$C002-$C005`, ALTZP at `$C008/$C009`, 80STORE+PAGE2, and the same bits in
+  STATEREG `$C068`). GS/OS uses auxiliary memory (bank `$01`) constantly, so its
+  aux writes fell through to main RAM and corrupted bank-`$00` system data —
+  including the `$03F0` interrupt/BRK vector — after which a legitimate interrupt
+  dispatched through the clobbered vector into a self-sustaining runaway (the
+  "Welcome to the IIgs" boot hang). `read_slow_bank`/`write_slow_bank` now select
+  main (bank `$00`) or aux (bank `$01`) per those switches — ALTZP for the
+  zero-page/stack and Language-Card windows, RAMRD/RAMWRT for `$0200-$BFFF`, and
+  80STORE+PAGE2 for the text/hi-res page-1 windows — with shadowing following the
+  effective bank. Ported from the KEGS memory model (`moremem.c`). Regression
+  tests: `aux_memory_switches_to_bank1`, `statereg_switches_aux_memory`.
+
 - **apple2-iigs: Apple IIgs firmware now boots past the cold-start dead-loop.**
   Two bugs prevented the ROM firmware from starting. (1) Some 128KB ROM 01
   dumps (e.g. `342-0077-B`) store their two 64KB halves swapped, leaving the

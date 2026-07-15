@@ -241,8 +241,10 @@ impl Mega2 {
             0x2B => 0x00, // Monochrome monitor mode
             0x2C => 0x00, // Slot interrupt flags (read-only)
             0x2D => self.slot_rom_select,
-            0x2E => 0x00, // Byte disable register (VGC)
-            0x2F => 0x00, // SCC read (serial)
+            // VGC video counters — vertical ($C02E) / horizontal ($C02F).
+            // These advance every scanline; games poll them for raster timing
+            // and hang forever if they read as a constant. (Ported from KEGS.)
+            0x2E | 0x2F => self.read_vid_counter(offset, cycles),
 
             // ── Speaker ──────────────────────────────────────────────────
             0x30 => {
@@ -589,6 +591,39 @@ impl Mega2 {
         self.key_strobe = true;
         // Set ADB data available flag
         self.adb_status |= 0x20;
+    }
+
+    /// Read a VGC video counter: `$C02E` (vertical) or `$C02F` (horizontal).
+    ///
+    /// The IIgs exposes a live raster position here. `lines_since_vbl` packs the
+    /// scanline (0-261) in the high byte and the cycle-within-line (0-64) in the
+    /// low byte; the vertical count is the top bits and the horizontal count the
+    /// low bits, with the wrap that makes the vertical counter run `$80-$FF` then
+    /// `$7D-$7F` across the frame. Ported from KEGS `read_vid_counters`
+    /// (`moremem.c`) — games that time effects off these registers spin forever
+    /// if the value never changes.
+    fn read_vid_counter(&self, reg: u8, cycles: u64) -> u8 {
+        const CYCLES_PER_LINE: u64 = 65;
+        let cycle_in_frame = cycles % CYCLES_PER_FRAME;
+        let line = (cycle_in_frame / CYCLES_PER_LINE) as u32;
+        let offset = (cycle_in_frame % CYCLES_PER_LINE) as u32;
+        let mut lsv = (line << 8) | offset;
+        lsv = lsv.wrapping_add(0x1_0000);
+        if lsv >= 0x2_0000 {
+            lsv = lsv - 0x2_0000 + 0xFA00;
+        }
+        if reg == 0x2E {
+            // Vertical count.
+            ((lsv >> 9) & 0xFF) as u8
+        } else {
+            // Horizontal count: bit 7 = vertical LSB, bits 6-0 = horizontal.
+            let mask = (lsv >> 1) & 0x80;
+            let mut low = lsv & 0xFF;
+            if low >= 0x01 {
+                low = (low + 0x3F) & 0x7F;
+            }
+            (mask | low) as u8
+        }
     }
 
     /// Update VBLANK state based on cycle count.

@@ -220,6 +220,37 @@ impl IIgsBus {
     }
 
     /// Read from a "slow" bank ($00 or $01) with I/O aperture handling.
+    /// Select main (0) or auxiliary (1) memory for a bank-`$00` slow-RAM access,
+    /// per the IIe-compatible soft switches (ALTZP for zero page/stack, RAMRD/
+    /// RAMWRT for `$0200-$BFFF`, 80STORE+PAGE2 for the text/hi-res page-1 windows).
+    /// The IIgs routes these bank-`$00` accesses to bank `$01` (aux); without this,
+    /// GS/OS's aux-memory writes corrupt main memory. (Ported from KEGS.)
+    fn aux_bank0(&self, offset: u16, is_write: bool) -> u8 {
+        use apple2_core::bus::MemMode;
+        let mm = self.mega2.mem_mode;
+
+        // Zero page + stack ($0000-$01FF): ALTZP.
+        if offset < 0x0200 {
+            return mm.contains(MemMode::MF_ALTZP) as u8;
+        }
+        let st80 = mm.contains(MemMode::MF_80STORE);
+        // Text page 1 ($0400-$07FF): 80STORE makes PAGE2 select the bank.
+        if st80 && (0x0400..0x0800).contains(&offset) {
+            return mm.contains(MemMode::MF_PAGE2) as u8;
+        }
+        // Hi-res page 1 ($2000-$3FFF): 80STORE+HIRES makes PAGE2 select the bank.
+        if st80 && mm.contains(MemMode::MF_HIRES) && (0x2000..0x4000).contains(&offset) {
+            return mm.contains(MemMode::MF_PAGE2) as u8;
+        }
+        // Everything else in $0200-$BFFF: RAMRD (read) / RAMWRT (write).
+        let flag = if is_write {
+            MemMode::MF_AUXWRITE
+        } else {
+            MemMode::MF_AUXREAD
+        };
+        mm.contains(flag) as u8
+    }
+
     fn read_slow_bank(&mut self, bank: u8, offset: u16, cycles: u64) -> u8 {
         // I/O aperture: $C000-$C0FF
         if (0xC000..=0xC0FF).contains(&offset) {
@@ -233,13 +264,25 @@ impl IIgsBus {
             return self.slot_rom_cache.get(idx).copied().unwrap_or(0);
         }
 
-        // Language Card area: $D000-$FFFF
+        // Language Card area: $D000-$FFFF — bank $00 access switches on ALTZP.
         if offset >= 0xD000 {
-            return self.read_language_card(bank, offset);
+            let eff_bank = if bank == 0 {
+                self.mega2
+                    .mem_mode
+                    .contains(apple2_core::bus::MemMode::MF_ALTZP) as u8
+            } else {
+                bank
+            };
+            return self.read_language_card(eff_bank, offset);
         }
 
-        // Regular RAM
-        self.mem.ram_read(bank, offset)
+        // Regular RAM — bank $00 accesses honour the aux-memory soft switches.
+        let eff_bank = if bank == 0 {
+            self.aux_bank0(offset, false)
+        } else {
+            bank
+        };
+        self.mem.ram_read(eff_bank, offset)
     }
 
     /// Write to a "slow" bank ($00 or $01) with I/O + shadowing.
@@ -255,24 +298,41 @@ impl IIgsBus {
             return;
         }
 
-        // Language Card area: $D000-$FFFF
+        // Language Card area: $D000-$FFFF — bank $00 access switches on ALTZP.
         if offset >= 0xD000 {
-            self.write_language_card(bank, offset, val);
+            let eff_bank = if bank == 0 {
+                self.mega2
+                    .mem_mode
+                    .contains(apple2_core::bus::MemMode::MF_ALTZP) as u8
+            } else {
+                bank
+            };
+            self.write_language_card(eff_bank, offset, val);
             // Shadow LC writes if enabled
-            if bank == 0 && self.mega2.shadow.should_shadow_bank0(offset) {
-                self.mem.fast_ram_write(0, offset, val);
+            if bank == 0 {
+                if self.mega2.shadow.should_shadow_bank0(offset) {
+                    self.mem.fast_ram_write(eff_bank, offset, val);
+                }
             } else if bank == 1 && self.mega2.shadow.should_shadow_bank1(offset) {
                 self.mem.fast_ram_write(1, offset, val);
             }
             return;
         }
 
-        // Regular RAM write
-        self.mem.ram_write(bank, offset, val);
+        // Regular RAM write — bank $00 accesses honour the aux-memory soft switches.
+        let eff_bank = if bank == 0 {
+            self.aux_bank0(offset, true)
+        } else {
+            bank
+        };
+        self.mem.ram_write(eff_bank, offset, val);
 
-        // Apply shadowing: mirror to fast RAM ($E0/$E1)
-        if bank == 0 && self.mega2.shadow.should_shadow_bank0(offset) {
-            self.mem.fast_ram_write(0, offset, val);
+        // Apply shadowing: mirror to fast RAM ($E0/$E1). The shadow follows the
+        // effective (main/aux) bank the write actually landed in.
+        if bank == 0 {
+            if self.mega2.shadow.should_shadow_bank0(offset) {
+                self.mem.fast_ram_write(eff_bank, offset, val);
+            }
         } else if bank == 1 && self.mega2.shadow.should_shadow_bank1(offset) {
             self.mem.fast_ram_write(1, offset, val);
         }

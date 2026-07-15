@@ -750,3 +750,104 @@ fn clock_glu_bram_access() {
         "BRAM $05 read back via the clock GLU"
     );
 }
+
+#[test]
+fn aux_memory_switches_to_bank1() {
+    // Regression: the IIgs bus must route bank-$00 accesses to auxiliary memory
+    // (bank $01) per the RAMRD/RAMWRT/ALTZP soft switches, exactly like the IIe.
+    // Without this, GS/OS's aux-memory writes fall through to main RAM and
+    // corrupt system data (e.g. the $03F0 interrupt vector), hanging the boot.
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // At reset all aux switches are off — write a marker to MAIN $0800.
+    bus.write(0x0800, 0x11, 0);
+
+    // Enable aux write ($C005 = RAMWRT on) and store a different marker.
+    bus.write(0xC005, 0, 0);
+    bus.write(0x0800, 0x22, 0);
+
+    // With aux read still off, the read must see MAIN (untouched $11).
+    assert_eq!(
+        bus.read(0x0800, 0),
+        0x11,
+        "aux write must not touch main RAM"
+    );
+
+    // Enable aux read ($C003 = RAMRD on) — now the read must see AUX ($22).
+    bus.write(0xC003, 0, 0);
+    assert_eq!(
+        bus.read(0x0800, 0),
+        0x22,
+        "aux read must return the aux write"
+    );
+
+    // Disabling aux read again returns to MAIN.
+    bus.write(0xC002, 0, 0);
+    assert_eq!(
+        bus.read(0x0800, 0),
+        0x11,
+        "clearing RAMRD returns to main RAM"
+    );
+}
+
+#[test]
+fn statereg_switches_aux_memory() {
+    // GS/OS switches banks primarily through STATEREG ($C068), not the discrete
+    // soft switches. Verify RAMRD/RAMWRT bits there drive the same aux routing.
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    bus.write(0x0800, 0xAA, 0); // main marker
+
+    // STATEREG bit4 = RAMWRT, bit5 = RAMRD. Set both (aux read+write).
+    bus.write(0xC068, 0x30, 0);
+    bus.write(0x0800, 0xBB, 0); // lands in aux
+    assert_eq!(
+        bus.read(0x0800, 0),
+        0xBB,
+        "STATEREG aux read/write hits bank 1"
+    );
+
+    // Back to all-main (STATEREG = 0): the original main byte survives.
+    bus.write(0xC068, 0x00, 0);
+    assert_eq!(
+        bus.read(0x0800, 0),
+        0xAA,
+        "main byte survived the aux detour"
+    );
+}
+
+#[test]
+fn vgc_video_counters_advance() {
+    // Regression: $C02E (vertical) / $C02F (horizontal) must advance through the
+    // frame. A static value makes games that time raster effects off them hang.
+    let rom = vec![0xEA; 131072];
+    let mem = IIgsMemory::new(256, rom).unwrap();
+    let mut bus = IIgsBus::new(mem);
+
+    // Sample the vertical counter at several points across one 17_030-cycle frame.
+    let mut seen = std::collections::HashSet::new();
+    for step in 0..262u64 {
+        let cyc = step * 65; // one scanline apart
+        seen.insert(bus.read(0xC02E, cyc));
+    }
+    assert!(
+        seen.len() > 20,
+        "vertical counter must sweep many values across a frame, saw {}",
+        seen.len()
+    );
+
+    // Horizontal counter must also vary within a single scanline.
+    let mut hseen = std::collections::HashSet::new();
+    for c in 0..65u64 {
+        hseen.insert(bus.read(0xC02F, c));
+    }
+    assert!(
+        hseen.len() > 8,
+        "horizontal counter must vary within a scanline, saw {}",
+        hseen.len()
+    );
+}
