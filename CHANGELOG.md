@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **apple2-iigs: correct Ensoniq DOC 5503 wavetable synthesis (fixes buzzing).**
+  The oscillator model was rewritten to match KEGS (`doc.c`). Three bugs are
+  fixed: (1) the wavetable size now comes from bits 3-5 of the size register
+  (`2^(((size>>3)&7)+8)` = 256-32768 bytes) with the low 3 bits used as the phase
+  resolution, instead of conflating the two; (2) the wavetable pointer is aligned
+  down to the table size; and, most audibly, (3) a `$00` sample byte now
+  terminates the current pass in **every** mode. Previously only one-shot
+  oscillators stopped on a zero byte, so free-running oscillators played straight
+  through the terminator into whatever RAM followed — the source of the buzzing.
+  Free-running oscillators now loop at the table end, one-shot/sync halt,
+  swap-mode starts the partner, and an end-of-pass raises an IRQ when enabled.
+  Uses a 14-bit fixed-point phase accumulator (KEGS' `SND_PTR_SHIFT`). Regression
+  tests: `one_shot_oscillator_halts_on_zero_byte`,
+  `free_run_oscillator_loops_not_halts_without_zero`, `zero_filled_ram_stays_silent`.
+
 - **apple2-iigs: implement the VGC video counters ($C02E/$C02F).** The vertical
   ($C02E) and horizontal ($C02F) scanline-position registers returned a constant
   `0x00`. Games and demos that time raster effects or wait for a specific scanline

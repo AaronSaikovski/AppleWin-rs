@@ -180,93 +180,174 @@ impl Ensoniq {
         (self.address >> 8) as u8
     }
 
+    /// Fixed-point fractional bits for the oscillator phase accumulator, matching
+    /// KEGS' `SND_PTR_SHIFT`. The byte index into sound RAM is `accum >> SHIFT`.
+    const SND_PTR_SHIFT: u32 = 14;
+
+    /// End-of-pass handler for oscillator `osc` (it read a `$00` byte or ran off
+    /// the end of its wavetable). Mirrors KEGS `doc_sound_end`: free-running
+    /// oscillators loop when they reach the end without a zero byte; one-shot and
+    /// sync oscillators halt; swap-mode oscillators halt and start their partner.
+    /// An end-of-pass raises an IRQ when the oscillator's interrupt-enable bit set.
+    fn end_oscillator(&mut self, osc: usize, hit_zero: bool) {
+        let ctrl = self.regs[0xA0 + osc];
+        if ctrl & CTRL_IE != 0 {
+            self.irq_pending = true;
+        }
+        let mode = ctrl & CTRL_MODE_MASK;
+        let other = osc ^ 1;
+        let omode = self.regs[0xA0 + other] & CTRL_MODE_MASK;
+
+        if mode == MODE_FREE_RUN && !hit_zero {
+            // Free-running, reached the table end without a zero byte — loop.
+            self.accum[osc] = 0;
+        } else if mode == MODE_SWAP || omode == MODE_SWAP {
+            // Swap: halt this oscillator and (re)start the partner from the top.
+            self.regs[0xA0 + osc] |= CTRL_HALT;
+            self.regs[0xA0 + other] &= !CTRL_HALT;
+            self.accum[other] = 0;
+        } else {
+            // One-shot / sync / free-run-hit-zero: halt.
+            self.regs[0xA0 + osc] |= CTRL_HALT;
+        }
+    }
+
     /// Generate audio samples into the output buffer.
     ///
     /// `out`: Output buffer (mono f32 samples, -1.0 to 1.0).
     /// `sample_rate`: Host audio sample rate (e.g., 44100).
     /// `cpu_cycles`: Number of CPU cycles elapsed since last call.
+    ///
+    /// The oscillator model follows the Ensoniq DOC 5503 as emulated by KEGS: a
+    /// size-aligned wavetable pointer, a fixed-point phase accumulator, and the
+    /// defining behaviour that a `$00` sample byte terminates the current pass in
+    /// **every** mode (not just one-shot). Missing that last rule made free-running
+    /// oscillators play straight through the zero terminator into whatever RAM
+    /// followed — the source of the buzzing.
     pub fn fill_audio(&mut self, out: &mut [f32], sample_rate: u32, _cpu_cycles: u64) {
         if out.is_empty() {
             return;
         }
 
-        let num_osc = self.enabled_count as usize;
-        if num_osc == 0 {
-            out.fill(0.0);
-            return;
-        }
-
-        // Each oscillator is clocked at DOC_CLOCK_HZ / (num_osc + 2).
-        // For each output sample, we need to advance by that many DOC clocks.
-        let doc_clocks_per_sample = DOC_CLOCK_HZ / sample_rate as f64;
-        // Each oscillator sees doc_clocks_per_sample / (num_osc + 2) updates.
-        let updates_per_sample = doc_clocks_per_sample / (num_osc as f64 + 2.0);
+        let num_osc = (self.enabled_count as usize).clamp(1, 32);
+        // DOC oscillator update rate divides the master clock by (osc_en + 2).
+        let rate_scale = DOC_CLOCK_HZ / sample_rate as f64 / (num_osc as f64 + 2.0);
 
         for sample in out.iter_mut() {
             let mut mix: f32 = 0.0;
             let mut active_count = 0;
 
-            for osc in 0..num_osc.min(32) {
+            for osc in 0..num_osc {
                 let ctrl = self.regs[0xA0 + osc];
-
-                // Skip halted oscillators
                 if ctrl & CTRL_HALT != 0 {
                     continue;
                 }
 
-                let freq_lo = self.regs[osc] as u32;
-                let freq_hi = self.regs[0x20 + osc] as u32;
-                let freq = (freq_hi << 8) | freq_lo;
+                let freq = ((self.regs[0x20 + osc] as u32) << 8) | self.regs[osc] as u32;
                 let volume = self.regs[0x40 + osc] as f32 / 255.0;
                 let wave_ptr = self.regs[0x80 + osc] as u32;
-                let table_size_reg = self.regs[0xC0 + osc];
+                let wave_size = self.regs[0xC0 + osc];
 
-                // Table size: 256 << (table_size_reg & 0x07) bytes
-                let table_shift = (table_size_reg & 0x07) as u32;
-                let table_size = 256u32 << table_shift;
-                let table_mask = table_size - 1;
+                // Table size = 2^sz bytes, sz = ((wavesize>>3)&7)+8 → 256..32768.
+                // Resolution `res` (low 3 bits) scales the phase increment.
+                let sz = (((wave_size >> 3) & 7) + 8) as u32;
+                let res = (wave_size & 7) as i32;
+                let size = 1u32 << sz; // bytes
+                // Wave pointer is aligned down to the table size.
+                let start_byte = (wave_ptr << 8) & !(size - 1);
 
-                // Accumulator: 16-bit frequency added per DOC update.
-                // Scale by updates_per_sample to get the increment per output sample.
-                let accum = &mut self.accum[osc];
-                let increment = (freq as f64 * updates_per_sample) as u32;
-                *accum = accum.wrapping_add(increment);
-
-                // The accumulator's upper bits index into the wavetable.
-                // Resolution depends on table_size: for a 256-byte table, use
-                // bits 15-8 of the accumulator. For larger tables, use more bits.
-                let pos = ((*accum >> (16 - table_shift)) & table_mask) as usize;
-                let ram_addr = ((wave_ptr as usize) << 8) + pos;
-
-                // Read sample from sound RAM (unsigned 8-bit, center at 128)
-                let raw = if ram_addr < self.sound_ram.len() {
-                    self.sound_ram[ram_addr]
-                } else {
-                    128
-                };
-
-                // Check for one-shot mode: halt when we hit a zero byte
-                let mode = ctrl & CTRL_MODE_MASK;
-                if mode == MODE_ONE_SHOT && raw == 0 {
-                    self.regs[0xA0 + osc] |= CTRL_HALT;
-                    if ctrl & CTRL_IE != 0 {
-                        self.irq_pending = true;
-                    }
-                    continue;
+                // Phase increment per output sample, in `SND_PTR_SHIFT` fixed point.
+                let inc = (freq as f64 * rate_scale * 2f64.powi(sz as i32 - res - 3)) as u32;
+                if inc == 0 {
+                    continue; // not advancing — silent
                 }
 
-                // Convert to signed float (-1.0 to 1.0) and apply volume
+                let accum = self.accum[osc];
+                let byte_off = accum >> Self::SND_PTR_SHIFT;
+                let pos = ((start_byte + byte_off) & 0xFFFF) as usize;
+                let raw = self.sound_ram[pos];
+
+                let next = accum.wrapping_add(inc);
+                self.accum[osc] = next;
+                let end = (next >> Self::SND_PTR_SHIFT) >= size;
+
+                if raw == 0 || end {
+                    // A zero byte is the DOC's universal wavetable terminator.
+                    self.end_oscillator(osc, raw == 0);
+                    if raw == 0 {
+                        // The zero byte itself is not emitted.
+                        continue;
+                    }
+                }
+
                 let signed = (raw as f32 - 128.0) / 128.0;
                 mix += signed * volume;
                 active_count += 1;
             }
 
-            // Normalize by number of active oscillators (avoid division by zero)
-            if active_count > 0 {
-                *sample = mix / (active_count as f32).sqrt();
+            *sample = if active_count > 0 {
+                mix / (active_count as f32).sqrt()
             } else {
-                *sample = 0.0;
-            }
+                0.0
+            };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn osc0(mode: u8) -> Ensoniq {
+        let mut d = Ensoniq::default();
+        d.regs[0x00] = 100; // freq low → advances ~1 byte/sample
+        d.regs[0x20] = 0; // freq high
+        d.regs[0x40] = 255; // full volume
+        d.regs[0x80] = 0; // wave pointer → table at $0000
+        d.regs[0xC0] = 0x00; // sz=8 (256-byte table), res=0
+        d.regs[0xA0] = mode; // control: mode, not halted
+        d.accum[0] = 0;
+        d
+    }
+
+    #[test]
+    fn one_shot_oscillator_halts_on_zero_byte() {
+        let mut d = osc0(MODE_ONE_SHOT);
+        // Zero terminator a few bytes in; earlier bytes are non-zero (128).
+        d.sound_ram[5] = 0x00;
+        let mut buf = [0.0f32; 64];
+        d.fill_audio(&mut buf, 44_100, 0);
+        assert!(
+            d.regs[0xA0] & CTRL_HALT != 0,
+            "one-shot oscillator must halt when it reads a $00 sample byte"
+        );
+    }
+
+    #[test]
+    fn free_run_oscillator_loops_not_halts_without_zero() {
+        // No zero bytes anywhere (all 128) → free-run reaches the end and loops,
+        // never halting. This is the behaviour that stops garbage playback/buzz.
+        let mut d = osc0(MODE_FREE_RUN);
+        let mut buf = [0.0f32; 4096];
+        d.fill_audio(&mut buf, 44_100, 0);
+        assert_eq!(
+            d.regs[0xA0] & CTRL_HALT,
+            0,
+            "free-running oscillator must loop at the table end, not halt"
+        );
+    }
+
+    #[test]
+    fn zero_filled_ram_stays_silent() {
+        // A zero terminator at the very first byte must yield pure silence, never
+        // a full-scale −1.0 DC spike (the classic DOC buzz).
+        let mut d = osc0(MODE_FREE_RUN);
+        d.sound_ram.iter_mut().for_each(|b| *b = 0);
+        let mut buf = [0.5f32; 128];
+        d.fill_audio(&mut buf, 44_100, 0);
+        assert!(
+            buf.iter().all(|&s| s == 0.0),
+            "an oscillator over zero-filled RAM must be silent"
+        );
     }
 }
