@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-audio"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "hound",
  "serde",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-core"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "apple2-audio",
  "bitflags 2.13.1",
@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-debugger"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "apple2-core",
  "serde",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-iigs"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "apple2-audio",
  "apple2-core",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "apple2-video"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "apple2-core",
  "serde",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "applewin"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "apple2-audio",
  "apple2-core",

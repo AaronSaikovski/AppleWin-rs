@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the CI workflow that signs the app with `codesign` and packages a notarized
   `.dmg` into GitHub Releases artifacts.
 
-## [Unreleased]
+## [1.1.6] - 2026-07-21
 
 ### Changed
 
