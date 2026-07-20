@@ -36,6 +36,11 @@ static BASE_CYCLES: [u8; 256] = [
 
 /// Step the CPU by one instruction. Returns cycles consumed.
 pub fn step(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
+    // In emulation mode the stack-pointer high byte is hardwired to $01.
+    if cpu.emulation {
+        cpu.sp = 0x0100 | (cpu.sp & 0xFF);
+    }
+
     // Check for NMI (highest priority)
     if cpu.nmi_pending != 0 {
         cpu.nmi_pending = 0;
@@ -75,6 +80,14 @@ pub fn step(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 
     // Dispatch
     let extra = DISPATCH[opcode as usize](cpu, bus);
+
+    // Re-confine the stack to page 1 at the instruction boundary. The "wide"
+    // stack instructions (PEA/PEI/PER/PHD/PLD/JSL/RTL) may have left SP in
+    // page 0; emulation mode forces the high byte back to $01 between
+    // instructions.
+    if cpu.emulation {
+        cpu.sp = 0x0100 | (cpu.sp & 0xFF);
+    }
 
     // Calculate total cycles
     let cycles = BASE_CYCLES[opcode as usize] + extra;
@@ -123,7 +136,8 @@ fn op_01(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 fn op_02(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
     cpu.pc = cpu.pc.wrapping_add(1); // skip signature byte
     let vector = if cpu.emulation { 0xFFF4 } else { 0xFFE4 };
-    cpu.service_interrupt(bus, vector, false);
+    // COP sets the break flag in the pushed status (like BRK) in emulation mode.
+    cpu.service_interrupt(bus, vector, true);
     0
 }
 
@@ -203,7 +217,7 @@ fn op_0a(cpu: &mut Cpu65816, _bus: &mut dyn Bus816) -> u8 {
 
 // ── 0x0B: PHD ──
 fn op_0b(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    cpu.push16(bus, cpu.dp);
+    cpu.push16_wide(bus, cpu.dp);
     0
 }
 
@@ -413,8 +427,8 @@ fn op_21(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 // ── 0x22: JSL long ──
 fn op_22(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
     let target = cpu.fetch24(bus);
-    cpu.push8(bus, cpu.pbr);
-    cpu.push16(bus, cpu.pc.wrapping_sub(1));
+    cpu.push8_wide(bus, cpu.pbr);
+    cpu.push16_wide(bus, cpu.pc.wrapping_sub(1));
     cpu.pbr = (target >> 16) as u8;
     cpu.pc = target as u16;
     0
@@ -500,7 +514,7 @@ fn op_2a(cpu: &mut Cpu65816, _bus: &mut dyn Bus816) -> u8 {
 
 // ── 0x2B: PLD ──
 fn op_2b(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    cpu.dp = cpu.pop16(bus);
+    cpu.dp = cpu.pop16_wide(bus);
     cpu.flags.set_nz16(cpu.dp);
     0
 }
@@ -720,10 +734,14 @@ fn op_41(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 fn op_42(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
     let sig = cpu.fetch8(bus);
     // Allow the bus to handle this as a trap (e.g., SmartPort firmware).
-    // If handled, update A and C flag.
-    if let Some((a, carry)) = bus.wdm_trap(sig, cpu.sp, cpu.pbr, cpu.emulation) {
+    // If handled, update A, the carry flag, and (optionally) X/Y.
+    if let Some((a, carry, xy)) = bus.wdm_trap(sig, cpu.sp, cpu.pbr, cpu.emulation) {
         cpu.set_a(a as u16);
         cpu.flags.set(super::flags816::Flags816::C, carry);
+        if let Some((x, y)) = xy {
+            cpu.set_x(x);
+            cpu.set_y(y);
+        }
     }
     0
 }
@@ -1021,7 +1039,7 @@ fn op_61(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 fn op_62(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
     let offset = cpu.fetch16(bus);
     let addr = cpu.pc.wrapping_add(offset);
-    cpu.push16(bus, addr);
+    cpu.push16_wide(bus, addr);
     0
 }
 
@@ -1110,15 +1128,16 @@ fn op_6a(cpu: &mut Cpu65816, _bus: &mut dyn Bus816) -> u8 {
 
 // ── 0x6B: RTL ──
 fn op_6b(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    cpu.pc = cpu.pop16(bus).wrapping_add(1);
-    cpu.pbr = cpu.pop8(bus);
+    cpu.pc = cpu.pop16_wide(bus).wrapping_add(1);
+    cpu.pbr = cpu.pop8_wide(bus);
     0
 }
 
 // ── 0x6C: JMP (abs) ──
 fn op_6c(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    let ptr = cpu.fetch16(bus) as u32;
-    cpu.pc = cpu.read16(bus, ptr);
+    // The pointer lives in bank 0 and wraps within it.
+    let ptr = cpu.fetch16(bus);
+    cpu.pc = cpu.read16_bankwrap(bus, 0, ptr);
     0
 }
 
@@ -1712,7 +1731,9 @@ fn op_aa(cpu: &mut Cpu65816, _bus: &mut dyn Bus816) -> u8 {
 
 // ── 0xAB: PLB ──
 fn op_ab(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    cpu.dbr = cpu.pop8(bus);
+    // PLB uses the full 16-bit stack pointer even in emulation mode (unlike
+    // PLA/PLX/PLY, which wrap within page 1).
+    cpu.dbr = cpu.pop8_wide(bus);
     cpu.flags.set_nz8(cpu.dbr);
     0
 }
@@ -2135,8 +2156,8 @@ fn op_d3(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 // ── 0xD4: PEI (dp) ──
 fn op_d4(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
     let addr = cpu.addr_dp(bus);
-    let val = cpu.read16(bus, addr);
-    cpu.push16(bus, val);
+    let val = cpu.read16_bankwrap(bus, 0, addr as u16);
+    cpu.push16_wide(bus, val);
     0
 }
 
@@ -2206,8 +2227,8 @@ fn op_db(cpu: &mut Cpu65816, _bus: &mut dyn Bus816) -> u8 {
 
 // ── 0xDC: JML [abs] ──
 fn op_dc(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
-    let ptr = cpu.fetch16(bus) as u32;
-    let target = cpu.read24(bus, ptr);
+    // JML [abs]: the 24-bit pointer lives in bank 0 and wraps within it.
+    let target = cpu.addr_abs_ind_long(bus);
     cpu.pbr = (target >> 16) as u8;
     cpu.pc = target as u16;
     0
@@ -2438,7 +2459,7 @@ fn op_f3(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
 // ── 0xF4: PEA abs ──
 fn op_f4(cpu: &mut Cpu65816, bus: &mut dyn Bus816) -> u8 {
     let val = cpu.fetch16(bus);
-    cpu.push16(bus, val);
+    cpu.push16_wide(bus, val);
     0
 }
 

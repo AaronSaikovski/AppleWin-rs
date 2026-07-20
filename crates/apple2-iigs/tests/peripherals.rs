@@ -240,7 +240,8 @@ fn ensoniq_default_all_halted() {
 #[test]
 fn ensoniq_register_write_read() {
     let mut doc = apple2_iigs::ensoniq::Ensoniq::default();
-    doc.control = 0x40; // auto-increment, DOC registers
+    // $C03C: bit 6 clear = DOC registers, bit 5 set = auto-increment.
+    doc.control = 0x20;
     doc.address = 0x00; // frequency low, osc 0
     doc.write_data(0x42);
     assert_eq!(doc.regs[0x00], 0x42);
@@ -250,10 +251,12 @@ fn ensoniq_register_write_read() {
 #[test]
 fn ensoniq_sound_ram_access() {
     let mut doc = apple2_iigs::ensoniq::Ensoniq::default();
-    doc.control = 0xC0; // auto-increment + sound RAM mode
+    // $C03C: bit 6 set = sound RAM, bit 5 set = auto-increment.
+    doc.control = 0x60;
     doc.address = 0x1234;
     doc.write_data(0xAB);
     assert_eq!(doc.sound_ram[0x1234], 0xAB);
+    assert_eq!(doc.address, 0x1235); // auto-incremented
 
     // Read it back
     doc.address = 0x1234;
@@ -404,7 +407,7 @@ fn smartport_read_block_via_trap() {
     bus.write(0x00_01FE, 0x00, 0);
     bus.write(0x00_01FF, 0x20, 0);
 
-    let (err, carry) = bus
+    let (err, carry, _) = bus
         .wdm_trap(0xFE, 0x01FD, 0x00, true)
         .expect("trap handled");
     assert_eq!(err, 0x00);
@@ -443,7 +446,7 @@ fn smartport_trap_no_device_error() {
     bus.write(0x00_01FE, 0x00, 0);
     bus.write(0x00_01FF, 0x20, 0);
 
-    let (err, carry) = bus.wdm_trap(0xFE, 0x01FD, 0x00, true).unwrap();
+    let (err, carry, _) = bus.wdm_trap(0xFE, 0x01FD, 0x00, true).unwrap();
     assert_eq!(err, 0x28, "NO DEVICE");
     assert!(carry);
 }

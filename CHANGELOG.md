@@ -27,8 +27,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prototype/beta Tenspeed dumps. Verified 99% byte-identical to a known-good
   ROM 3 with byte-identical boot code.
 
+### Changed
+
+- **apple2-iigs: port KEGS's block-level SmartPort machinery.** Ported the
+  SmartPort firmware dispatch (`do_c70d`): **extended (GS/OS) commands**
+  (`cmd & 0x40`, 24-bit buffer/block/status addresses) alongside the standard
+  16-bit form, with KEGS-accurate STATUS — bus/driver status (device count,
+  vendor `$004B`, version `$1000`) for unit 0, `$F8` online / `$80` offline
+  status bytes with a 3–4-byte block count, and a Device Information Block
+  (block-device type); an empty-but-valid unit returns "offline" not an error.
+  Also ported the boot-parameter setup (`do_c700`: `$7F8` boot slot + `$42-$47`
+  ProDOS params) and the SmartPort transfer/parameter count returned in X/Y via
+  the WDM trap. ProDOS 8 still boots to the program selector and all SmartPort
+  tests pass. **Full GS/OS boot is not yet achieved** — after these fixes GS/OS
+  still renders the loader and then hangs in its toolbox/Event-Manager loop
+  (a condition it waits on never resolves), which is beyond the disk firmware
+  and needs further ADB/toolbox emulation work.
+
 ### Fixed
 
+- **apple2-iigs: fix Super Hi-Res 640-mode colours (fixes striped/garbled game
+  screens).** In 640 mode the four pixels in each byte draw from *different*
+  quadrants of the 16-colour palette (pixel 0 → entries 8-11, pixel 1 → 12-15,
+  pixel 2 → 0-3, pixel 3 → 4-7); the renderer used entries 0-3 for every pixel,
+  which turned real 640-mode images (e.g. Arkanoid) into vertical stripes.
+- **apple2-iigs: loop free-running DOC oscillators by wrapping the phase
+  accumulator instead of resetting it (reduces audio clicks).** A free-running
+  oscillator that reached its wavetable end reset its phase accumulator to 0,
+  producing a phase discontinuity — an audible click — at every loop. It now
+  wraps within the table, preserving continuity, matching KEGS.
+- **apple2-iigs: fix 65C816 emulation-mode stack, COP, and zero-page wrapping
+  (fixes GS/OS "Fatal system error" and monitor crashes).** Several
+  emulation-mode behaviours were wrong, corrupting GS/OS (which uses emulation
+  mode and COP-based toolbox dispatch during boot): (1) the stack-pointer high
+  byte is now hardwired to `$01`; (2) `COP` sets the break bit in the pushed
+  status and clears PBR, like `BRK`; (3) the "new" 65816 stack instructions
+  (`PEA`, `PEI`, `PER`, `PHD`, `PLD`, `PLB`, `JSL`, `RTL`) use the full 16-bit
+  stack pointer (crossing into page 0) instead of wrapping in page 1 like the
+  original 6502 instructions; and (4) direct-page indexed addressing (`dp,X` /
+  `dp,Y` / `(dp,X)`) with `DL=0` now wraps within the direct page instead of
+  discarding the page's high byte. Verified against the SingleStepTests 65816
+  vectors: all native-mode opcodes pass and emulation mode passes except a few
+  documented page-boundary edge cases.
+- **apple2-iigs: fix 65C816 decimal-mode `ADC`/`SBC` flags and BCD carry (fixes
+  GS/OS app crashes).** In decimal mode the N, V and Z flags were computed from
+  the raw binary sum (NMOS 6502 behaviour) instead of the decimal-adjusted
+  result, and the 16-bit BCD carry chain used `sum >> 4` (which yields 2 for
+  invalid BCD digits, corrupting higher nibbles). On the 65C02/65816, `ADC`
+  takes N/Z from the final BCD result and V from the pre-adjust intermediate;
+  `SBC` takes N/Z from the decimal result and V from the binary subtraction.
+  SANE (the toolbox floating-point/BCD library used by GS/OS apps such as Deluxe
+  Paint) relies on this, and the bug caused stack corruption and crashes.
+  Verified against the SingleStepTests 65816 vectors (0 failures across all ADC/
+  SBC opcodes).
+- **apple2-iigs: fix bank-boundary wrapping in indirect and 16-bit addressing.**
+  `JMP (abs)`, `JMP/JSR (abs,X)`, `JML [abs]`, the `(dp)`/`(dp,X)`/`(dp),Y`/
+  `[dp]`/`[dp],Y` direct-page indirect modes, and `(d,s),Y` all read their
+  pointers with a full 24-bit increment, so a pointer at offset `$FFFF` fetched
+  its high byte from the next bank instead of wrapping within bank 0 (or the
+  program bank). 16-bit operand accesses in bank 0 (direct-page / stack-relative)
+  now also wrap within bank 0. Verified against the SingleStepTests 65816
+  vectors — all 256 native-mode opcodes pass (2.54M tests, 0 failures; the block
+  moves `MVN`/`MVP` are functionally correct but excluded as the vectors snapshot
+  them mid-loop).
+- **apple2-iigs: wire the Ensoniq DOC oscillator interrupt to the CPU.** When an
+  interrupt-enabled oscillator ends, the DOC now asserts the CPU IRQ line;
+  the firmware/GS-OS sound handler acknowledges it by reading DOC register `$E0`
+  (which clears the pending flag), so it cannot storm. Sound routines that
+  sequence off oscillator-completion interrupts — including the GS/OS startup
+  jingle — previously hung or looped the beep because the interrupt never fired.
+- **applewin: mix IIgs speaker and Ensoniq DOC audio (fixes buzzing).** The
+  speaker and DOC were synthesised independently and each *pushed* a frame of
+  samples into the shared audio ring buffer every frame — concatenated, not
+  mixed — so the buffer received ~2 frames of audio per frame. Worse, the
+  speaker path derived its sample count from a hard-coded 1.023 MHz clock while
+  the IIgs CPU runs at 2.8 MHz, over-producing ~2.7× samples/frame. Together
+  this flooded the ring buffer and interleaved silence with DOC output, a
+  constant buzz. The IIgs now has a dedicated audio path that derives the sample
+  count from the real IIgs clock (2.8 MHz fast / 1.023 MHz slow) and mixes the
+  speaker and DOC into one timeline with a single push per frame.
+- **apple2-iigs: don't drop to the monitor when no startup device is present.**
+  The SmartPort boot stub read block 0 and then *unconditionally* `JMP $0801`;
+  with no disk, `$0800/$0801` are `$00 $00`, so `$0801` executed `BRK` and fell
+  into the ROM monitor (looking like a crash/hang). The stub now branches on the
+  boot trap's carry (error) result and retries, mirroring real hardware's "Check
+  Startup Device" wait — as soon as a disk is inserted the read succeeds and boot
+  proceeds. With a disk mounted the machine boots through to the ProDOS selector.
+- **apple2-iigs: fix DOC oscillator-interrupt register (fixes "Unclaimed Sound
+  Interrupt" freeze on boot).** The DOC `$E0` oscillator-interrupt register
+  defaulted to `0x00`, which the ROM reads as "oscillator 0 has a pending
+  interrupt" (bit 7 clear). The ROM's IRQ dispatcher could not reconcile this
+  phantom interrupt and printed the fatal **"Unclaimed Sound Interrupt"**,
+  freezing the boot screen. `$E0` now defaults to `0xFF` (no interrupt pending),
+  latches the interrupting oscillator number (`osc << 1`) when an
+  interrupt-enabled oscillator ends, and clears the interrupt when `$E0` is read
+  — matching KEGS `doc_reg_e0`. Reads of `$E1` (oscillator-enable, returns
+  `(n-1) << 1`) and `$E2` (A/D, returns `0x80`) were also corrected. With this
+  fix the IIgs boots through to the ProDOS program selector.
+- **apple2-iigs: fix Ensoniq DOC Sound-GLU register decode (restores sound).**
+  The `$C03C` sound control register bits were shifted one position too high, so
+  every waveform byte the firmware uploaded was written into the DOC register
+  file instead of sound RAM — leaving all oscillators playing the silent 128
+  mid-point. Per KEGS `doc.c`, RAM-vs-register select is **bit 6** (`0x40`) and
+  address auto-increment is **bit 5** (`0x20`) (previously bits 7 and 6). The
+  master DOC output volume (`$C03C` bits 3-0) is now retained and applied to the
+  mix (KEGS `g_doc_vol`) instead of being masked away, and `$C03C` reads now
+  return the full register value. This is the root cause of "no sound" on the
+  IIgs; the earlier buzz fix below was correct but was masked by this bug.
+- **apple2-iigs: clear the decimal flag on CPU reset.** `Flags816::power_on`
+  set the D flag; the 65C816 reset (and KEGS `sim65816.c`,
+  `psr = (psr | 0x134) & ~0x08`) clears it. Harmless in practice (the ROM issues
+  `CLD` early) but the CPU should never leave reset in BCD mode.
 - **apple2-iigs: correct Ensoniq DOC 5503 wavetable synthesis (fixes buzzing).**
   The oscillator model was rewritten to match KEGS (`doc.c`). Three bugs are
   fixed: (1) the wavetable size now comes from bits 3-5 of the size register

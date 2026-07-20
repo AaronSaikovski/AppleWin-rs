@@ -33,9 +33,13 @@ bitflags! {
 }
 
 impl Flags816 {
-    /// Power-on state: all flags set except V and N (emulation mode defaults).
+    /// Power-on / reset state. Matches the 65C816 reset (and KEGS
+    /// `sim65816.c`, `psr = (psr | 0x134) & ~0x08`): emulation mode with M, X
+    /// and I set and **decimal mode cleared**. C/Z are set here as a defined
+    /// starting value (indeterminate on real hardware; the ROM sets them before
+    /// use), while D must be clear so reset never leaves the CPU in BCD mode.
     pub fn power_on() -> Self {
-        Self::C | Self::Z | Self::I | Self::D | Self::X | Self::M
+        Self::C | Self::Z | Self::I | Self::X | Self::M
     }
 
     /// Set N and Z flags from an 8-bit result.

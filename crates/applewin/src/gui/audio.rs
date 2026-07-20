@@ -204,29 +204,124 @@ impl EmulatorApp {
         }
     }
 
-    pub(super) fn synth_ensoniq_audio(&mut self) {
-        // ── Ensoniq DOC audio (IIgs only) ─────────────────────────────────
-        if let Some(ref mut iigs) = self.iigs
-            && let Some(buf) = &self.audio_buf
-        {
-            let sr = self.audio_sample_rate;
-            let volume_scale = self.config.master_volume as f32 / 100.0;
-            let delta_cycles =
-                (self.config.emulation_speed.max(1) as f64 * 102_300.0 / 60.0) as u64;
-            let n_samples = (sr as usize) / 60;
-            if n_samples > 0 {
-                self.ensoniq_scratch.clear();
-                self.ensoniq_scratch.resize(n_samples, 0.0f32);
-                iigs.bus
-                    .ensoniq
-                    .fill_audio(&mut self.ensoniq_scratch, sr, delta_cycles);
+    /// Combined IIgs audio: mix the IIe-compatible speaker ($C030) and the
+    /// Ensoniq DOC into a single per-frame sample timeline, then push once.
+    ///
+    /// Synthesising the two sources separately (as on the Apple II path) would
+    /// push two independent frames of samples into the ring buffer every frame
+    /// — concatenated, not mixed — which floods the buffer and interleaves
+    /// silence with DOC audio, producing a buzz. The sample count is derived
+    /// from the *IIgs* clock (2.8 MHz fast / 1.023 MHz slow), not the Apple II
+    /// 1.023 MHz, so the speaker no longer over-produces ~2.7× samples/frame.
+    pub(super) fn synth_iigs_audio(&mut self) {
+        let Some(buf) = self.audio_buf.clone() else {
+            return;
+        };
+        let Some(iigs) = self.iigs.as_mut() else {
+            return;
+        };
 
-                let mut locked = buf.lock().unwrap();
-                for &sample in &self.ensoniq_scratch {
-                    if locked.len() < AUDIO_BUF_MAX {
-                        locked.push_back(sample * volume_scale * 0.5);
-                    }
+        // Effective IIgs CPU clock in Hz — must match emulation.rs so the
+        // cycle counter and the audio sample rate stay in lockstep.
+        let speed = self.config.emulation_speed.max(1) as f64;
+        let base_hz = if iigs.bus.mega2.is_fast_mode() {
+            2_800_000.0
+        } else {
+            1_023_000.0
+        };
+        let cpu_hz = speed * base_hz / 10.0;
+
+        let sr = self.audio_sample_rate;
+        let srf = sr as f64;
+        let clks_per_sample = (cpu_hz / srf).max(1.0);
+
+        // Speaker toggles accumulated this frame (bank $E0/$E1 $C030).
+        self.speaker_toggles_scratch.clear();
+        std::mem::swap(
+            &mut iigs.bus.mega2.speaker_toggles,
+            &mut self.speaker_toggles_scratch,
+        );
+        let end_cycle = iigs.cpu.cycles;
+        let start_cycle = self.last_audio_cycle;
+        self.last_audio_cycle = end_cycle;
+
+        // Sample count from elapsed cycles (self-correcting to real time via the
+        // fractional remainder), identical in spirit to the Apple II speaker.
+        let delta = end_cycle.saturating_sub(start_cycle) as f64 + self.spkr_cycle_rem;
+        let n_samples = (delta / clks_per_sample) as usize;
+        self.spkr_cycle_rem = delta - n_samples as f64 * clks_per_sample;
+
+        if n_samples == 0 {
+            // Keep speaker parity/DC state coherent for the next frame.
+            if !self.speaker_toggles_scratch.is_empty() {
+                if self.speaker_toggles_scratch.len() % 2 == 1 {
+                    self.speaker_state = !self.speaker_state;
                 }
+                self.dc_filter_ctr = 32_768 + 10_000;
+            }
+            return;
+        }
+
+        let volume_scale = self.config.master_volume as f32 / 100.0;
+        let cycles_per_sample = delta / n_samples as f64;
+
+        // 1) Speaker samples (duty-cycle averaged) into speaker_scratch.
+        self.speaker_scratch.clear();
+        self.speaker_scratch.reserve(n_samples);
+        {
+            let toggles = &self.speaker_toggles_scratch;
+            let mut toggle_idx = 0usize;
+            for i in 0..n_samples {
+                let sample_start = start_cycle as f64 + i as f64 * cycles_per_sample;
+                let sample_end = sample_start + cycles_per_sample;
+                let mut acc = 0.0f64;
+                let mut seg_start = sample_start;
+                while toggle_idx < toggles.len() && (toggles[toggle_idx] as f64) < sample_end {
+                    let tc = (toggles[toggle_idx] as f64).max(sample_start);
+                    let level = if self.speaker_state { 0.5f64 } else { -0.5f64 };
+                    acc += (tc - seg_start) / cycles_per_sample * level;
+                    self.speaker_state = !self.speaker_state;
+                    self.dc_filter_ctr = 32_768 + 10_000;
+                    seg_start = tc;
+                    toggle_idx += 1;
+                }
+                let level = if self.speaker_state { 0.5f64 } else { -0.5f64 };
+                acc += (sample_end - seg_start) / cycles_per_sample * level;
+
+                let raw = acc as f32;
+                let out = if self.dc_filter_ctr == 0 {
+                    0.0f32
+                } else if self.dc_filter_ctr >= 32_768 {
+                    self.dc_filter_ctr -= 1;
+                    raw
+                } else {
+                    let gain = self.dc_filter_ctr as f32 / 32_768.0;
+                    self.dc_filter_ctr -= 1;
+                    raw * gain
+                };
+                self.speaker_scratch.push(out);
+            }
+            // Consume any trailing toggles so the cone stays in phase.
+            while toggle_idx < toggles.len() {
+                self.speaker_state = !self.speaker_state;
+                self.dc_filter_ctr = 32_768 + 10_000;
+                toggle_idx += 1;
+            }
+        }
+
+        // 2) DOC samples for the same n_samples.
+        self.ensoniq_scratch.clear();
+        self.ensoniq_scratch.resize(n_samples, 0.0f32);
+        iigs.bus
+            .ensoniq
+            .fill_audio(&mut self.ensoniq_scratch, sr, delta as u64);
+
+        // 3) Mix (speaker + DOC) and push once.
+        let mut locked = buf.lock().unwrap();
+        for i in 0..n_samples {
+            let mixed = self.speaker_scratch[i] + self.ensoniq_scratch[i] * 0.5;
+            if locked.len() < AUDIO_BUF_MAX {
+                locked.push_back(mixed * volume_scale);
             }
         }
     }

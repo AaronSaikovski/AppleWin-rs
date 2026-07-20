@@ -421,9 +421,15 @@ impl eframe::App for EmulatorApp {
 
         self.run_emulation(in_logo_mode);
 
-        self.synth_speaker_audio();
-        self.synth_ensoniq_audio();
-        self.synth_mockingboard_audio();
+        if self.iigs.is_some() {
+            // IIgs: speaker and DOC must be MIXED into one sample timeline at
+            // the IIgs clock — synthesising them separately concatenates two
+            // frames of audio per frame and buzzes.
+            self.synth_iigs_audio();
+        } else {
+            self.synth_speaker_audio();
+            self.synth_mockingboard_audio();
+        }
         self.tap_wav_recording();
 
         if self.handle_input(ctx, in_logo_mode) {

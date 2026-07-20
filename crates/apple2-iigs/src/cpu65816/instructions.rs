@@ -10,13 +10,29 @@ use super::registers::Cpu65816;
 impl Cpu65816 {
     // ── Memory read/write helpers (width-aware) ─────────────────────────
 
+    /// Address of the second byte of a 16-bit operand access. Accesses that
+    /// begin in bank 0 (direct-page and stack-relative modes) wrap the high
+    /// byte within bank 0 — e.g. a 16-bit access at `$00:FFFF` reads its high
+    /// byte from `$00:0000`, not `$01:0000`. Accesses in any other bank use a
+    /// full 24-bit increment.
+    #[inline]
+    fn hi_byte_addr(addr: u32) -> u32 {
+        if addr & 0xFF_0000 == 0 {
+            addr.wrapping_add(1) & 0xFFFF
+        } else {
+            addr.wrapping_add(1)
+        }
+    }
+
     /// Read an 8-bit or 16-bit value from memory, depending on M flag.
     #[inline]
     pub fn read_m(&self, bus: &mut dyn Bus816, addr: u32) -> u16 {
         if self.emulation || self.flags.acc_8bit() {
             bus.read(addr, self.cycles) as u16
         } else {
-            self.read16(bus, addr)
+            let lo = bus.read(addr, self.cycles) as u16;
+            let hi = bus.read(Self::hi_byte_addr(addr), self.cycles) as u16;
+            (hi << 8) | lo
         }
     }
 
@@ -27,7 +43,7 @@ impl Cpu65816 {
             bus.write(addr, val as u8, self.cycles);
         } else {
             bus.write(addr, val as u8, self.cycles);
-            bus.write(addr.wrapping_add(1), (val >> 8) as u8, self.cycles);
+            bus.write(Self::hi_byte_addr(addr), (val >> 8) as u8, self.cycles);
         }
     }
 
@@ -37,7 +53,9 @@ impl Cpu65816 {
         if self.emulation || self.flags.idx_8bit() {
             bus.read(addr, self.cycles) as u16
         } else {
-            self.read16(bus, addr)
+            let lo = bus.read(addr, self.cycles) as u16;
+            let hi = bus.read(Self::hi_byte_addr(addr), self.cycles) as u16;
+            (hi << 8) | lo
         }
     }
 
@@ -48,7 +66,7 @@ impl Cpu65816 {
             bus.write(addr, val as u8, self.cycles);
         } else {
             bus.write(addr, val as u8, self.cycles);
-            bus.write(addr.wrapping_add(1), (val >> 8) as u8, self.cycles);
+            bus.write(Self::hi_byte_addr(addr), (val >> 8) as u8, self.cycles);
         }
     }
 
@@ -88,24 +106,31 @@ impl Cpu65816 {
         let c = self.flags.contains(Flags816::C) as u8;
 
         if self.flags.contains(Flags816::D) {
-            // BCD 8-bit
-            let mut lo = (a & 0x0F) + (val & 0x0F) + c;
-            let lo_carry = lo > 9;
-            if lo_carry {
-                lo = (lo + 6) & 0x0F;
-            }
-            let mut hi = (a >> 4) + (val >> 4) + lo_carry as u8;
-            let hi_carry = hi > 9;
-            if hi_carry {
-                hi = (hi + 6) & 0x0F;
-            }
-            let result = (hi << 4) | lo;
-            // Flags from binary result for N, V, Z
-            let bin = a as u16 + val as u16 + c as u16;
-            self.flags.set(Flags816::N, (bin & 0x80) != 0);
+            // BCD 8-bit. On the 65C02/65816 the N, V and Z flags reflect the
+            // decimal-adjusted result (not the binary sum, as on the NMOS 6502):
+            // N/Z come from the final BCD byte, C from the decimal carry, and V
+            // from the intermediate value before the high nibble's +6 adjust.
+            let lo_sum = (a & 0x0F) + (val & 0x0F) + c;
+            let lo_carry = lo_sum > 9;
+            let lo_res = if lo_carry {
+                (lo_sum + 6) & 0x0F
+            } else {
+                lo_sum
+            };
+            let hi_raw = (a >> 4) + (val >> 4) + lo_carry as u8;
+            // Intermediate (pre-high-adjust) value used only for the V flag.
+            let inter = (hi_raw << 4) | lo_res;
             self.flags
-                .set(Flags816::V, (!(a ^ val) & (a ^ bin as u8)) & 0x80 != 0);
-            self.flags.set(Flags816::Z, (bin & 0xFF) == 0);
+                .set(Flags816::V, (!(a ^ val) & (a ^ inter)) & 0x80 != 0);
+            let hi_carry = hi_raw > 9;
+            let hi_res = if hi_carry {
+                (hi_raw + 6) & 0x0F
+            } else {
+                hi_raw
+            };
+            let result = (hi_res << 4) | lo_res;
+            self.flags.set(Flags816::N, (result & 0x80) != 0);
+            self.flags.set(Flags816::Z, result == 0);
             self.flags.set(Flags816::C, hi_carry);
             self.c = (self.c & 0xFF00) | result as u16;
         } else {
@@ -124,27 +149,37 @@ impl Cpu65816 {
         let c = self.flags.contains(Flags816::C) as u16;
 
         if self.flags.contains(Flags816::D) {
-            // BCD 16-bit
+            // BCD 16-bit — see `adc8` for the flag semantics. Each nibble
+            // produces exactly one decimal carry (0/1); the previous code used
+            // `sum >> 4`, which yields 2 for invalid BCD digits and corrupts the
+            // carry chain. N/Z come from the final result, V from the pre-adjust
+            // top nibble.
             let mut result: u32 = 0;
             let mut carry = c as u32;
+            let mut inter: u32 = 0;
             for nibble in 0..4 {
                 let shift = nibble * 4;
                 let a_nib = ((a >> shift) & 0xF) as u32;
                 let v_nib = ((val >> shift) & 0xF) as u32;
-                let mut sum = a_nib + v_nib + carry;
-                if sum > 9 {
-                    sum += 6;
+                let sum = a_nib + v_nib + carry;
+                let nib_carry = sum > 9;
+                let res_nib = if nib_carry { (sum + 6) & 0xF } else { sum };
+                if nibble == 3 {
+                    // Intermediate for V: raw (pre-+6) top nibble over the low
+                    // 12 bits of the decimal result.
+                    inter = (result & 0x0FFF) | (sum << 12);
                 }
-                carry = sum >> 4;
-                result |= (sum & 0xF) << shift;
+                result |= res_nib << shift;
+                carry = nib_carry as u32;
             }
-            let bin = a as u32 + val as u32 + c as u32;
-            self.flags.set(Flags816::N, (bin & 0x8000) != 0);
+            let result = result as u16;
+            let inter = inter as u16;
             self.flags
-                .set(Flags816::V, (!(a ^ val) & (a ^ bin as u16)) & 0x8000 != 0);
-            self.flags.set(Flags816::Z, (bin & 0xFFFF) == 0);
+                .set(Flags816::V, (!(a ^ val) & (a ^ inter)) & 0x8000 != 0);
+            self.flags.set(Flags816::N, (result & 0x8000) != 0);
+            self.flags.set(Flags816::Z, result == 0);
             self.flags.set(Flags816::C, carry != 0);
-            self.c = result as u16;
+            self.c = result;
         } else {
             let sum = a as u32 + val as u32 + c as u32;
             let result = sum as u16;
@@ -172,13 +207,14 @@ impl Cpu65816 {
         let borrow = 1 - self.flags.contains(Flags816::C) as u8;
 
         if self.flags.contains(Flags816::D) {
+            // On the 65C02/65816 SBC, V follows the binary subtraction, but N
+            // and Z follow the decimal-adjusted result (verified against the
+            // SingleStepTests 65816 vectors).
             let bin = a as i16 - val as i16 - borrow as i16;
-            self.flags.set(Flags816::N, (bin & 0x80) != 0);
             self.flags.set(
                 Flags816::V,
                 ((a as i16 ^ bin) & 0x80 != 0) && ((a ^ val) & 0x80 != 0),
             );
-            self.flags.set(Flags816::Z, (bin & 0xFF) == 0);
 
             let mut lo = (a & 0x0F) as i8 - (val & 0x0F) as i8 - borrow as i8;
             let lo_borrow = lo < 0;
@@ -190,9 +226,11 @@ impl Cpu65816 {
             if hi_borrow {
                 hi -= 6;
             }
+            let result = (((hi & 0x0F) as u8) << 4) | ((lo & 0x0F) as u8);
+            self.flags.set(Flags816::N, (result & 0x80) != 0);
+            self.flags.set(Flags816::Z, result == 0);
             self.flags.set(Flags816::C, !hi_borrow);
-            self.c =
-                (self.c & 0xFF00) | (((hi & 0x0F) as u8) << 4) as u16 | ((lo & 0x0F) as u8) as u16;
+            self.c = (self.c & 0xFF00) | result as u16;
         } else {
             // Binary: SBC = ADC of complement
             let sum = a as u16 + (!val) as u16 + self.flags.contains(Flags816::C) as u16;
@@ -210,13 +248,13 @@ impl Cpu65816 {
         let c = self.flags.contains(Flags816::C) as u16;
 
         if self.flags.contains(Flags816::D) {
+            // See `sbc8`: V follows the binary subtraction, N and Z follow the
+            // decimal-adjusted result.
             let bin = a as i32 - val as i32 - (1 - c as i32);
-            self.flags.set(Flags816::N, (bin & 0x8000) != 0);
             self.flags.set(
                 Flags816::V,
                 ((a as i32 ^ bin) & 0x8000 != 0) && ((a ^ val) & 0x8000 != 0),
             );
-            self.flags.set(Flags816::Z, (bin & 0xFFFF) == 0);
 
             let mut result: u32 = 0;
             let mut borrow: i32 = 1 - c as i32;
@@ -233,8 +271,11 @@ impl Cpu65816 {
                 }
                 result |= (diff as u32 & 0xF) << shift;
             }
+            let result = result as u16;
+            self.flags.set(Flags816::N, (result & 0x8000) != 0);
+            self.flags.set(Flags816::Z, result == 0);
             self.flags.set(Flags816::C, borrow == 0);
-            self.c = result as u16;
+            self.c = result;
         } else {
             let sum = a as u32 + (!val) as u32 + c as u32;
             let result = sum as u16;
@@ -594,6 +635,7 @@ impl Cpu65816 {
             self.flags.insert(Flags816::I);
             // In emulation mode, D is cleared on interrupt (65C02 behavior)
             self.flags.remove(Flags816::D);
+            self.pbr = 0; // interrupt vectors are in bank 0
         } else {
             // Native mode: push PBR
             self.push8(bus, self.pbr);

@@ -30,18 +30,21 @@ pub trait Bus816 {
 
     /// Handle a WDM trap with the given signature byte.
     ///
-    /// Returns `Some((a, carry))` if handled — CPU updates A and C accordingly.
-    /// Returns `None` if unhandled (default).
+    /// Returns `Some((a, carry, xy))` if handled — the CPU updates A and the
+    /// carry flag, and, when `xy` is `Some((x, y))`, the X and Y registers (used
+    /// by SmartPort calls to report the transfer/parameter count). Returns
+    /// `None` if unhandled (default).
     ///
     /// Used to implement SmartPort firmware dispatch via WDM instructions
     /// embedded in replacement slot ROMs.
+    #[allow(clippy::type_complexity)]
     fn wdm_trap(
         &mut self,
         _signature: u8,
         _sp: u16,
         _pbr: u8,
         _emulation: bool,
-    ) -> Option<(u8, bool)> {
+    ) -> Option<(u8, bool, Option<(u16, u16)>)> {
         None
     }
 }

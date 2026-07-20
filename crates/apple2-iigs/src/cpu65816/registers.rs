@@ -228,6 +228,43 @@ impl Cpu65816 {
         (hi << 8) | lo
     }
 
+    // ── "Wide" stack access ─────────────────────────────────────────────
+    //
+    // The new 65C816 stack instructions (PEA, PEI, PER, PHD, PLD, JSL, RTL)
+    // use the full 16-bit stack pointer even in emulation mode — unlike the
+    // original 6502 instructions, they do NOT confine SP to page 1, so a push
+    // starting at `$0100` crosses into page 0. The high byte is forced back to
+    // `$01` at the instruction boundary (see `dispatch816::step`).
+
+    /// Push a byte using the full 16-bit stack pointer (no page-1 wrap).
+    #[inline]
+    pub fn push8_wide(&mut self, bus: &mut dyn Bus816, val: u8) {
+        bus.write(self.sp as u32, val, self.cycles);
+        self.sp = self.sp.wrapping_sub(1);
+    }
+
+    /// Pop a byte using the full 16-bit stack pointer (no page-1 wrap).
+    #[inline]
+    pub fn pop8_wide(&mut self, bus: &mut dyn Bus816) -> u8 {
+        self.sp = self.sp.wrapping_add(1);
+        bus.read(self.sp as u32, self.cycles)
+    }
+
+    /// Push a 16-bit value using the full 16-bit stack pointer.
+    #[inline]
+    pub fn push16_wide(&mut self, bus: &mut dyn Bus816, val: u16) {
+        self.push8_wide(bus, (val >> 8) as u8);
+        self.push8_wide(bus, val as u8);
+    }
+
+    /// Pop a 16-bit value using the full 16-bit stack pointer.
+    #[inline]
+    pub fn pop16_wide(&mut self, bus: &mut dyn Bus816) -> u16 {
+        let lo = self.pop8_wide(bus) as u16;
+        let hi = self.pop8_wide(bus) as u16;
+        (hi << 8) | lo
+    }
+
     // ── Address formation helpers ───────────────────────────────────────
 
     /// Form a 24-bit address from the data bank register and a 16-bit offset.

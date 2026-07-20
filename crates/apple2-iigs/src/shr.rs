@@ -81,18 +81,22 @@ pub fn render_shr(fast_ram_e1: &[u8], pixels: &mut [u32]) {
                 pixels[cur_start + x] = pixels[prev_start + x];
             }
         } else if is_640 {
-            // 640 mode: 4 pixels per byte (2 bits each), 4 colors per scanline
-            // Bits 7-6 = pixel 0, 5-4 = pixel 1, 3-2 = pixel 2, 1-0 = pixel 3
-            // Colors come from palette entries 0-3 only
+            // 640 mode: 4 pixels per byte (2 bits each). The four pixel
+            // positions use *different* quadrants of the 16-colour palette so
+            // that a full 16 colours are available across the line (the IIgs
+            // "dithered" 640 scheme):
+            //   pixel 0 (bits 7-6) → palette 8-11
+            //   pixel 1 (bits 5-4) → palette 12-15
+            //   pixel 2 (bits 3-2) → palette 0-3
+            //   pixel 3 (bits 1-0) → palette 4-7
             let out_start = out_y * SHR_WIDTH;
             for byte_idx in 0..160 {
                 let byte = fast_ram_e1[pixel_offset + byte_idx];
                 let x = byte_idx * 4;
-                // 640 mode: each pixel is displayed at native resolution (no doubling)
-                pixels[out_start + x] = palette[((byte >> 6) & 0x03) as usize];
-                pixels[out_start + x + 1] = palette[((byte >> 4) & 0x03) as usize];
+                pixels[out_start + x] = palette[8 + ((byte >> 6) & 0x03) as usize];
+                pixels[out_start + x + 1] = palette[12 + ((byte >> 4) & 0x03) as usize];
                 pixels[out_start + x + 2] = palette[((byte >> 2) & 0x03) as usize];
-                pixels[out_start + x + 3] = palette[(byte & 0x03) as usize];
+                pixels[out_start + x + 3] = palette[4 + (byte & 0x03) as usize];
             }
         } else {
             // 320 mode: 2 pixels per byte (4 bits each), 16 colors per scanline

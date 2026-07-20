@@ -493,10 +493,18 @@ impl IIgsBus {
             }
         }
 
-        // Compose the CPU IRQ line from the Mega II/VGC sources plus the ADB
-        // keyboard interrupt.
+        // Compose the CPU IRQ line from the Mega II/VGC sources, the ADB
+        // keyboard interrupt, and the Ensoniq DOC oscillator interrupt. The DOC
+        // interrupt is raised when an interrupt-enabled oscillator ends; the
+        // firmware/GS-OS sound handler acknowledges it by reading DOC register
+        // $E0 (which clears `ensoniq.irq_pending`), so this cannot storm. Many
+        // sound routines (including the GS/OS startup jingle) sequence off this
+        // interrupt and hang or loop the beep without it.
         let mut irq = self.mega2.irq_asserted();
         if self.adb.status & crate::adb::status::KEY_IRQ != 0 {
+            irq = true;
+        }
+        if self.ensoniq.irq_pending {
             irq = true;
         }
 
@@ -582,7 +590,13 @@ impl Bus816 for IIgsBus {
         }
     }
 
-    fn wdm_trap(&mut self, signature: u8, sp: u16, pbr: u8, emulation: bool) -> Option<(u8, bool)> {
+    fn wdm_trap(
+        &mut self,
+        signature: u8,
+        sp: u16,
+        pbr: u8,
+        emulation: bool,
+    ) -> Option<(u8, bool, Option<(u16, u16)>)> {
         match signature {
             SMARTPORT_TRAP_SIG => Some(self.smartport_trap(sp, pbr, emulation)),
             SMARTPORT_BOOT_SIG => Some(self.smartport_boot()),
@@ -631,19 +645,28 @@ fn install_smartport_stub(cache: &mut [u8]) {
     slot[0x07] = 0x00;
 
     // ── Boot loader ($C508) ─────────────────────────────────────────────
-    //   C508: 42 FD  WDM $FD         (read block 0 → $0800)
-    //   C50A: A2 50  LDX #$50        (unit: slot 5, drive 1 — for the boot block)
-    //   C50C: A0 00  LDY #$00
-    //   C50E: 4C 01 08  JMP $0801    (execute the loaded boot block)
+    // The boot trap reads block 0 → $0800 and returns carry set when no
+    // startup device is present. On failure we must NOT run the (unloaded)
+    // boot block — executing the $00 $00 there is `BRK`, which drops the ROM
+    // into the monitor. Instead we spin, retrying the read, mirroring real
+    // hardware's "Check Startup Device" wait: as soon as a disk is inserted
+    // the read succeeds and boot proceeds.
+    //   C508: 42 FD     WDM $FD        (read block 0 → $0800; carry = error)
+    //   C50A: B0 FC     BCS $C508      (no device → retry, i.e. wait for disk)
+    //   C50C: A2 50     LDX #$50       (unit: slot 5, drive 1 — for boot block)
+    //   C50E: A0 00     LDY #$00
+    //   C510: 4C 01 08  JMP $0801      (execute the loaded boot block)
     slot[0x08] = 0x42;
     slot[0x09] = SMARTPORT_BOOT_SIG;
-    slot[0x0A] = 0xA2;
-    slot[0x0B] = 0x50;
-    slot[0x0C] = 0xA0;
-    slot[0x0D] = 0x00;
-    slot[0x0E] = 0x4C;
-    slot[0x0F] = 0x01;
-    slot[0x10] = 0x08;
+    slot[0x0A] = 0xB0;
+    slot[0x0B] = 0xFC;
+    slot[0x0C] = 0xA2;
+    slot[0x0D] = 0x50;
+    slot[0x0E] = 0xA0;
+    slot[0x0F] = 0x00;
+    slot[0x10] = 0x4C;
+    slot[0x11] = 0x01;
+    slot[0x12] = 0x08;
 
     // ── ProDOS block entry ($C523) + SmartPort entry ($C526) ────────────
     // The ProDOS block-driver entry is at $Cn00 + [$CnFF]; the SmartPort
@@ -676,7 +699,12 @@ impl IIgsBus {
     ///
     /// Returns (accumulator = error code, carry_flag = error).
     /// Advances the pushed return address past the 3 inline parameter bytes.
-    pub fn smartport_trap(&mut self, sp: u16, pbr: u8, emulation: bool) -> (u8, bool) {
+    pub fn smartport_trap(
+        &mut self,
+        sp: u16,
+        pbr: u8,
+        emulation: bool,
+    ) -> (u8, bool, Option<(u16, u16)>) {
         let stack_wrap = |s: u16, off: u16| -> u32 {
             if emulation {
                 0x0100 | (s.wrapping_add(off) & 0xFF) as u32
@@ -692,32 +720,64 @@ impl IIgsBus {
         let ret_minus_1 = ((ret_hi as u16) << 8) | ret_lo as u16;
         let inline_addr = ret_minus_1.wrapping_add(1);
 
+        // The inline call sequence after `JSR entry` is:
+        //   DFB cmd ; DW cmd_list          (standard)
+        //   DFB cmd|$40 ; ADRL cmd_list     (extended, 24-bit cmd_list)
+        // Bit 6 of `cmd` marks an extended (GS/OS) call — see KEGS `do_c70d`.
         let pbr_base = (pbr as u32) << 16;
         let cmd = self.read_raw(pbr_base | inline_addr as u32);
-        let cmdlist_lo = self.read_raw(pbr_base | (inline_addr.wrapping_add(1)) as u32);
-        let cmdlist_hi = self.read_raw(pbr_base | (inline_addr.wrapping_add(2)) as u32);
-        let cmdlist_ptr = ((cmdlist_hi as u16) << 8) | cmdlist_lo as u16;
+        let ext = cmd & 0x40 != 0;
+        let cl_lo = self.read_raw(pbr_base | (inline_addr.wrapping_add(1)) as u32) as u32;
+        let cl_mid = self.read_raw(pbr_base | (inline_addr.wrapping_add(2)) as u32) as u32;
+        let (cmdlist, inline_len) = if ext {
+            let cl_hi = self.read_raw(pbr_base | (inline_addr.wrapping_add(3)) as u32) as u32;
+            ((cl_hi << 16) | (cl_mid << 8) | cl_lo, 4u16)
+        } else {
+            // Standard: 16-bit cmd_list in the caller's program bank.
+            (pbr_base | (cl_mid << 8) | cl_lo, 3u16)
+        };
 
-        // Advance pushed return address past the 3 inline bytes
-        let new_ret = ret_minus_1.wrapping_add(3);
+        // Advance the pushed return address past the inline parameter bytes.
+        let new_ret = ret_minus_1.wrapping_add(inline_len);
         self.write(ret_lo_addr, new_ret as u8, 0);
         self.write(ret_hi_addr, (new_ret >> 8) as u8, 0);
 
-        let error = self.dispatch_smartport_command(cmd, cmdlist_ptr, pbr);
-        (error, error != 0)
+        // On return, SmartPort reports the transfer/parameter count in X (low)
+        // and Y (high) — GS/OS's device manager checks this.
+        let (error, count) = self.dispatch_smartport_command(cmd, cmdlist, ext);
+        let xy = (count & 0xFF, (count >> 8) & 0xFF);
+        (error, error != 0, Some(xy))
     }
 
     /// Boot trap ($C508): read block 0 of the first SmartPort device into
     /// `$00/0800` so the following `JMP $0801` runs the ProDOS/GS-OS boot block.
-    fn smartport_boot(&mut self) -> (u8, bool) {
-        let err = self.smartport_read_block(1, 0x0800, 0, 0x00);
-        (err, err != 0)
+    fn smartport_boot(&mut self) -> (u8, bool, Option<(u16, u16)>) {
+        // Our SmartPort firmware lives at slot 5.
+        const SLOT: u32 = 5;
+        let err = self.smartport_read_block(1, 0x0800, 0);
+        if err == 0 {
+            // Set up the boot-device parameters exactly as KEGS `do_c700`, so
+            // the boot block and GS/OS's device manager know where they booted
+            // from. Without these, GS/OS renders the loader but can never bind
+            // the boot volume and stalls. `$7F8` = boot slot; the ProDOS block
+            // parameters at `$42-$47` describe the "read block 0 → $0800 from
+            // unit slot<<4" that just happened.
+            self.write(0x07F8, SLOT as u8, 0);
+            self.write(0x42, 0x01, 0); // command = READ
+            self.write(0x43, (SLOT << 4) as u8, 0); // unit ($50)
+            self.write(0x44, 0x00, 0); // buffer lo
+            self.write(0x45, 0x08, 0); // buffer hi ($0800)
+            self.write(0x46, 0x00, 0); // block lo
+            self.write(0x47, 0x00, 0); // block hi
+        }
+        // KEGS `do_c700` returns X = slot<<4 (the boot unit).
+        (err, err != 0, Some(((SLOT << 4) as u16, 0)))
     }
 
     /// ProDOS 8 block-driver trap ($C523). Parameters come from zero page:
     /// `$42` command, `$43` unit (`DSSS0000`), `$44-45` buffer, `$46-47` block.
     /// Returns (A = error code, carry = error).
-    fn smartport_prodos(&mut self) -> (u8, bool) {
+    fn smartport_prodos(&mut self) -> (u8, bool, Option<(u16, u16)>) {
         let cmd = self.read_raw(0x42);
         let unit = self.read_raw(0x43);
         let buf = (self.read_raw(0x44) as u16) | ((self.read_raw(0x45) as u16) << 8);
@@ -734,134 +794,140 @@ impl IIgsBus {
                     0x28
                 }
             }
-            0x01 => self.smartport_read_block(sp_unit, buf, block, 0x00),
-            0x02 => self.smartport_write_block(sp_unit, buf, block, 0x00),
+            0x01 => self.smartport_read_block(sp_unit, buf as u32, block),
+            0x02 => self.smartport_write_block(sp_unit, buf as u32, block),
             _ => 0x00, // FORMAT/other — succeed
         };
-        (err, err != 0)
+        // ProDOS block driver leaves X/Y unchanged.
+        (err, err != 0, None)
     }
 
-    /// Dispatch a SmartPort MLI command. Returns error code (0 = success).
-    fn dispatch_smartport_command(&mut self, cmd: u8, cmdlist_ptr: u16, pbr: u8) -> u8 {
-        let pbr_base = (pbr as u32) << 16;
-        let read_cmd_byte = |bus: &Self, offset: u16| -> u8 {
-            bus.read_raw(pbr_base | cmdlist_ptr.wrapping_add(offset) as u32)
-        };
-
-        match cmd {
+    /// Dispatch a SmartPort command. Faithful port of KEGS `do_c70d`: the low
+    /// 6 bits of `cmd` select the operation, bit 6 (`ext`) marks an extended
+    /// (GS/OS) call with 24-bit addresses. `cmdlist` is the full 24-bit address
+    /// of the parameter list. Returns `(error_code, transfer_count)`; the count
+    /// goes back to the caller in X/Y (0 = success).
+    fn dispatch_smartport_command(&mut self, cmd: u8, cmdlist: u32, ext: bool) -> (u8, u16) {
+        let rd = |bus: &Self, off: u32| bus.read_raw(cmdlist.wrapping_add(off) & 0xFF_FFFF);
+        let unit = rd(self, 1);
+        match cmd & 0x3F {
             0x00 => {
-                // STATUS
-                let unit = read_cmd_byte(self, 1);
-                let list_lo = read_cmd_byte(self, 2);
-                let list_hi = read_cmd_byte(self, 3);
-                let status_code = read_cmd_byte(self, 4);
-                let list_ptr = ((list_hi as u16) << 8) | list_lo as u16;
-                self.smartport_status(unit, status_code, list_ptr, pbr)
+                // STATUS: status-list pointer (16-bit standard / 24-bit
+                // extended) then the control code (KEGS: cmd_list + 4 + ext).
+                let ptr = if ext {
+                    (rd(self, 2) as u32)
+                        | ((rd(self, 3) as u32) << 8)
+                        | ((rd(self, 4) as u32) << 16)
+                } else {
+                    (rd(self, 2) as u32) | ((rd(self, 3) as u32) << 8)
+                };
+                let ctl = rd(self, if ext { 6 } else { 4 });
+                self.smartport_status(unit, ctl, ptr & 0xFF_FFFF, ext)
             }
             0x01 => {
-                // READ BLOCK
-                let unit = read_cmd_byte(self, 1);
-                let buf_lo = read_cmd_byte(self, 2);
-                let buf_hi = read_cmd_byte(self, 3);
-                let blk_lo = read_cmd_byte(self, 4);
-                let blk_hi = read_cmd_byte(self, 5);
-                let blk_bnk = read_cmd_byte(self, 6);
-                let buf = ((buf_hi as u16) << 8) | buf_lo as u16;
-                let block = (blk_bnk as u32) << 16 | (blk_hi as u32) << 8 | blk_lo as u32;
-                self.smartport_read_block(unit, buf, block, pbr)
+                let (buf, block) = self.sp_buf_block(cmdlist, ext);
+                let err = self.smartport_read_block(unit, buf, block);
+                (err, if err == 0 { 512 } else { 0 })
             }
             0x02 => {
-                // WRITE BLOCK
-                let unit = read_cmd_byte(self, 1);
-                let buf_lo = read_cmd_byte(self, 2);
-                let buf_hi = read_cmd_byte(self, 3);
-                let blk_lo = read_cmd_byte(self, 4);
-                let blk_hi = read_cmd_byte(self, 5);
-                let blk_bnk = read_cmd_byte(self, 6);
-                let buf = ((buf_hi as u16) << 8) | buf_lo as u16;
-                let block = (blk_bnk as u32) << 16 | (blk_hi as u32) << 8 | blk_lo as u32;
-                self.smartport_write_block(unit, buf, block, pbr)
+                let (buf, block) = self.sp_buf_block(cmdlist, ext);
+                let err = self.smartport_write_block(unit, buf, block);
+                (err, if err == 0 { 512 } else { 0 })
             }
-            0x03..=0x07 => 0x00, // FORMAT, CONTROL, INIT, OPEN, CLOSE = success
-            _ => 0x21,           // BAD CMD
+            // FORMAT / CONTROL / INIT / OPEN / CLOSE / READ/WRITE-char etc.
+            0x03..=0x1F => (0x00, 0),
+            _ => (0x21, 0), // BADCMD
         }
     }
 
-    fn smartport_status(&mut self, unit: u8, status_code: u8, list_ptr: u16, pbr: u8) -> u8 {
-        let pbr_base = (pbr as u32) << 16;
+    /// Extract the (buffer, block) parameters for READ/WRITE from the command
+    /// list. Standard: 2-byte buffer + 3-byte block. Extended: 4-byte buffer +
+    /// 4-byte block (KEGS `do_c70d` read/write paths).
+    fn sp_buf_block(&self, cmdlist: u32, ext: bool) -> (u32, u32) {
+        let rd = |off: u32| self.read_raw(cmdlist.wrapping_add(off) & 0xFF_FFFF) as u32;
+        if ext {
+            let buf = rd(2) | (rd(3) << 8) | (rd(4) << 16) | (rd(5) << 24);
+            let block = rd(6) | (rd(7) << 8) | (rd(8) << 16) | (rd(9) << 24);
+            (buf & 0xFF_FFFF, block)
+        } else {
+            let buf = rd(2) | (rd(3) << 8);
+            let block = rd(4) | (rd(5) << 8) | (rd(6) << 16);
+            (buf, block)
+        }
+    }
 
-        if unit == 0 {
-            let device_count = (0..4).filter(|&i| self.smartport.has_disk(i)).count() as u8;
-            self.write(pbr_base | list_ptr as u32, device_count, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(1) as u32, 0xFF, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(2) as u32, 0x00, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(3) as u32, 0x00, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(4) as u32, 0x00, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(5) as u32, 0x01, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(6) as u32, 0x0F, 0);
-            self.write(pbr_base | list_ptr.wrapping_add(7) as u32, 0x00, 0);
-            return 0x00;
+    /// SmartPort STATUS. `ptr` is the full 24-bit status-list address. Returns
+    /// `(error_code, byte_count)` — the byte count is reported in X/Y.
+    fn smartport_status(&mut self, unit: u8, ctl_code: u8, ptr: u32, ext: bool) -> (u8, u16) {
+        let put =
+            |bus: &mut Self, off: u32, v: u8| bus.write(ptr.wrapping_add(off) & 0xFF_FFFF, v, 0);
+
+        // Unit 0, code 0: SmartPort bus / driver status (KEGS smartport.c:191).
+        if unit == 0 && ctl_code == 0 {
+            let count = (0..4).filter(|&i| self.smartport.has_disk(i)).count() as u8;
+            put(self, 0, count); // number of connected devices
+            put(self, 1, 0xFF); // interrupt status
+            put(self, 2, 0x4B); // vendor id ($004B)
+            put(self, 3, 0x00);
+            put(self, 4, 0x00); // version ($1000)
+            put(self, 5, 0x10);
+            put(self, 6, 0x00);
+            put(self, 7, 0x00);
+            return (0x00, 8);
         }
 
         let device = unit as usize - 1;
-        if device >= 4 || !self.smartport.has_disk(device) {
-            return 0x28; // NO DEVICE
-        }
-        let blocks = self.smartport.device_blocks(device);
+        let present = unit >= 1 && device < 4 && self.smartport.has_disk(device);
+        // Online/readable/writable/format bits, or $80 (offline) — NOT an error
+        // for an empty-but-valid unit, matching KEGS.
+        let stat_val = if present { 0xF8 } else { 0x80 };
+        let blocks = if present {
+            self.smartport.device_blocks(device)
+        } else {
+            0
+        };
 
-        match status_code {
+        match ctl_code {
             0x00 => {
-                self.write(pbr_base | list_ptr as u32, 0xF8, 0);
-                self.write(pbr_base | list_ptr.wrapping_add(1) as u32, blocks as u8, 0);
-                self.write(
-                    pbr_base | list_ptr.wrapping_add(2) as u32,
-                    (blocks >> 8) as u8,
-                    0,
-                );
-                self.write(
-                    pbr_base | list_ptr.wrapping_add(3) as u32,
-                    (blocks >> 16) as u8,
-                    0,
-                );
-                0x00
+                put(self, 0, stat_val);
+                put(self, 1, blocks as u8);
+                put(self, 2, (blocks >> 8) as u8);
+                put(self, 3, (blocks >> 16) as u8);
+                if ext {
+                    put(self, 4, (blocks >> 24) as u8);
+                }
+                (0x00, if ext { 5 } else { 4 })
             }
             0x03 => {
-                // Device info block
-                self.write(pbr_base | list_ptr as u32, 0xF8, 0);
-                self.write(pbr_base | list_ptr.wrapping_add(1) as u32, blocks as u8, 0);
-                self.write(
-                    pbr_base | list_ptr.wrapping_add(2) as u32,
-                    (blocks >> 8) as u8,
-                    0,
-                );
-                self.write(
-                    pbr_base | list_ptr.wrapping_add(3) as u32,
-                    (blocks >> 16) as u8,
-                    0,
-                );
-                self.write(pbr_base | list_ptr.wrapping_add(4) as u32, 0x04, 0);
-                let name = b"DISK";
+                // Device Information Block.
+                put(self, 0, stat_val);
+                put(self, 1, blocks as u8);
+                put(self, 2, (blocks >> 8) as u8);
+                put(self, 3, (blocks >> 16) as u8);
+                let base = if ext {
+                    put(self, 4, (blocks >> 24) as u8);
+                    5
+                } else {
+                    4
+                };
+                put(self, base, 4); // ID-string length
+                let name = b"DISK            "; // 16 bytes, space-padded
                 for (i, &b) in name.iter().enumerate() {
-                    self.write(pbr_base | list_ptr.wrapping_add(5 + i as u16) as u32, b, 0);
+                    put(self, base + 1 + i as u32, b);
                 }
-                for i in name.len()..16 {
-                    self.write(
-                        pbr_base | list_ptr.wrapping_add(5 + i as u16) as u32,
-                        b' ',
-                        0,
-                    );
-                }
-                self.write(pbr_base | list_ptr.wrapping_add(21) as u32, 0x02, 0);
-                self.write(pbr_base | list_ptr.wrapping_add(22) as u32, 0x20, 0);
-                self.write(pbr_base | list_ptr.wrapping_add(23) as u32, 0x01, 0);
-                self.write(pbr_base | list_ptr.wrapping_add(24) as u32, 0x00, 0);
-                0x00
+                // Device type/subtype word ($0002 = block device) and version.
+                put(self, base + 17, 0x02);
+                put(self, base + 18, 0xC0);
+                put(self, base + 19, 0x00);
+                put(self, base + 20, 0x00);
+                (if present { 0x00 } else { 0x28 }, if ext { 26 } else { 25 })
             }
-            _ => 0x21,
+            _ => (0x21, 0),
         }
     }
 
-    fn smartport_read_block(&mut self, unit: u8, buf: u16, block: u32, pbr: u8) -> u8 {
+    /// SmartPort READBLOCK. `buf` is a full 24-bit destination address.
+    fn smartport_read_block(&mut self, unit: u8, buf: u32, block: u32) -> u8 {
         if unit == 0 || unit > 4 {
             return 0x28;
         }
@@ -872,14 +938,14 @@ impl IIgsBus {
         let Some(data) = self.smartport.read_block(device, block) else {
             return 0x2D;
         };
-        let pbr_base = (pbr as u32) << 16;
         for (i, &b) in data.iter().enumerate() {
-            self.write(pbr_base | buf.wrapping_add(i as u16) as u32, b, 0);
+            self.write(buf.wrapping_add(i as u32) & 0xFF_FFFF, b, 0);
         }
         0x00
     }
 
-    fn smartport_write_block(&mut self, unit: u8, buf: u16, block: u32, pbr: u8) -> u8 {
+    /// SmartPort WRITEBLOCK. `buf` is a full 24-bit source address.
+    fn smartport_write_block(&mut self, unit: u8, buf: u32, block: u32) -> u8 {
         if unit == 0 || unit > 4 {
             return 0x28;
         }
@@ -887,10 +953,9 @@ impl IIgsBus {
         if !self.smartport.has_disk(device) {
             return 0x28;
         }
-        let pbr_base = (pbr as u32) << 16;
         let mut data = vec![0u8; 512];
         for (i, byte) in data.iter_mut().enumerate() {
-            *byte = self.read_raw(pbr_base | buf.wrapping_add(i as u16) as u32);
+            *byte = self.read_raw(buf.wrapping_add(i as u32) & 0xFF_FFFF);
         }
         if self.smartport.write_block(device, block, &data) {
             0x00

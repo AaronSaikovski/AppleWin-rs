@@ -17,8 +17,9 @@
 //! - $80-$9F: Waveform pointer
 //! - $A0-$BF: Control (mode, halt, interrupt enable)
 //! - $C0-$DF: Table size (resolution of wavetable)
-//! - $E0:     Oscillator enable count (number of active oscillators)
-//! - $E1:     A/D converter (not used in IIgs)
+//! - $E0:     Oscillator interrupt register (which oscillator raised an IRQ)
+//! - $E1:     Oscillator enable register (number of active oscillators - 1) << 1
+//! - $E2:     A/D converter (reads 0x80 on the IIgs)
 
 use serde::{Deserialize, Serialize};
 
@@ -55,11 +56,11 @@ pub struct Ensoniq {
     /// Current GLU address pointer (for register/RAM access).
     pub address: u16,
 
-    /// Sound control register ($C03C).
-    /// Bit 7: 1 = access sound RAM, 0 = access DOC registers
-    /// Bit 6: auto-increment address
-    /// Bit 5: busy flag (read-only)
-    /// Bits 4-0: reserved
+    /// Sound control register ($C03C), Sound GLU layout (per KEGS `doc.c`):
+    /// - Bit 7: busy flag (read-only)
+    /// - Bit 6: 1 = access sound RAM, 0 = access DOC registers
+    /// - Bit 5: auto-increment address after each data access
+    /// - Bits 4-0: master DOC output volume (only bits 3-0 used)
     pub control: u8,
 
     /// Oscillator accumulator positions (24-bit fractional, per oscillator).
@@ -79,8 +80,13 @@ impl Default for Ensoniq {
         for i in 0..32 {
             regs[0xA0 + i] = CTRL_HALT;
         }
-        // 1 oscillator enabled by default (minimum)
-        regs[0xE0] = 0x00;
+        // DOC oscillator-interrupt register ($E0): 0xFF means "no interrupt
+        // pending" (bit 7 set). A pending interrupt is `osc << 1` with bit 7
+        // clear. Defaulting this to 0x00 makes the ROM's IRQ dispatcher read a
+        // phantom oscillator-0 interrupt it cannot claim, producing the fatal
+        // "Unclaimed Sound Interrupt" that freezes boot. (Matches KEGS
+        // `doc_reg_e0 = 0xff`.)
+        regs[0xE0] = 0xFF;
 
         Self {
             regs,
@@ -99,19 +105,28 @@ impl Default for Ensoniq {
 }
 
 impl Ensoniq {
+    /// `$C03C` bit 6: 1 = access sound RAM, 0 = access DOC registers.
+    const CTL_RAM_SELECT: u8 = 0x40;
+    /// `$C03C` bit 5: auto-increment the address pointer after each data access.
+    const CTL_AUTO_INC: u8 = 0x20;
+
     /// Write to sound control register ($C03C).
+    ///
+    /// The full byte is retained: bits 3-0 are the master DOC output volume,
+    /// bit 6 selects RAM vs. registers, bit 5 enables auto-increment.
     pub fn write_control(&mut self, val: u8) {
-        self.control = val & 0xE0; // only bits 5-7 are meaningful
+        self.control = val;
     }
 
-    /// Read sound control register ($C03C).
+    /// Read sound control register ($C03C). Returns the full register (KEGS
+    /// `doc_read_c03c` returns `g_doc_sound_ctl` unmodified).
     pub fn read_control(&self) -> u8 {
-        self.control & 0x60 // busy flag + auto-increment, clear bit 7 on read
+        self.control
     }
 
     /// Write to sound data register ($C03D).
     pub fn write_data(&mut self, val: u8) {
-        if self.control & 0x80 != 0 {
+        if self.control & Self::CTL_RAM_SELECT != 0 {
             // Access sound RAM
             let addr = self.address as usize;
             if addr < self.sound_ram.len() {
@@ -131,15 +146,15 @@ impl Ensoniq {
             }
         }
 
-        // Auto-increment address if bit 6 is set
-        if self.control & 0x40 != 0 {
+        // Auto-increment address if enabled (bit 5).
+        if self.control & Self::CTL_AUTO_INC != 0 {
             self.address = self.address.wrapping_add(1);
         }
     }
 
     /// Read from sound data register ($C03D).
     pub fn read_data(&mut self) -> u8 {
-        let val = if self.control & 0x80 != 0 {
+        let val = if self.control & Self::CTL_RAM_SELECT != 0 {
             // Access sound RAM
             let addr = self.address as usize;
             if addr < self.sound_ram.len() {
@@ -150,10 +165,27 @@ impl Ensoniq {
         } else {
             // Access DOC registers
             let reg = (self.address & 0xFF) as usize;
-            self.regs[reg]
+            match reg {
+                // $E0: oscillator-interrupt register. Return the pending value;
+                // reading it clears the interrupt (bit 7 clear = pending). Per
+                // KEGS `doc_read_c03d` / `doc_remove_sound_irq`.
+                0xE0 => {
+                    let v = self.regs[0xE0];
+                    if v & 0x80 == 0 {
+                        self.regs[0xE0] = 0xFF;
+                        self.irq_pending = false;
+                    }
+                    v
+                }
+                // $E1: oscillator-enable register reads back as (n-1) << 1.
+                0xE1 => (self.enabled_count.saturating_sub(1)) << 1,
+                // $E2: A/D converter — always reads 0x80 on the IIgs DOC.
+                0xE2 => 0x80,
+                _ => self.regs[reg],
+            }
         };
 
-        if self.control & 0x40 != 0 {
+        if self.control & Self::CTL_AUTO_INC != 0 {
             self.address = self.address.wrapping_add(1);
         }
 
@@ -189,18 +221,28 @@ impl Ensoniq {
     /// oscillators loop when they reach the end without a zero byte; one-shot and
     /// sync oscillators halt; swap-mode oscillators halt and start their partner.
     /// An end-of-pass raises an IRQ when the oscillator's interrupt-enable bit set.
-    fn end_oscillator(&mut self, osc: usize, hit_zero: bool) {
+    fn end_oscillator(&mut self, osc: usize, hit_zero: bool, size_mask: u32) {
         let ctrl = self.regs[0xA0 + osc];
         if ctrl & CTRL_IE != 0 {
             self.irq_pending = true;
+            // Record the interrupting oscillator in the $E0 register (bit 7
+            // clear = pending, bits 5-1 = oscillator number) so the ROM's sound
+            // handler can identify and claim it. Only latch if none is already
+            // pending, matching KEGS' single-level `doc_reg_e0` behaviour.
+            if self.regs[0xE0] & 0x80 != 0 {
+                self.regs[0xE0] = (osc as u8) << 1;
+            }
         }
         let mode = ctrl & CTRL_MODE_MASK;
         let other = osc ^ 1;
         let omode = self.regs[0xA0 + other] & CTRL_MODE_MASK;
 
         if mode == MODE_FREE_RUN && !hit_zero {
-            // Free-running, reached the table end without a zero byte — loop.
-            self.accum[osc] = 0;
+            // Free-running, reached the table end without a zero byte — loop by
+            // wrapping the phase accumulator within the table (preserving the
+            // fractional phase), not resetting to 0. Resetting produced a phase
+            // discontinuity — an audible click — at every loop boundary.
+            self.accum[osc] &= size_mask;
         } else if mode == MODE_SWAP || omode == MODE_SWAP {
             // Swap: halt this oscillator and (re)start the partner from the top.
             self.regs[0xA0 + osc] |= CTRL_HALT;
@@ -232,6 +274,11 @@ impl Ensoniq {
         let num_osc = (self.enabled_count as usize).clamp(1, 32);
         // DOC oscillator update rate divides the master clock by (osc_en + 2).
         let rate_scale = DOC_CLOCK_HZ / sample_rate as f64 / (num_osc as f64 + 2.0);
+
+        // Master DOC output volume ($C03C bits 3-0), scaled 0..1. KEGS multiplies
+        // every oscillator sample by `g_doc_vol`; without this the sound GLU
+        // master volume control is inert.
+        let master_vol = (self.control & 0x0F) as f32 / 15.0;
 
         for sample in out.iter_mut() {
             let mut mix: f32 = 0.0;
@@ -273,7 +320,8 @@ impl Ensoniq {
 
                 if raw == 0 || end {
                     // A zero byte is the DOC's universal wavetable terminator.
-                    self.end_oscillator(osc, raw == 0);
+                    let size_mask = (size << Self::SND_PTR_SHIFT).wrapping_sub(1);
+                    self.end_oscillator(osc, raw == 0, size_mask);
                     if raw == 0 {
                         // The zero byte itself is not emitted.
                         continue;
@@ -286,7 +334,7 @@ impl Ensoniq {
             }
 
             *sample = if active_count > 0 {
-                mix / (active_count as f32).sqrt()
+                (mix / (active_count as f32).sqrt()) * master_vol
             } else {
                 0.0
             };
@@ -308,6 +356,55 @@ mod tests {
         d.regs[0xA0] = mode; // control: mode, not halted
         d.accum[0] = 0;
         d
+    }
+
+    #[test]
+    fn osc_int_register_defaults_to_no_pending() {
+        // $E0 must read 0xFF (bit 7 set = no interrupt) at power-on, otherwise
+        // the ROM's IRQ dispatcher sees a phantom osc-0 interrupt and prints
+        // the fatal "Unclaimed Sound Interrupt".
+        let mut d = Ensoniq::default();
+        d.write_control(0x00); // register access, no auto-increment
+        d.write_addr_lo(0xE0);
+        assert_eq!(d.read_data(), 0xFF);
+    }
+
+    #[test]
+    fn osc_int_register_latches_and_clears_on_read() {
+        // An interrupt-enabled oscillator that ends latches its number into $E0
+        // (bit 7 clear), and reading $E0 clears the pending interrupt back to
+        // 0xFF so the ROM can claim exactly one interrupt.
+        let mut d = osc0(MODE_ONE_SHOT);
+        d.regs[0xA0] = MODE_ONE_SHOT | CTRL_IE; // enable interrupt, not halted
+        d.sound_ram[5] = 0x00; // zero terminator → one-shot ends
+        let mut buf = [0.0f32; 64];
+        d.fill_audio(&mut buf, 44_100, 0);
+
+        d.write_control(0x00);
+        d.write_addr_lo(0xE0);
+        let pending = d.read_data();
+        assert_eq!(
+            pending & 0x80,
+            0,
+            "an interrupt must be pending (bit 7 clear)"
+        );
+        assert_eq!(pending >> 1, 0, "osc 0 must be the interrupting oscillator");
+
+        d.write_addr_lo(0xE0);
+        assert_eq!(d.read_data(), 0xFF, "reading $E0 must clear the interrupt");
+    }
+
+    #[test]
+    fn osc_enable_register_reads_back() {
+        // $E1 reads back as (num_osc_en - 1) << 1; $E2 (A/D) reads 0x80.
+        let mut d = Ensoniq::default();
+        d.write_control(0x00);
+        d.write_addr_lo(0xE1);
+        d.write_data(0x0A); // (val>>1 & 0x1F)+1 = 6 oscillators
+        d.write_addr_lo(0xE1);
+        assert_eq!(d.read_data(), (6 - 1) << 1);
+        d.write_addr_lo(0xE2);
+        assert_eq!(d.read_data(), 0x80);
     }
 
     #[test]

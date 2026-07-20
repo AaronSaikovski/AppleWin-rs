@@ -45,6 +45,19 @@ impl Cpu65816 {
         (hi << 8) | lo
     }
 
+    /// Read a 16-bit little-endian value whose two bytes wrap **within** the
+    /// 16-bit offset of a fixed bank (the high address byte does not increment).
+    /// The indirect `JMP`/`JSR` pointer fetches use this: a pointer at offset
+    /// `$FFFF` reads its high byte from offset `$0000` of the *same* bank, not
+    /// the next bank.
+    #[inline]
+    pub fn read16_bankwrap(&self, bus: &mut dyn Bus816, bank: u32, offset: u16) -> u16 {
+        let base = bank & 0xFF_0000;
+        let lo = bus.read(base | offset as u32, self.cycles) as u16;
+        let hi = bus.read(base | offset.wrapping_add(1) as u32, self.cycles) as u16;
+        (hi << 8) | lo
+    }
+
     /// Read a 24-bit value from a 24-bit address (little-endian).
     #[inline]
     pub fn read24(&self, bus: &mut dyn Bus816, addr: u32) -> u32 {
@@ -89,7 +102,9 @@ impl Cpu65816 {
         let offset = self.fetch8(bus) as u16;
         let x = self.get_x();
         if self.emulation && (self.dp & 0xFF) == 0 {
-            (self.dp & 0xFF00).wrapping_add(offset).wrapping_add(x) as u32 & 0xFF
+            // Emulation, DL=0: the index wraps within the direct page — the low
+            // byte is `(offset + X) mod 256`, the high byte stays `DH`.
+            ((self.dp & 0xFF00) | (offset.wrapping_add(x) & 0xFF)) as u32
         } else {
             self.dp.wrapping_add(offset).wrapping_add(x) as u32
         }
@@ -101,10 +116,42 @@ impl Cpu65816 {
         let offset = self.fetch8(bus) as u16;
         let y = self.get_y();
         if self.emulation && (self.dp & 0xFF) == 0 {
-            (self.dp & 0xFF00).wrapping_add(offset).wrapping_add(y) as u32 & 0xFF
+            // Emulation, DL=0: index wraps within the direct page (see addr_dp_x).
+            ((self.dp & 0xFF00) | (offset.wrapping_add(y) & 0xFF)) as u32
         } else {
             self.dp.wrapping_add(offset).wrapping_add(y) as u32
         }
+    }
+
+    /// Address of the byte following `dp_addr` within the direct page. The
+    /// direct-page pointer bytes always live in bank 0; the offset wraps at the
+    /// 16-bit boundary, except in emulation mode with `DL = 0`, where the
+    /// pointer wraps within the zero page (`$00xx`), matching the 65C02.
+    #[inline]
+    fn dp_next(&self, dp_addr: u32) -> u32 {
+        if self.emulation && (self.dp & 0xFF) == 0 {
+            (dp_addr & 0xFF00) | (dp_addr.wrapping_add(1) & 0xFF)
+        } else {
+            dp_addr.wrapping_add(1) & 0xFFFF
+        }
+    }
+
+    /// Read the 16-bit direct-page indirect pointer at `dp_addr` (bank 0).
+    #[inline]
+    fn read_dp_ptr16(&self, bus: &mut dyn Bus816, dp_addr: u32) -> u16 {
+        let lo = bus.read(dp_addr & 0xFFFF, self.cycles) as u16;
+        let hi = bus.read(self.dp_next(dp_addr), self.cycles) as u16;
+        (hi << 8) | lo
+    }
+
+    /// Read the 24-bit direct-page indirect long pointer at `dp_addr` (bank 0).
+    #[inline]
+    fn read_dp_ptr24(&self, bus: &mut dyn Bus816, dp_addr: u32) -> u32 {
+        let b0 = bus.read(dp_addr & 0xFFFF, self.cycles) as u32;
+        let a1 = self.dp_next(dp_addr);
+        let b1 = bus.read(a1, self.cycles) as u32;
+        let b2 = bus.read(self.dp_next(a1), self.cycles) as u32;
+        (b2 << 16) | (b1 << 8) | b0
     }
 
     /// (Direct Page): indirect through dp.
@@ -112,7 +159,7 @@ impl Cpu65816 {
     #[inline]
     pub fn addr_dp_ind(&mut self, bus: &mut dyn Bus816) -> u32 {
         let dp_addr = self.addr_dp(bus);
-        let ptr = self.read16(bus, dp_addr);
+        let ptr = self.read_dp_ptr16(bus, dp_addr);
         self.data_addr(ptr)
     }
 
@@ -121,7 +168,7 @@ impl Cpu65816 {
     #[inline]
     pub fn addr_dp_ind_x(&mut self, bus: &mut dyn Bus816) -> u32 {
         let dp_addr = self.addr_dp_x(bus);
-        let ptr = self.read16(bus, dp_addr);
+        let ptr = self.read_dp_ptr16(bus, dp_addr);
         self.data_addr(ptr)
     }
 
@@ -131,7 +178,7 @@ impl Cpu65816 {
     #[inline]
     pub fn addr_dp_ind_y(&mut self, bus: &mut dyn Bus816) -> (u32, bool) {
         let dp_addr = self.addr_dp(bus);
-        let ptr = self.read16(bus, dp_addr);
+        let ptr = self.read_dp_ptr16(bus, dp_addr);
         let base = self.data_addr(ptr);
         let y = self.get_y() as u32;
         let ea = base.wrapping_add(y);
@@ -144,7 +191,7 @@ impl Cpu65816 {
     #[inline]
     pub fn addr_dp_ind_long(&mut self, bus: &mut dyn Bus816) -> u32 {
         let dp_addr = self.addr_dp(bus);
-        self.read24(bus, dp_addr)
+        self.read_dp_ptr24(bus, dp_addr)
     }
 
     /// [Direct Page],Y: indirect long indexed.
@@ -152,7 +199,7 @@ impl Cpu65816 {
     #[inline]
     pub fn addr_dp_ind_long_y(&mut self, bus: &mut dyn Bus816) -> u32 {
         let dp_addr = self.addr_dp(bus);
-        let ptr = self.read24(bus, dp_addr);
+        let ptr = self.read_dp_ptr24(bus, dp_addr);
         let y = self.get_y() as u32;
         ptr.wrapping_add(y)
     }
@@ -194,8 +241,9 @@ impl Cpu65816 {
     /// Reads 16-bit pointer from bank 0. Result is in PBR bank (for JMP).
     #[inline]
     pub fn addr_abs_ind(&mut self, bus: &mut dyn Bus816) -> u32 {
-        let ptr_addr = self.fetch16(bus) as u32;
-        let target = self.read16(bus, ptr_addr);
+        // JMP (abs): the pointer lives in bank 0 and wraps within it.
+        let ptr = self.fetch16(bus);
+        let target = self.read16_bankwrap(bus, 0, ptr);
         self.program_addr(target)
     }
 
@@ -203,19 +251,24 @@ impl Cpu65816 {
     /// Reads 16-bit pointer from PBR bank at (operand + X).
     #[inline]
     pub fn addr_abs_ind_x(&mut self, bus: &mut dyn Bus816) -> u32 {
+        // JMP/JSR (abs,X): the pointer lives in the program bank at
+        // (operand + X) and wraps within that bank.
         let operand = self.fetch16(bus);
         let x = self.get_x();
-        let ptr_addr = ((self.pbr as u32) << 16) | operand.wrapping_add(x) as u32;
-        let target = self.read16(bus, ptr_addr);
+        let ptr = operand.wrapping_add(x);
+        let target = self.read16_bankwrap(bus, (self.pbr as u32) << 16, ptr);
         self.program_addr(target)
     }
 
     /// [Absolute]: indirect long. Used by JML [abs].
-    /// Reads 24-bit pointer from bank 0.
+    /// Reads a 24-bit pointer from bank 0; the three bytes wrap within bank 0.
     #[inline]
     pub fn addr_abs_ind_long(&mut self, bus: &mut dyn Bus816) -> u32 {
-        let ptr_addr = self.fetch16(bus) as u32;
-        self.read24(bus, ptr_addr)
+        let ptr = self.fetch16(bus);
+        let b0 = bus.read(ptr as u32, self.cycles) as u32;
+        let b1 = bus.read(ptr.wrapping_add(1) as u32, self.cycles) as u32;
+        let b2 = bus.read(ptr.wrapping_add(2) as u32, self.cycles) as u32;
+        (b2 << 16) | (b1 << 8) | b0
     }
 
     // ── Absolute Long ───────────────────────────────────────────────────
@@ -247,8 +300,9 @@ impl Cpu65816 {
     /// SP + offset -> read 16-bit pointer, combine with DBR, add Y.
     #[inline]
     pub fn addr_sr_ind_y(&mut self, bus: &mut dyn Bus816) -> u32 {
+        // The stack-relative pointer lives in bank 0 and wraps within it.
         let sr_addr = self.addr_sr(bus);
-        let ptr = self.read16(bus, sr_addr);
+        let ptr = self.read16_bankwrap(bus, 0, sr_addr as u16);
         let base = self.data_addr(ptr);
         let y = self.get_y() as u32;
         base.wrapping_add(y)
