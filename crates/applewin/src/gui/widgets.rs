@@ -204,7 +204,7 @@ pub(super) fn icon_btn(
 
     if resp.hovered() {
         ui.painter()
-            .rect_stroke(rect, 2.0, Stroke::new(1.0, WIN_DSHADOW));
+            .rect_stroke(rect, 2.0, Stroke::new(1.0_f32, WIN_DSHADOW));
     }
 
     resp.on_hover_text(tooltip)

@@ -6,13 +6,15 @@ use apple2_core::{
 /// Apple IIe Enhanced 16KB ROM embedded at compile time.
 static APPLE2E_ROM: &[u8] = include_bytes!("../../../roms/apple2e_enhanced.rom");
 
-/// Apple IIc 32KB ROM (ROM version 0 — the "3.5 ROM", 342-0033-A) embedded at
-/// compile time.  This is the first 32KB IIc firmware, adding UniDisk 3.5
-/// support, the Mini-Assembler, and the self-test diagnostic.  It is a genuine
-/// dual-bank ROM: the lower 16KB is the standard bank (active at power-on) and
-/// the upper 16KB is the alternate bank selected via the $C028 ROM switch.
+/// Apple IIc 32KB ROM (ROM version 4 — 341-0445-B) embedded at compile time.
+/// This is the last and most compatible 32KB IIc firmware, adding the Apple
+/// IIc Memory Expansion Card support and fixing the mouse-interrupt and
+/// disk-firmware bugs of the earlier ROMs — the recommended ROM for maximum
+/// software compatibility.  It is a genuine dual-bank ROM: the lower 16KB is
+/// the standard bank (active at power-on) and the upper 16KB is the alternate
+/// bank selected via the $C028 ROM switch.
 static APPLE2C_ROM: &[u8] =
-    include_bytes!("../../../roms/Apple_IIc/Apple IIc ROM 00 - 342-0033-A - 1985.bin");
+    include_bytes!("../../../roms/Apple_IIc/Apple IIc ROM 04 - 341-0445-B.bin");
 
 #[cfg(feature = "gui")]
 mod config;

@@ -16,7 +16,7 @@ impl EmulatorApp {
                 .frame(
                     egui::Frame::none()
                         .fill(WIN_FACE)
-                        .stroke(Stroke::new(1.0, WIN_SHADOW))
+                        .stroke(Stroke::new(1.0_f32, WIN_SHADOW))
                         .inner_margin(egui::Margin::same(5.0)),
                 )
                 .show(ctx, |ui| {

@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **applewin: switched the embedded Apple //c ROM to version 4 (341-0445-B) for
+  maximum software compatibility.** Replaces the earlier "3.5 ROM" (version 0,
+  342-0033-A). ROM 4 is the last and most compatible 32KB //c firmware, adding
+  Memory Expansion Card support and fixing the mouse-interrupt and disk-firmware
+  bugs of the earlier ROMs. The //c boot-regression tests now run against ROM 4
+  (title banner, DOS 3.3, ProDOS, and VBL all verified booting).
+
+- **applewin: fixed the `float_literal_f32_fallback` lint** in the GUI status
+  bar, toolbar, and widget stroke calls (`Stroke::new(1.0, …)` → `1.0_f32`),
+  which had become a hard `-D warnings` error under newer rustc.
+
 - **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**
   Eliminates the `block v0.1.6` future-incompatibility warning (uninhabited
   static, [rust#74840](https://github.com/rust-lang/rust/issues/74840)), which
