@@ -291,6 +291,7 @@ impl CardManager {
     }
 
     /// Returns true if any card (slot 0–7 or aux) currently asserts an IRQ.
+    #[inline]
     pub fn any_irq_active(&self) -> bool {
         self.slots
             .iter()

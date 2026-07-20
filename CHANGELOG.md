@@ -15,6 +15,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **applewin: switched the embedded Apple //c ROM to version 4 (341-0445-B) for
+  maximum software compatibility.** Replaces the earlier "3.5 ROM" (version 0,
+  342-0033-A). ROM 4 is the last and most compatible 32KB //c firmware, adding
+  Memory Expansion Card support and fixing the mouse-interrupt and disk-firmware
+  bugs of the earlier ROMs. The //c boot-regression tests now run against ROM 4
+  (title banner, DOS 3.3, ProDOS, and VBL all verified booting).
+
+- **applewin: fixed the `float_literal_f32_fallback` lint** in the GUI status
+  bar, toolbar, and widget stroke calls (`Stroke::new(1.0, …)` → `1.0_f32`),
+  which had become a hard `-D warnings` error under newer rustc.
+
+- **applewin: upgraded `eframe`/`egui` 0.23 → 0.30 and `rfd` 0.12 → 0.15.**
+  Eliminates the `block v0.1.6` future-incompatibility warning (uninhabited
+  static, [rust#74840](https://github.com/rust-lang/rust/issues/74840)), which
+  was pulled in transitively on macOS via the old `cocoa`/`objc-foundation`
+  stack. eframe 0.30 uses `winit` 0.30 + `objc2`, dropping `cocoa`, `objc`,
+  and `block` entirely. Migration work: window setup moved from the removed
+  `NativeOptions` fields to `egui::ViewportBuilder`; `Frame::close`/
+  `set_fullscreen`/`set_window_size`/`info().window_info` replaced with
+  `ctx.send_viewport_cmd(...)` and `ctx.input(|i| i.viewport())`; the app
+  creator closure now returns `Result`; `ComboBox::from_id_source` renamed to
+  `from_id_salt`; `egui::style::Margin` → `egui::Margin`. No behavior change.
+  (Target 0.30 was chosen deliberately: it is the newest release that drops
+  `block` while staying below egui's 0.31 `Margin`/`StrokeKind` and 0.34
+  `App::ui`/`Panel` rewrites, keeping the migration minimal and low-risk.)
+- **applewin: split the 4,400-line `main.rs` into a `gui/` module tree**
+  (`emulation`, `audio`, `input`, `render`, `panels`, `settings`, `widgets`).
+  Pure code motion — the eframe `update()` loop now delegates to named
+  per-section `EmulatorApp` methods called in the same order as before, and
+  the 18 `act_*` deferred-action locals became a `DeferredActions` struct.
+  No behavior change. The headless build is also warning-free now
+  (GUI-only items in `main.rs` are `#[cfg(feature = "gui")]`-gated).
+- **apple2-core: moved the $C000–$C0FF soft-switch dispatch out of `bus.rs`**
+  into `bus/soft_switches.rs` (`bus.rs` → `bus/mod.rs`, 1,481 → 994 lines).
+  Pure code motion; covered by the //c boot-trace and bus unit tests.
+- **applewin: decomposed the `gui/` tree further for maintainability.** The
+  1,235-line `panels.rs` was split by responsibility into `menu`, `toolbar`,
+  `statusbar`, `screen`, `debugger_panel`, and `dialogs`; the 500-line
+  `settings.rs` tab `match` became per-tab `render_*_tab` methods in a new
+  `settings_tabs` module; viewport/window helpers moved to `window.rs`; and
+  the joystick/paddle/mouse polling moved to `joystick.rs`, hoisting the
+  byte-identical keypad-arrows and keypad-numeric handling (previously
+  duplicated between joystick 0 and 1) into shared methods and promoting the
+  paddle-trim clamp to a free function. No module now exceeds ~505 lines.
+  Pure code motion / identical-code deduplication — no behavior change.
+
+### Performance
+
+- **Release builds now use fat LTO and `codegen-units = 1`** for better
+  cross-crate inlining in the CPU/bus/video hot paths.
+- **Added `#[inline]` to small hot-path helpers**: `Bus::flag_byte`,
+  `Bus::update_irq_line`, `Bus::process_card_dma`,
+  `CardManager::any_irq_active` (apple2-core); `text_row_offset`,
+  `hgr_row_offset` (apple2-video).
+- **applewin: removed per-frame allocations** — the recent-disk/HDD menu lists
+  are no longer cloned every frame the File menu is open, and the debugger
+  command input is passed by reference instead of cloned per frame.
+- **apple2-audio: removed the SSI-263 no-op render loop** (the stub summed 0.0
+  over the whole output buffer). **apple2-iigs: preallocated the Mega II
+  speaker-toggle buffer** to match apple2-core's bus.
+
+### Fixed
+
+- **Speaker: PWM sound effects rendered as a loud screech (no sub-sample
+  averaging).** The GUI speaker synthesis emitted each output sample as a flat
+  ±0.5 from the cone state *after* the last toggle in that sample period. Games
+  that drive the speaker faster than the output sample rate — PWM /
+  duty-cycle-modulated audio, e.g. *Airheart*'s start sound, measured toggling
+  every 4–22 CPU cycles against ~23.2 cycles per 44.1 kHz sample — had their
+  ultrasonic carrier aliased straight into the audible band: narrow pulses
+  either vanished or blew up into full-amplitude samples, heard as a harsh
+  screech. Each sample is now the time-weighted average of the speaker level
+  across every toggle inside its period (duty-cycle averaging, as in
+  `apple2-audio`'s `Speaker::render`), which reconstructs the intended sound
+  envelope; normal square-wave beeps are unaffected. Also fixed the
+  cycles-per-sample constant (was `floor()`ed, over-producing samples by ~0.9 %
+  so the audio ring buffer slowly filled to its 2-second cap — growing latency,
+  then steady sample drops), and speaker-state parity is now preserved for
+  toggles that fall outside the rendered sample grid.
+- **Apple //c: screeching sound on startup in some games (wrong VBL semantics).**
+  `$C019` was implemented with Apple IIe semantics for every model: a live,
+  active-low VBL signal (bit 7 = 1 during the visible scan lines). On the //c,
+  `$C019` is instead a *latched* VBL interrupt-pending flag — set at the start of
+  each vertical blanking period and held until acknowledged by an access to
+  `$C070` — and `$C05A`/`$C05B` are the DISVBL/ENVBL interrupt masks (not
+  annunciator 1). //c-aware games frame-sync their sound and music loops on this
+  flag (`LDA $C019` / `BPL` poll, then a `$C070` ack); with the IIe behaviour the
+  poll saw bit 7 set ~73 % of the time, so the once-per-frame wait fell through
+  almost instantly and speaker routines free-ran at kHz rates — heard as a
+  screech during startup music and sound effects. The bus now latches the //c
+  VBL flag at each blanking boundary from the emulator execute loop, clears it on
+  any `$C070` access, treats `$C05A`/`$C05B` as DISVBL/ENVBL on the //c, and
+  raises the CPU IRQ line while the flag is pending with ENVBL set (the flag
+  itself latches regardless of the mask, matching MAME). IIe/IIe-Enhanced
+  `$C019` behaviour is unchanged, and the VBL schedule is re-seeded on reset and
+  snapshot restore so it keeps firing after full-speed disk bursts and state
+  loads.
+
 ## [1.1.5] - 2026-07-02
 
 ### Fixed

@@ -1,6 +1,6 @@
-//! Boot regression tests for the Apple //c using the 32KB "3.5 ROM"
-//! (ROM version 0, 342-0033-A) — the firmware embedded by the `applewin`
-//! binary for the //c model.
+//! Boot regression tests for the Apple //c using the 32KB ROM version 4
+//! (341-0445-B) — the firmware embedded by the `applewin` binary for the //c
+//! model (the most software-compatible IIc ROM).
 
 use apple2_core::cards::disk2::Disk2Card;
 use apple2_core::cards::mouse::MouseCard;
@@ -8,8 +8,8 @@ use apple2_core::cards::ssc::SscCard;
 use apple2_core::emulator::Emulator;
 use apple2_core::model::{Apple2Model, CpuType};
 
-/// The 3.5 ROM (ROM 0, 342-0033-A) — same file `applewin` embeds for the //c.
-const IIC_35_ROM: &str = "../../roms/Apple_IIc/Apple IIc ROM 00 - 342-0033-A - 1985.bin";
+/// ROM version 4 (341-0445-B) — same file `applewin` embeds for the //c.
+const IIC_ROM: &str = "../../roms/Apple_IIc/Apple IIc ROM 04 - 341-0445-B.bin";
 const DOS33: &str = "../../bin/DOS 3.3 System Master - 680-0210-A.dsk";
 const PRODOS: &str = "../../bin/ProDOS_2_4_3.po";
 
@@ -34,8 +34,8 @@ fn screen_text(emu: &Emulator) -> String {
 /// Build a //c emulator with the built-in peripheral layout used by the app
 /// (serial ports in slots 1/2, mouse in slot 4, Disk II in slot 6).
 fn make_iic(disk: Option<&str>) -> Emulator {
-    let rom = std::fs::read(IIC_35_ROM).expect("3.5 ROM present");
-    assert_eq!(rom.len(), 32768, "3.5 ROM must be 32KB");
+    let rom = std::fs::read(IIC_ROM).expect("IIc ROM present");
+    assert_eq!(rom.len(), 32768, "IIc ROM 4 must be 32KB");
     let mut emu = Emulator::new(rom, Apple2Model::AppleIIc, CpuType::Cpu65C02);
     emu.bus.cards.insert(Box::new(SscCard::new(1)));
     emu.bus.cards.insert(Box::new(SscCard::new(2)));
@@ -70,9 +70,9 @@ fn run_until(emu: &mut Emulator, needle: &str, cap_cycles: u64) -> String {
     screen_text(emu)
 }
 
-/// The 3.5 ROM must reach the //c title banner shortly after power-on.
+/// ROM 4 must reach the //c title banner shortly after power-on.
 #[test]
-fn iic_35rom_shows_title_banner() {
+fn iic_rom4_shows_title_banner() {
     let mut emu = make_iic(None);
     let screen = run_until(&mut emu, "Apple //c", 30_000_000);
     assert!(
@@ -81,9 +81,9 @@ fn iic_35rom_shows_title_banner() {
     );
 }
 
-/// The 3.5 ROM must boot the DOS 3.3 System Master from the Disk II in slot 6.
+/// ROM 4 must boot the DOS 3.3 System Master from the Disk II in slot 6.
 #[test]
-fn iic_35rom_boots_dos33() {
+fn iic_rom4_boots_dos33() {
     let mut emu = make_iic(Some(DOS33));
     let screen = run_until(&mut emu, "DOS VERSION 3.3", 150_000_000);
     assert!(
@@ -92,7 +92,7 @@ fn iic_35rom_boots_dos33() {
     );
 }
 
-/// The 3.5 ROM must boot a ProDOS disk from the Disk II in slot 6.
+/// ROM 4 must boot a ProDOS disk from the Disk II in slot 6.
 ///
 /// Regression test for the //c IWM status-register poll: ProDOS turns the motor
 /// off then polls the IWM status ($C0EE with Q6 high) for bit 5 to clear.  The
@@ -100,11 +100,35 @@ fn iic_35rom_boots_dos33() {
 /// spin-down grace period, so ProDOS hung forever on the //c (it booted fine on
 /// the //e, which does not force the internal ROM disk firmware).
 #[test]
-fn iic_35rom_boots_prodos() {
+fn iic_rom4_boots_prodos() {
     let mut emu = make_iic(Some(PRODOS));
-    let screen = run_until(&mut emu, "PRODOS", 150_000_000);
+    // ROM 4 has full lowercase support, so ProDOS renders its banner mixed-case.
+    let screen = run_until(&mut emu, "ProDOS 8", 150_000_000);
     assert!(
-        screen.contains("PRODOS"),
+        screen.contains("ProDOS 8"),
         "expected ProDOS boot volume, got:\n{screen}"
     );
+}
+
+/// The execute loop must latch the //c VBL flag at each vertical-blanking
+/// boundary, and an access to $C070 must acknowledge it.  Games frame-sync
+/// their sound loops on this ($C019 poll + $C070 ack); with IIe VBL-bar
+/// semantics those waits fall through instantly and startup music screeches.
+#[test]
+fn iic_vbl_flag_latched_by_execute_and_acked_by_c070() {
+    let mut emu = make_iic(None);
+    // Run past the first VBL boundary (12480 cycles into the first frame).
+    emu.execute(20_000);
+    let cyc = emu.cpu.cycles;
+    assert_eq!(
+        emu.bus.read(0xC019, cyc) & 0x80,
+        0x80,
+        "VBL flag should be latched after crossing a blanking boundary"
+    );
+    // Acknowledge via $C070 — flag clears until the next VBL.
+    emu.bus.read(0xC070, cyc);
+    assert_eq!(emu.bus.read(0xC019, cyc) & 0x80, 0x00);
+    // One frame later it is pending again.
+    emu.execute(17_030);
+    assert_eq!(emu.bus.read(0xC019, emu.cpu.cycles) & 0x80, 0x80);
 }

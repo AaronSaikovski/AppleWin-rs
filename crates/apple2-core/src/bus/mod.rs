@@ -3,6 +3,8 @@
 //! Replaces the global arrays `mem`, `memshadow[]`, `memwrite[]`,
 //! `memreadPageType[]`, `IORead[256]`, `IOWrite[256]` from `source/Memory.h`.
 
+mod soft_switches;
+
 use crate::card::{CardManager, DmaWrite, DriveActivity};
 use crate::model::Apple2Model;
 use bitflags::bitflags;
@@ -19,6 +21,15 @@ const MEM_TRACE_MAX: usize = 1_000_000;
 /// full speed cannot realistically produce anywhere near this many toggles;
 /// the cap exists purely as a safety valve against pathological programs.
 const SPEAKER_TOGGLES_MAX: usize = 65_536;
+
+// ── NTSC frame timing ─────────────────────────────────────────────────────────
+
+/// CPU cycles per NTSC video frame: 262 scan lines × 65 cycles/line.
+const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
+
+/// CPU cycles in the visible portion of a frame: 192 scan lines × 65 cycles.
+/// Vertical blanking occupies the remaining 70 lines (4550 cycles).
+const CYCLES_VISIBLE: u64 = 65 * 192; // 12480
 
 // ── Memory mode flags ─────────────────────────────────────────────────────────
 
@@ -254,8 +265,21 @@ pub struct Bus {
     /// Annunciator outputs 0–2 (annunciator 3 overlaps DHIRES at $C05E/$C05F).
     pub ann: [bool; 4],
 
-    /// Reflects the current state of the card IRQ line (OR of all slots).
+    /// Reflects the current state of the card IRQ line (OR of all slots),
+    /// plus the Apple //c VBL interrupt when enabled.
     pub irq_line: bool,
+
+    // ── Apple //c VBL interrupt (IOU) ────────────────────────────────────────
+    /// //c latched VBL flag: set at the start of each vertical blanking period,
+    /// held until acknowledged by an access to $C070.  Read via $C019 bit 7.
+    /// (The IIe instead returns the live, active-low VBL signal at $C019.)
+    pub vbl_flag: bool,
+    /// //c ENVBL/DISVBL ($C05B/$C05A): when set, `vbl_flag` drives the IRQ line.
+    /// The flag itself latches regardless of this mask (matches MAME).
+    pub vbl_irq_enabled: bool,
+    /// CPU cycle of the next VBL start, checked each instruction by the
+    /// emulator execute loop.  `u64::MAX` on non-//c models (check never fires).
+    pub next_vbl_cycle: u64,
 
     /// Pre-allocated scratch buffer for Saturn LC bank swaps — eliminates a
     /// 16 KB heap allocation on every bank switch.
@@ -318,6 +342,13 @@ impl Bus {
             rw3_extra: Vec::new(),
             ann: [false; 4],
             irq_line: false,
+            vbl_flag: false,
+            vbl_irq_enabled: false,
+            next_vbl_cycle: if model.is_iic() {
+                CYCLES_VISIBLE
+            } else {
+                u64::MAX
+            },
             lc_swap_buf: Box::new([0u8; 16384]),
             lc_prewrite: false,
             lc_last_access: 0,
@@ -349,11 +380,43 @@ impl Bus {
     /// if `advance_frame` is never called — but calling it keeps the counter
     /// well-bounded and avoids drift over very long sessions.
     pub fn advance_frame(&mut self, cycles: u64) {
-        const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
         // Only advance if we are actually past the end of the tracked frame.
         if cycles.wrapping_sub(self.frame_start_cycles) >= CYCLES_PER_FRAME {
             self.frame_start_cycles += CYCLES_PER_FRAME;
         }
+    }
+
+    /// Apple //c: a VBL boundary has been crossed — latch the VBL flag and
+    /// schedule the next one.  Called by the emulator execute loop whenever
+    /// `cycles >= next_vbl_cycle` (never fires on other models, where
+    /// `next_vbl_cycle` is `u64::MAX`).
+    pub fn vbl_tick(&mut self, cycles: u64) {
+        self.vbl_flag = true;
+        // Skip any whole frames missed (e.g. after full-speed disk bursts or a
+        // debugger pause) so we never fire a burst of stale VBLs.
+        let missed = (cycles - self.next_vbl_cycle) / CYCLES_PER_FRAME;
+        self.next_vbl_cycle += (missed + 1) * CYCLES_PER_FRAME;
+        if self.vbl_irq_enabled {
+            self.update_irq_line();
+        }
+    }
+
+    /// Re-seed the //c VBL state.  Called on reset and snapshot restore, where
+    /// the cycle counter may have moved backwards relative to `next_vbl_cycle`.
+    pub fn reset_vbl(&mut self, cycles: u64) {
+        self.vbl_flag = false;
+        self.vbl_irq_enabled = false;
+        self.next_vbl_cycle = if self.model.is_iic() {
+            // Next boundary of the form CYCLES_VISIBLE + n·CYCLES_PER_FRAME
+            // at or after `cycles`.
+            let n = cycles
+                .saturating_sub(CYCLES_VISIBLE)
+                .div_ceil(CYCLES_PER_FRAME);
+            CYCLES_VISIBLE + n * CYCLES_PER_FRAME
+        } else {
+            u64::MAX
+        };
+        self.update_irq_line();
     }
 
     /// Rebuild the page routing tables from the current `mode` state.
@@ -687,446 +750,6 @@ impl Bus {
             if let Some(card) = self.cards.slot_mut(slot) {
                 card.io_write(lo as u8, val, cycles);
             }
-        }
-    }
-
-    // ── Soft-switch dispatch ($C000–$C0FF) ───────────────────────────────────
-
-    fn soft_switch_read(&mut self, reg: u8, cycles: u64) -> u8 {
-        // $C000–$C0FF: Apple //e soft switches + slot peripheral I/O
-        match reg {
-            0x00 => self.keyboard_data,
-            0x10 => {
-                let old = self.keyboard_data;
-                self.keyboard_data &= 0x7F;
-                old
-            }
-            // $C028: ROMSWITCH — toggle ROM bank on Apple IIc (read-strobe).
-            0x28 => {
-                if self.model.is_iic() {
-                    self.mode.toggle(MemMode::MF_ALTROM0);
-                }
-                self.floating_bus
-            }
-            0x30 => {
-                self.speaker_state = !self.speaker_state;
-                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
-                    self.speaker_toggles.push(cycles);
-                }
-                self.floating_bus
-            }
-            0x11 => self.flag_byte(MemMode::MF_BANK2),
-            0x12 => self.flag_byte(MemMode::MF_HIGHRAM),
-            0x13 => self.flag_byte(MemMode::MF_AUXREAD),
-            0x14 => self.flag_byte(MemMode::MF_AUXWRITE),
-            0x15 => self.flag_byte(MemMode::MF_INTCXROM),
-            0x16 => self.flag_byte(MemMode::MF_ALTZP),
-            0x17 => self.flag_byte(MemMode::MF_SLOTC3ROM),
-            0x18 => self.flag_byte(MemMode::MF_80STORE),
-            // $C019: VBLANK bar — bit 7 = 1 during visible scan lines, 0 in blanking interval.
-            // NTSC: 192 active lines × 65 CPU cycles/line = 12480; frame = 262 × 65 = 17030.
-            // Matches AppleWin's NTSC_GetVblBar(): true when g_nVideoClockVert < 192.
-            //
-            // We avoid the expensive modulo by tracking `frame_start_cycles` and computing
-            // the within-frame offset as a simple subtraction.  The frame boundary is
-            // advanced lazily here; `advance_frame()` may also be called from the execute loop.
-            0x19 => {
-                const CYCLES_PER_FRAME: u64 = 65 * 262; // 17030
-                const CYCLES_VISIBLE: u64 = 65 * 192; // 12480
-                let mut offset = cycles.wrapping_sub(self.frame_start_cycles);
-                if offset >= CYCLES_PER_FRAME {
-                    // Advance by whole frames so frame_start_cycles stays accurate even if
-                    // advance_frame() was not called between frames.
-                    let elapsed_frames = offset / CYCLES_PER_FRAME;
-                    self.frame_start_cycles += elapsed_frames * CYCLES_PER_FRAME;
-                    offset -= elapsed_frames * CYCLES_PER_FRAME;
-                }
-                if offset < CYCLES_VISIBLE { 0x80 } else { 0x00 }
-            }
-            // $C01A: RDTEXT — bit 7 = 1 when TEXT mode (graphics switch clear)
-            0x1A => {
-                if !self.mode.contains(MemMode::MF_GRAPHICS) {
-                    0x80
-                } else {
-                    0x00
-                }
-            }
-            // $C01B: RDMIXED — bit 7 = 1 when mixed mode
-            0x1B => self.flag_byte(MemMode::MF_MIXED),
-            0x1C => self.flag_byte(MemMode::MF_PAGE2),
-            0x1D => self.flag_byte(MemMode::MF_HIRES),
-            0x1E => self.flag_byte(MemMode::MF_ALTCHAR),
-            0x1F => self.flag_byte(MemMode::MF_VID80),
-            // $C061–$C063: game port buttons (bit 7 = pressed)
-            0x61 => {
-                if self.gamepad.effective_buttons() & 0x01 != 0 {
-                    0x80
-                } else {
-                    0x00
-                }
-            }
-            0x62 => {
-                if self.gamepad.effective_buttons() & 0x02 != 0 {
-                    0x80
-                } else {
-                    0x00
-                }
-            }
-            0x63 => {
-                if self.gamepad.effective_buttons() & 0x04 != 0 {
-                    0x80
-                } else {
-                    0x00
-                }
-            }
-            // $C064–$C067: paddle one-shot timers (bit 7 high until timer expires)
-            0x64 => {
-                if cycles < self.gamepad.paddle0_end {
-                    0x80
-                } else {
-                    0x00
-                }
-            }
-            0x65 => {
-                if cycles < self.gamepad.paddle1_end {
-                    0x80
-                } else {
-                    0x00
-                }
-            }
-            0x66 | 0x67 => 0x00, // paddles 2/3 not connected
-            // $C070: paddle strobe — resets timers and returns floating bus
-            0x70 => {
-                self.gamepad.strobe(cycles);
-                self.floating_bus
-            }
-            // $C050–$C057: video soft-switch reads are strobes just like writes
-            0x50 => {
-                self.mode.insert(MemMode::MF_GRAPHICS);
-                self.floating_bus
-            }
-            0x51 => {
-                self.mode.remove(MemMode::MF_GRAPHICS);
-                self.floating_bus
-            }
-            0x52 => {
-                self.mode.remove(MemMode::MF_MIXED);
-                self.floating_bus
-            }
-            0x53 => {
-                self.mode.insert(MemMode::MF_MIXED);
-                self.floating_bus
-            }
-            // $C054–$C057: PAGE2 / HIRES soft-switch reads act as strobes.
-            // Only rebuild the page tables when the bit actually changes — programs
-            // that poll these registers in tight loops would otherwise trigger a full
-            // rebuild on every read even when the mode is unchanged.
-            0x54 => {
-                if self.mode.contains(MemMode::MF_PAGE2) {
-                    self.mode.remove(MemMode::MF_PAGE2);
-                    self.rebuild_page_tables();
-                }
-                self.floating_bus
-            }
-            0x55 => {
-                if !self.mode.contains(MemMode::MF_PAGE2) {
-                    self.mode.insert(MemMode::MF_PAGE2);
-                    self.rebuild_page_tables();
-                }
-                self.floating_bus
-            }
-            0x56 => {
-                if self.mode.contains(MemMode::MF_HIRES) {
-                    self.mode.remove(MemMode::MF_HIRES);
-                    self.rebuild_page_tables();
-                }
-                self.floating_bus
-            }
-            0x57 => {
-                if !self.mode.contains(MemMode::MF_HIRES) {
-                    self.mode.insert(MemMode::MF_HIRES);
-                    self.rebuild_page_tables();
-                }
-                self.floating_bus
-            }
-            // $C058–$C05D: annunciators 0–2 (read-strobes, same as write)
-            0x58 => {
-                self.ann[0] = false;
-                self.floating_bus
-            }
-            0x59 => {
-                self.ann[0] = true;
-                self.floating_bus
-            }
-            0x5A => {
-                self.ann[1] = false;
-                self.floating_bus
-            }
-            0x5B => {
-                self.ann[1] = true;
-                self.floating_bus
-            }
-            0x5C => {
-                self.ann[2] = false;
-                self.floating_bus
-            }
-            0x5D => {
-                self.ann[2] = true;
-                self.floating_bus
-            }
-            // $C05E/$C05F: DHIRESON/DHIRESOFF — read also acts as write (same as $C050-$C057)
-            // On the IIc, $C05E/$C05F are the AN3 soft switch, which controls double
-            // hi-res independently of IOUDIS (per the //c Technical Reference: double
-            // hi-res operates regardless of the IOUDIS state).  So they toggle DHIRES
-            // just like on the //e — software such as Airheart enables DHGR with a bare
-            // $C05E without first setting IOUDIS.
-            0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
-                self.floating_bus
-            }
-            0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
-                self.floating_bus
-            }
-            // $C060: cassette input — bit 7 reflects the cassette audio waveform.
-            // When no cassette is loaded, returns 0 (high-impedance / silence).
-            0x60 => {
-                if let Some(ref data) = self.cassette_input {
-                    // Derive sample position from CPU cycles elapsed since playback
-                    // started.  Cassette audio is 11025 Hz; CPU is ~1.023 MHz.
-                    // sample = (cycles - start) * 11025 / 1023000
-                    const CASSETTE_RATE: u64 = 11025;
-                    const CPU_RATE: u64 = 1_023_000;
-                    let elapsed = cycles.saturating_sub(self.cassette_start_cycle);
-                    let sample_pos = (elapsed * CASSETTE_RATE / CPU_RATE) as usize;
-                    self.cassette_byte_pos = sample_pos;
-                    if sample_pos < data.len() {
-                        // Unsigned 8-bit PCM: 128 = silence.  Return bit 7 based
-                        // on whether the sample is above or below the midpoint.
-                        if data[sample_pos] >= 128 { 0x80 } else { 0x00 }
-                    } else {
-                        0x00 // past end of tape
-                    }
-                } else {
-                    0x00
-                }
-            }
-            // $C07E: RDIOUDES — bit 7 = 1 when IOUDIS is set; $C07D: alternate read
-            0x7D | 0x7E => self.flag_byte(MemMode::MF_IOUDIS),
-            // $C07F: RDDHIRES — bit 7 = 1 when double hi-res is active
-            0x7F => self.flag_byte(MemMode::MF_DHIRES),
-            0x80..=0x8F => self.lc_read(reg),
-            // $C090–$C0FF: peripheral card I/O (slots 1–7)
-            // $C09x = slot 1, $C0Ax = slot 2, ..., $C0Ex = slot 6, $C0Fx = slot 7
-            0x90..=0xFF => {
-                let slot = ((reg as usize) >> 4) - 8; // 0x90>>4=9 → slot 1 .. 0xF0>>4=15 → slot 7
-                let lo = reg & 0x0F;
-                if let Some(card) = self.cards.slot_mut(slot) {
-                    let result = card.slot_io_read(lo, cycles);
-                    self.process_card_dma(slot);
-                    self.update_irq_line();
-                    result
-                } else {
-                    self.floating_bus
-                }
-            }
-            _ => self.floating_bus,
-        }
-    }
-
-    fn soft_switch_write(&mut self, reg: u8, val: u8, cycles: u64) {
-        match reg {
-            0x00 => {
-                self.mode.remove(MemMode::MF_80STORE);
-                self.rebuild_page_tables();
-            }
-            0x01 => {
-                self.mode.insert(MemMode::MF_80STORE);
-                self.rebuild_page_tables();
-            }
-            // $C010: KBDSTRB — writing clears the keyboard strobe (same as reading it).
-            // Many programs use STA $C010 rather than LDA $C010 to clear the strobe.
-            0x10 => {
-                self.keyboard_data &= 0x7F;
-            }
-            0x02 => {
-                self.mode.remove(MemMode::MF_AUXREAD);
-                self.rebuild_page_tables();
-            }
-            0x03 => {
-                self.mode.insert(MemMode::MF_AUXREAD);
-                self.rebuild_page_tables();
-            }
-            0x04 => {
-                self.mode.remove(MemMode::MF_AUXWRITE);
-                self.rebuild_page_tables();
-            }
-            0x05 => {
-                self.mode.insert(MemMode::MF_AUXWRITE);
-                self.rebuild_page_tables();
-            }
-            0x06 if !self.model.is_iic() => {
-                self.mode.remove(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
-            }
-            0x07 if !self.model.is_iic() => {
-                self.mode.insert(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
-            }
-            0x08 => {
-                self.mode.remove(MemMode::MF_ALTZP);
-                self.rebuild_page_tables();
-            }
-            0x09 => {
-                self.mode.insert(MemMode::MF_ALTZP);
-                self.rebuild_page_tables();
-            }
-            0x0A if !self.model.is_iic() => {
-                self.mode.remove(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
-            }
-            0x0B if !self.model.is_iic() => {
-                self.mode.insert(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
-            }
-            // $C00C/$C00D: CLR/SET80VID — 80-column display mode
-            0x0C => {
-                self.mode.remove(MemMode::MF_VID80);
-            }
-            0x0D => {
-                self.mode.insert(MemMode::MF_VID80);
-            }
-            // $C00E/$C00F: CLRALTCHAR/SETALTCHAR — alternate character set
-            0x0E => {
-                self.mode.remove(MemMode::MF_ALTCHAR);
-            }
-            0x0F => {
-                self.mode.insert(MemMode::MF_ALTCHAR);
-            }
-            // $C028: ROMSWITCH — toggle ROM bank on Apple IIc.
-            0x28 if self.model.is_iic() => {
-                self.mode.toggle(MemMode::MF_ALTROM0);
-            }
-            // $C070: paddle strobe — reset one-shot timers
-            0x70 => {
-                self.gamepad.strobe(cycles);
-            }
-            // $C073: RamWorks III bank select
-            0x73 => {
-                self.rw3_switch(val);
-            }
-            0x30 => {
-                self.speaker_state = !self.speaker_state;
-                if self.speaker_toggles.len() < SPEAKER_TOGGLES_MAX {
-                    self.speaker_toggles.push(cycles);
-                }
-            }
-            // Text/graphics + mixed mode soft switches — video-only, no paging side-effects
-            0x50 => {
-                self.mode.insert(MemMode::MF_GRAPHICS);
-            }
-            0x51 => {
-                self.mode.remove(MemMode::MF_GRAPHICS);
-            }
-            0x52 => {
-                self.mode.remove(MemMode::MF_MIXED);
-            }
-            0x53 => {
-                self.mode.insert(MemMode::MF_MIXED);
-            }
-            0x54 if self.mode.contains(MemMode::MF_PAGE2) => {
-                self.mode.remove(MemMode::MF_PAGE2);
-                self.rebuild_page_tables();
-            }
-            0x55 if !self.mode.contains(MemMode::MF_PAGE2) => {
-                self.mode.insert(MemMode::MF_PAGE2);
-                self.rebuild_page_tables();
-            }
-            0x56 if self.mode.contains(MemMode::MF_HIRES) => {
-                self.mode.remove(MemMode::MF_HIRES);
-                self.rebuild_page_tables();
-            }
-            0x57 if !self.mode.contains(MemMode::MF_HIRES) => {
-                self.mode.insert(MemMode::MF_HIRES);
-                self.rebuild_page_tables();
-            }
-            // $C058–$C05D: annunciators 0–2
-            0x58 => {
-                self.ann[0] = false;
-            }
-            0x59 => {
-                self.ann[0] = true;
-            }
-            0x5A => {
-                self.ann[1] = false;
-            }
-            0x5B => {
-                self.ann[1] = true;
-            }
-            0x5C => {
-                self.ann[2] = false;
-            }
-            0x5D => {
-                self.ann[2] = true;
-            }
-            // $C05E/$C05F: DHIRESON/DHIRESOFF (AN3).  On the IIc this controls double
-            // hi-res independently of IOUDIS, the same as on the //e (see read path).
-            0x5E => {
-                self.mode.insert(MemMode::MF_DHIRES);
-            }
-            0x5F => {
-                self.mode.remove(MemMode::MF_DHIRES);
-            }
-            // $C07E: IOUDIS on; $C07F: IOUDIS off (in addition to DHIRESOFF read)
-            0x7E => {
-                self.mode.insert(MemMode::MF_IOUDIS);
-            }
-            0x7F => {
-                self.mode.remove(MemMode::MF_IOUDIS);
-            }
-            0x80..=0x8F => self.lc_write(reg),
-            0x90..=0xFF => {
-                let slot = ((reg as usize) >> 4) - 8;
-                let lo = reg & 0x0F;
-                if let Some(card) = self.cards.slot_mut(slot) {
-                    card.slot_io_write(lo, val, cycles);
-                    self.process_card_dma(slot);
-                    self.process_lc_bank_swap(slot);
-                    self.update_irq_line();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn flag_byte(&self, flag: MemMode) -> u8 {
-        if self.mode.contains(flag) { 0x80 } else { 0x00 }
-    }
-
-    /// Recompute `irq_line` by polling all cards for active IRQs.
-    fn update_irq_line(&mut self) {
-        self.irq_line = self.cards.any_irq_active();
-    }
-
-    /// Drain any pending DMA requests from a card and apply them to RAM.
-    fn process_card_dma(&mut self, slot: usize) {
-        // DMA write: card → main RAM
-        if let Some(card) = self.cards.slot_mut(slot)
-            && let Some(DmaWrite { dest, data }) = card.take_dma_write()
-        {
-            let dest = dest as usize;
-            let end = (dest + data.len()).min(65536);
-            let len = end - dest;
-            self.main_ram[dest..end].copy_from_slice(&data[..len]);
-        }
-        // DMA read: main RAM → card (pass slice directly; no heap copy needed)
-        if let Some(card) = self.cards.slot_mut(slot)
-            && let Some((src, len)) = card.take_dma_read_request()
-        {
-            let src = src as usize;
-            let len = len as usize;
-            let end = (src + len).min(65536);
-            card.dma_read_complete(&self.main_ram[src..end]);
         }
     }
 

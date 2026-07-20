@@ -69,6 +69,12 @@ impl Emulator {
         };
 
         while self.cpu.cycles < target {
+            // Apple //c VBL: latch the flag (and raise the IRQ when enabled) at
+            // each vertical-blanking boundary.  `next_vbl_cycle` is u64::MAX on
+            // other models, so this is a single always-false compare there.
+            if self.cpu.cycles >= self.bus.next_vbl_cycle {
+                self.bus.vbl_tick(self.cpu.cycles);
+            }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
             if self.cpu.waiting {
@@ -126,6 +132,9 @@ impl Emulator {
 
     /// Execute one instruction and return cycles consumed.
     pub fn step(&mut self) -> u8 {
+        if self.cpu.cycles >= self.bus.next_vbl_cycle {
+            self.bus.vbl_tick(self.cpu.cycles);
+        }
         dispatch::step(&mut self.cpu, &mut self.bus)
     }
 
@@ -163,6 +172,7 @@ impl Emulator {
         self.bus.cards.reset_all(power_cycle);
         self.bus.speaker_toggles.clear();
         self.cpu.reset(&mut self.bus);
+        self.bus.reset_vbl(self.cpu.cycles);
         self.mode = AppMode::Running;
     }
 }
@@ -246,5 +256,8 @@ impl Emulator {
         self.model = snap.model;
         self.cpu.restore_snapshot(&snap.cpu);
         self.bus.restore_snapshot(&snap.memory);
+        // The restored cycle counter may be behind `next_vbl_cycle`; re-seed the
+        // //c VBL schedule so VBL flags/interrupts keep firing after a load.
+        self.bus.reset_vbl(self.cpu.cycles);
     }
 }
