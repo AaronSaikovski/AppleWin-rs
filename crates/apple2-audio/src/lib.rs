@@ -10,6 +10,7 @@
 //!   source/Mockingboard.cpp
 
 pub mod ay8910;
+pub mod mix;
 pub mod speaker;
 pub mod ssi263;
 pub mod wav_writer;

@@ -64,6 +64,7 @@ impl EmulatorApp {
                 );
                 self.renderer.mono_tint = self.config.mono_tint();
                 self.renderer.color_vertical_blend = self.config.color_vertical_blend;
+                self.frame_cache.invalidate();
                 // Resize the window to match the new scale (no-op if maximized).
                 if scale_changed {
                     self.resize_to_scale(ctx);
@@ -87,6 +88,9 @@ impl EmulatorApp {
                     self.dc_filter_ctr = 0;
                     self.spkr_cycle_rem = 0.0;
                     self.last_audio_cycle = self.emu.cpu.cycles;
+                    if let Some(out) = &self.audio_out {
+                        out.flush();
+                    }
                 }
                 self.config.save();
                 self.show_settings = false;

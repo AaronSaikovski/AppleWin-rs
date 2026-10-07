@@ -3,7 +3,86 @@
 
 use super::*;
 
+/// Main/aux RAM ranges the Apple II renderers read: text/lo-res pages 1–2
+/// ($0400-$0BFF) and hi-res pages 1–2 ($2000-$5FFF).
+const VRAM_RANGES: [std::ops::Range<usize>; 2] = [0x0400..0x0C00, 0x2000..0x6000];
+/// Snapshot size: both ranges from both main and aux RAM.
+const VRAM_SNAPSHOT_LEN: usize = 2 * (0x0800 + 0x4000);
+
+/// Every non-RAM input that affects the Apple II rendered frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct FrameKey {
+    mode_bits: u32,
+    /// FLASH text phase; renderers toggle it every 16 frames.
+    flash_phase: u32,
+    video_type: VideoType,
+    ntsc_tv_mode: bool,
+    ntsc_scanlines: bool,
+    ntsc_mono_tint: Option<[u8; 3]>,
+    ntsc_vertical_blend: bool,
+    rgb_scanlines: bool,
+    rgb_vertical_blend: bool,
+}
+
+/// Inputs of the last rendered Apple II frame, so an unchanged screen can
+/// skip rendering and the texture upload.
+pub(super) struct FrameCache {
+    key: Option<FrameKey>,
+    /// Copy of the displayed video RAM (`VRAM_RANGES` of main, then aux).
+    vram: Vec<u8>,
+}
+
+impl FrameCache {
+    pub(super) fn new() -> Self {
+        Self {
+            key: None,
+            vram: vec![0; VRAM_SNAPSHOT_LEN],
+        }
+    }
+
+    /// Forget the cached frame so the next one is always rendered.
+    pub(super) fn invalidate(&mut self) {
+        self.key = None;
+    }
+
+    /// Returns `true` when `key` and the displayed video RAM match the
+    /// previous call; otherwise records them and returns `false`.
+    pub(super) fn is_unchanged(&mut self, key: FrameKey, main_ram: &[u8], aux_ram: &[u8]) -> bool {
+        let mut unchanged = self.key == Some(key);
+        self.key = Some(key);
+        let mut offset = 0;
+        for ram in [main_ram, aux_ram] {
+            for range in VRAM_RANGES {
+                let live = &ram[range];
+                let saved = &mut self.vram[offset..offset + live.len()];
+                offset += live.len();
+                // Earlier regions matched, so after the first difference
+                // only the remaining regions need refreshing.
+                if !unchanged || saved != live {
+                    unchanged = false;
+                    saved.copy_from_slice(live);
+                }
+            }
+        }
+        unchanged
+    }
+}
+
 impl EmulatorApp {
+    fn frame_key(&self) -> FrameKey {
+        FrameKey {
+            mode_bits: self.emu.bus.mode.bits(),
+            flash_phase: (self.frame_no / 16) % 2,
+            video_type: self.config.video_type,
+            ntsc_tv_mode: self.renderer.tv_mode,
+            ntsc_scanlines: self.renderer.scanlines,
+            ntsc_mono_tint: self.renderer.mono_tint,
+            ntsc_vertical_blend: self.renderer.color_vertical_blend,
+            rgb_scanlines: self.rgb_renderer.scanlines,
+            rgb_vertical_blend: self.rgb_renderer.color_vertical_blend,
+        }
+    }
+
     /// Render the Apple II screen into `self.pixel_buf` via `NtscRenderer`.
     pub(super) fn render_apple2(&mut self) {
         if let Some(ref iigs) = self.iigs {
@@ -145,29 +224,47 @@ impl EmulatorApp {
         in_logo_mode: bool,
     ) -> Option<egui::TextureId> {
         // ── Render display to GPU texture ─────────────────────────────────
+        if in_logo_mode {
+            // The framebuffer isn't refreshed while the logo shows; make sure
+            // the first frame after it is rendered.
+            self.frame_cache.invalidate();
+            return self.logo_texture.as_ref().map(|t| t.id());
+        }
+
         // When debugger is active, render debugger into the framebuffer
         // instead of the Apple II screen, matching original AppleWin.
-        if !in_logo_mode {
-            if self.show_debugger && self.debugger.active {
-                self.render_debugger();
-            } else {
-                self.render_apple2();
-            }
-
-            let tex_opts = TextureOptions::NEAREST;
-            let image =
-                ColorImage::from_rgba_unmultiplied([SCREEN_W, SCREEN_H], self.fb.pixels_as_bytes());
-            if let Some(t) = &mut self.texture {
-                t.set(image, tex_opts);
-            } else {
-                self.texture = Some(ctx.load_texture("apple2", image, tex_opts));
-            }
-        }
-        if in_logo_mode {
-            self.logo_texture.as_ref().map(|t| t.id())
+        // Neither the debugger view nor IIgs output is cached.
+        if self.show_debugger && self.debugger.active {
+            self.frame_cache.invalidate();
+            self.render_debugger();
+        } else if self.iigs.is_some() {
+            self.frame_cache.invalidate();
+            self.render_apple2();
         } else {
-            self.texture.as_ref().map(|t| t.id())
+            let key = self.frame_key();
+            let unchanged = self.frame_cache.is_unchanged(
+                key,
+                &self.emu.bus.main_ram[..],
+                &self.emu.bus.aux_ram[..],
+            );
+            if unchanged && let Some(t) = &self.texture {
+                return Some(t.id());
+            }
+            self.render_apple2();
         }
+
+        let tex_opts = TextureOptions::NEAREST;
+        // Every framebuffer pixel is opaque (alpha 0xFF), so premultiplied
+        // and unmultiplied RGBA are identical; the premultiplied path skips
+        // epaint's per-pixel unmultiply (~126 µs vs ~10 µs per frame).
+        let image =
+            ColorImage::from_rgba_premultiplied([SCREEN_W, SCREEN_H], self.fb.pixels_as_bytes());
+        if let Some(t) = &mut self.texture {
+            t.set(image, tex_opts);
+        } else {
+            self.texture = Some(ctx.load_texture("apple2", image, tex_opts));
+        }
+        self.texture.as_ref().map(|t| t.id())
     }
 }
 // ── Screenshot ────────────────────────────────────────────────────────────

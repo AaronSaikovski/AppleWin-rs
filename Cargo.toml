@@ -25,7 +25,6 @@ apple2-iigs     = { path = "crates/apple2-iigs" }
 
 bitflags         = { version = "2", features = ["serde"] }
 thiserror        = "1"
-tracing          = "0.1"
 serde            = { version = "1", features = ["derive"] }
 serde_yaml       = "0.9"
 serde_bytes      = "0.11"

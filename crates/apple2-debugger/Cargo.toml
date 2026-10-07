@@ -8,6 +8,5 @@ description = "Apple II debugger: disassembler, assembler, breakpoints, symbol t
 [dependencies]
 apple2-core = { workspace = true }
 thiserror   = { workspace = true }
-tracing     = { workspace = true }
 serde       = { workspace = true }
 serde_yaml  = { workspace = true }

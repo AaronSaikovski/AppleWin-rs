@@ -6,13 +6,12 @@
 //! VIA 2 → AY B).  The 3rd AY chip mirrors VIA 1's bus commands, providing
 //! three extra tone channels for expanded polyphony.
 //!
-//! Memory map is identical to Mockingboard:
-//!   $C0x0–$C0x7  VIA 1 (AY chip A + AY chip C mirror)
-//!   $C0x8–$C0xF  VIA 2 (AY chip B)
+//! Memory map is identical to Mockingboard (no ROM):
+//!   $Cn00–$Cn0F  VIA 1 (AY chip A + AY chip C mirror)
+//!   $Cn80–$Cn8F  VIA 2 (AY chip B)
 
 use crate::card::{Card, CardType};
-use crate::cards::mb_firmware::MB_FIRMWARE;
-use crate::cards::via6522::Via6522;
+use crate::cards::via6522::{self, Via6522, mb_decode};
 use crate::error::Result;
 use apple2_audio::ay8910::Ay8910;
 use std::io::{Read, Write};
@@ -74,19 +73,8 @@ impl Card for MegaAudioCard {
         self.slot
     }
 
-    fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
-        *MB_FIRMWARE.get(offset as usize).unwrap_or(&0xFF)
-    }
-
-    fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
-
-    fn cx_rom(&self) -> Option<&[u8; 256]> {
-        Some(MB_FIRMWARE)
-    }
-
-    fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_read(&mut self, offset: u8, cycles: u64) -> u8 {
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         if via_reg == 0x01 && self.via[via_idx].orb & 0x01 != 0 {
             self.strobe_ay(via_idx);
@@ -94,14 +82,21 @@ impl Card for MegaAudioCard {
         self.via[via_idx].read(via_reg)
     }
 
-    fn slot_io_write(&mut self, reg: u8, val: u8, cycles: u64) {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_write(&mut self, offset: u8, val: u8, cycles: u64) {
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         self.via[via_idx].write(via_reg, val);
         if via_reg == 0x00 {
             self.strobe_ay(via_idx);
         }
+    }
+
+    fn has_timers(&self) -> bool {
+        true
+    }
+
+    fn next_event_cycle(&self) -> u64 {
+        via6522::next_irq_cycle(&self.via)
     }
 
     fn fill_audio(&mut self, out: &mut Vec<f32>, cycles_elapsed: u64, sample_rate: u32) {
@@ -134,7 +129,11 @@ impl Card for MegaAudioCard {
         self.cycles_pending = 0;
     }
 
-    fn update(&mut self, _cycles: u64) {}
+    fn update(&mut self, cycles: u64) {
+        for via in &mut self.via {
+            via.tick(cycles);
+        }
+    }
 
     fn irq_active(&self) -> bool {
         self.via.iter().any(|v| v.irq_active())

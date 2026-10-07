@@ -3,7 +3,6 @@ pub mod disk2;
 pub mod fourplay;
 pub mod hd;
 pub mod languagecard;
-pub mod mb_firmware;
 pub mod megaaudio;
 pub mod mockingboard;
 pub mod mouse;

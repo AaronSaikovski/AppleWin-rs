@@ -27,11 +27,25 @@ impl EmulatorApp {
         // per physical key-down, never for OS auto-repeat.  Event::Text is
         // intentionally ignored because it fires on every repeat frame,
         // causing the Apple II to see the same letter dozens of times/second.
+        // egui-winit turns Ctrl/Cmd+C and Ctrl/Cmd+X into Copy/Cut events and
+        // swallows the key press, so the Event::Key path below never sees them.
+        // Forward them as the Apple II control codes unless an egui text field
+        // (e.g. a settings box) owns the keyboard.
+        let text_field_focused = ctx.wants_keyboard_input();
         ctx.input(|i| {
             for event in &i.events {
                 // Paste event — filled by Ctrl+V or OS paste gesture.
                 if let egui::Event::Paste(text) = event {
                     paste_text = Some(text.clone());
+                    continue;
+                }
+                let dbg_on = self.show_debugger && self.debugger.active;
+                if let Some(code) = copy_cut_control_code(event)
+                    && !dbg_on
+                    && !text_field_focused
+                {
+                    any_key = true;
+                    key_queue.push(code);
                     continue;
                 }
                 if let egui::Event::Key {
@@ -44,7 +58,6 @@ impl EmulatorApp {
                 {
                     let ctrl = modifiers.ctrl || modifiers.command;
                     let shift = modifiers.shift;
-                    let dbg_on = self.show_debugger && self.debugger.active;
                     match key {
                         // ── Global shortcuts (always active) ─────────
                         Key::F1 => do_hard_reset = true,
@@ -144,8 +157,8 @@ impl EmulatorApp {
                         key if ctrl => {
                             let c: Option<u8> = match key {
                                 Key::A => Some(0x01),
+                                // C and X arrive as Copy/Cut events (above).
                                 Key::B => Some(0x02),
-                                Key::C => Some(0x03),
                                 Key::D => Some(0x04),
                                 Key::E => Some(0x05),
                                 Key::F => Some(0x06),
@@ -166,7 +179,6 @@ impl EmulatorApp {
                                 Key::U => Some(0x15),
                                 Key::V => None,
                                 Key::W => Some(0x17),
-                                Key::X => Some(0x18),
                                 Key::Y => Some(0x19),
                                 Key::Z => Some(0x1A),
                                 _ => None,
@@ -270,8 +282,10 @@ impl EmulatorApp {
                 && let Ok(yaml) = std::fs::read_to_string(&path)
                 && let Ok(snap) = serde_yaml::from_str(&yaml)
             {
-                self.emu.restore_snapshot(&snap);
-                self.status_msg = Some("State loaded".to_string());
+                self.status_msg = Some(match self.emu.restore_snapshot(&snap) {
+                    Ok(()) => "State loaded".to_string(),
+                    Err(e) => format!("State not loaded: {e}"),
+                });
             }
         }
 
@@ -328,6 +342,16 @@ impl EmulatorApp {
         }
         // Quit is applied by the caller (frame.close() + early return).
         do_quit
+    }
+}
+
+/// Apple II control code for the clipboard events egui-winit emits instead of
+/// a key press: Ctrl/Cmd+C → Ctrl-C (`0x03`), Ctrl/Cmd+X → Ctrl-X (`0x18`).
+fn copy_cut_control_code(event: &egui::Event) -> Option<u8> {
+    match event {
+        egui::Event::Copy => Some(0x03),
+        egui::Event::Cut => Some(0x18),
+        _ => None,
     }
 }
 

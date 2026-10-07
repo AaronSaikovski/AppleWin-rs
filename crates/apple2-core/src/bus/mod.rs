@@ -302,7 +302,8 @@ pub struct Bus {
     /// Cost when false: one predicted branch per Bus::read/write (~0 overhead).
     pub mem_trace_enabled: bool,
     /// Per-instruction memory access log: (address, value, is_write).
-    /// Drained after each instruction by `Emulator::execute_debugged`.
+    /// Drained after each instruction by the debugger's `execute_until` hook
+    /// (memory breakpoints).  Includes opcode/operand fetches.
     pub mem_trace: Vec<(u16, u8, bool)>,
 
     // ── Cassette tape I/O ────────────────────────────────────────────────────
@@ -401,11 +402,17 @@ impl Bus {
         }
     }
 
-    /// Re-seed the //c VBL state.  Called on reset and snapshot restore, where
-    /// the cycle counter may have moved backwards relative to `next_vbl_cycle`.
+    /// Clear the //c VBL state and re-seed its schedule (machine reset).
     pub fn reset_vbl(&mut self, cycles: u64) {
         self.vbl_flag = false;
         self.vbl_irq_enabled = false;
+        self.reseed_vbl_schedule(cycles);
+    }
+
+    /// Re-seed the //c VBL schedule for `cycles`, keeping the VBL flag and
+    /// interrupt enable.  Used after snapshot restore, where the cycle counter
+    /// may have moved backwards relative to `next_vbl_cycle`.
+    pub fn reseed_vbl_schedule(&mut self, cycles: u64) {
         self.next_vbl_cycle = if self.model.is_iic() {
             // Next boundary of the form CYCLES_VISIBLE + n·CYCLES_PER_FRAME
             // at or after `cycles`.
@@ -419,10 +426,21 @@ impl Bus {
         self.update_irq_line();
     }
 
+    /// Set or clear a paging flag, rebuilding the page tables only if the
+    /// flag actually changed.
+    #[inline]
+    pub(super) fn set_paging_flag(&mut self, flag: MemMode, on: bool) {
+        if self.mode.contains(flag) != on {
+            self.mode.set(flag, on);
+            self.rebuild_page_tables();
+        }
+    }
+
     /// Rebuild the page routing tables from the current `mode` state.
     ///
     /// Called after every soft-switch write, mirroring `MemUpdatePaging()`
-    /// in `source/Memory.cpp`.
+    /// in `source/Memory.cpp`.  The tables are a pure function of `mode` and
+    /// `model`, so callers may skip the rebuild when `mode` is unchanged.
     pub fn rebuild_page_tables(&mut self) {
         let aux_read = self.mode.contains(MemMode::MF_AUXREAD);
         let aux_write = self.mode.contains(MemMode::MF_AUXWRITE);
@@ -730,13 +748,16 @@ impl Bus {
             // $C000–$C0FF: soft switches — the very hot path.
             self.soft_switch_read(lo as u8, cycles)
         } else {
-            // $C100–$CFFF: peripheral slot ROM
+            // $C100–$CFFF: peripheral slot ROM (or on-card registers, e.g.
+            // the Mockingboard VIAs at $Cn00/$Cn80).
             let slot = ((addr >> 8) & 0xF) as usize;
-            if let Some(card) = self.cards.slot_mut(slot) {
+            let val = if let Some(card) = self.cards.slot_mut(slot) {
                 card.io_read(lo as u8, cycles)
             } else {
                 self.floating_bus
-            }
+            };
+            self.after_cn_access(slot);
+            val
         }
     }
 
@@ -750,7 +771,34 @@ impl Bus {
             if let Some(card) = self.cards.slot_mut(slot) {
                 card.io_write(lo as u8, val, cycles);
             }
+            self.after_cn_access(slot);
         }
+    }
+
+    /// A $Cnxx access to a timer-equipped card can arm/acknowledge a timer or
+    /// change its interrupt enables: re-read its event schedule and the IRQ
+    /// line.  Skipped for all other cards so their ROM fetches stay cheap.
+    #[inline]
+    fn after_cn_access(&mut self, slot: usize) {
+        if self.cards.has_timers(slot) {
+            self.cards.refresh_event(slot);
+            self.update_irq_line();
+        }
+    }
+
+    /// Run cards whose self-timed event (e.g. a VIA timer expiry) is due at
+    /// `cycles`, then refresh the IRQ line so the interrupt is seen by the
+    /// next instruction.
+    pub fn service_card_events(&mut self, cycles: u64) {
+        self.cards.service_events(cycles);
+        self.update_irq_line();
+    }
+
+    /// Periodic per-quantum update of every card.  Cards may raise or drop
+    /// interrupts in `update`, so the IRQ line is refreshed afterwards.
+    pub fn update_cards(&mut self, cycles: u64) {
+        self.cards.update_all(cycles);
+        self.update_irq_line();
     }
 
     /// RamWorks III: switch to the given aux bank (0 = primary aux_ram).
@@ -810,7 +858,7 @@ impl Bus {
         let sel = reg & 0x03;
         let bank2 = (reg & 0x08) == 0;
         let reg4 = reg & 0x0F;
-
+        let before = self.mode;
         // WRITERAM logic: only odd-addressed reads can enable it
         if sel & 1 == 0 {
             // Even: clear prewrite, disable WRITERAM
@@ -840,7 +888,11 @@ impl Bus {
         }
 
         self.lc_last_access = reg4;
-        self.rebuild_page_tables();
+        // ProDOS toggles the LC on every MLI call and interrupt, often
+        // re-selecting the same state; the tables depend only on `mode`.
+        if self.mode != before {
+            self.rebuild_page_tables();
+        }
         self.floating_bus
     }
 
@@ -853,6 +905,7 @@ impl Bus {
         let sel = reg & 0x03;
         let bank2 = (reg & 0x08) == 0;
         let reg4 = reg & 0x0F;
+        let before = self.mode;
 
         // Any write clears prewrite
         self.lc_prewrite = false;
@@ -877,7 +930,9 @@ impl Bus {
         }
 
         self.lc_last_access = reg4;
-        self.rebuild_page_tables();
+        if self.mode != before {
+            self.rebuild_page_tables();
+        }
     }
 
     // ── Cassette helpers ──────────────────────────────────────────────────────
@@ -972,6 +1027,13 @@ pub struct BusSnapshot {
     pub aux_ram: Vec<u8>,
     pub mode: u32,
     pub speaker_state: bool,
+    /// Apple //c VBL interrupt enable ($C05B/$C05A).  `default` keeps older
+    /// save states (without these fields) loadable.
+    #[serde(default)]
+    pub vbl_irq_enabled: bool,
+    /// Apple //c latched VBL flag ($C019 bit 7, acknowledged by $C070).
+    #[serde(default)]
+    pub vbl_flag: bool,
 }
 
 impl Bus {
@@ -981,14 +1043,20 @@ impl Bus {
             aux_ram: self.aux_ram.to_vec(),
             mode: self.mode.bits(),
             speaker_state: self.speaker_state,
+            vbl_irq_enabled: self.vbl_irq_enabled,
+            vbl_flag: self.vbl_flag,
         }
     }
 
+    /// Restore memory and soft-switch state.  The caller re-seeds the VBL
+    /// schedule for the restored cycle counter (`reseed_vbl_schedule`).
     pub fn restore_snapshot(&mut self, snap: &BusSnapshot) {
         self.main_ram.copy_from_slice(&snap.main_ram);
         self.aux_ram.copy_from_slice(&snap.aux_ram);
         self.mode = MemMode::from_bits_truncate(snap.mode);
         self.speaker_state = snap.speaker_state;
+        self.vbl_irq_enabled = snap.vbl_irq_enabled;
+        self.vbl_flag = snap.vbl_flag;
         self.rebuild_page_tables();
     }
 }

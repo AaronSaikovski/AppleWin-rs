@@ -351,33 +351,19 @@ impl Drive {
 
     /// Advance the bit position by the number of bits that have elapsed since
     /// `last_cycle`, based on CPU cycle count.  Returns number of bits advanced.
+    ///
+    /// `last_cycle` only moves forward by whole bit cells, so the sub-bit
+    /// remainder carries into the next poll.  Discarding it made a typical
+    /// `LDA $C08C,X / BPL` loop (one poll every ~7 cycles) see 1 bit instead
+    /// of 1.75, spinning WOZ disks ~1.75× too slowly.
     fn advance_bits(&mut self, cycles: u64) -> u32 {
         if cycles <= self.last_cycle {
             return 0;
         }
         let elapsed = cycles - self.last_cycle;
-        let bits = (elapsed / CYCLES_PER_BIT) as u32;
-        self.last_cycle = cycles;
-        bits
-    }
-
-    /// Read a single bit from the current WOZ track at the current position.
-    fn woz_read_bit(&mut self) -> u8 {
-        let qt = self.quarter_track();
-        let woz = self.woz.as_ref().unwrap();
-        if let Some(track) = woz.track_for_quarter(qt) {
-            let bit_count = track.bit_count;
-            if bit_count == 0 {
-                return 0;
-            }
-            let pos = self.bit_pos % bit_count;
-            let bit = track.read_bit(pos, &mut self.rng);
-            self.bit_pos = (pos + 1) % bit_count;
-            bit
-        } else {
-            // No track data — return random bits (unformatted track)
-            self.rng.next_bit()
-        }
+        let bits = elapsed / CYCLES_PER_BIT;
+        self.last_cycle += bits * CYCLES_PER_BIT;
+        bits as u32
     }
 
     /// Advance the WOZ bit position by `count` bits without reading.
@@ -612,7 +598,9 @@ impl Disk2Card {
                 d.zero_count = 0;
                 d.dirty = false;
                 d.format = DiskFormat::Woz;
-                d.raw = data.to_vec();
+                // WOZ write-back is unsupported, so the raw image is never read
+                // again; don't hold a second copy of it.
+                d.raw = Vec::new();
                 d.write_protected = wp;
                 return true;
             }
@@ -651,7 +639,13 @@ impl Disk2Card {
             d.byte_pos = 0;
             d.dirty = false;
             d.format = format;
-            d.raw = data.to_vec();
+            // Only the sector formats are written back from `raw` (see
+            // `flush`); NIB is rebuilt from tracks and 13-sector is read-only.
+            d.raw = if matches!(format, DiskFormat::Dos33 | DiskFormat::ProDos) {
+                data.to_vec()
+            } else {
+                Vec::new()
+            };
             d.write_protected = write_protected;
             true
         } else {
@@ -705,8 +699,31 @@ impl Disk2Card {
     fn data_latch_read_woz(&mut self, bit_cell_count: u32) {
         let drive = &mut self.drives[self.active_drive];
 
+        // Resolve the track once per call; per-bit work is then index arithmetic
+        // plus one slice read.  Semantics match `woz_read_bit` exactly.
+        let qt = drive.quarter_track();
+        let track = drive.woz.as_ref().and_then(|w| w.track_for_quarter(qt));
+        let bit_count = track.map_or(0, |t| t.bit_count);
+        let mut pos = if bit_count > 0 {
+            drive.bit_pos % bit_count
+        } else {
+            drive.bit_pos
+        };
+
         for _ in 0..bit_cell_count {
-            let raw_bit = drive.woz_read_bit();
+            let raw_bit = match track {
+                Some(t) if bit_count > 0 => {
+                    let bit = t.read_bit(pos, &mut drive.rng);
+                    pos += 1;
+                    if pos == bit_count {
+                        pos = 0;
+                    }
+                    bit
+                }
+                Some(_) => 0,
+                // No track data — return random bits (unformatted track)
+                None => drive.rng.next_bit(),
+            };
 
             // 4-bit head window tracks the last 4 raw magnetic flux transitions
             drive.head_window <<= 1;
@@ -747,6 +764,7 @@ impl Disk2Card {
                 }
             }
         }
+        drive.bit_pos = pos;
     }
 
     /// Full WOZ read/write dispatch (C++ `DataLatchReadWriteWOZ`).
@@ -1658,7 +1676,8 @@ fn parse_woz(data: &[u8]) -> Option<WozImage> {
 /// The WOZ specification marks weak bits as long runs of zero bits.  Specifically,
 /// any sequence of 3 or more consecutive 0x00 bytes (24+ zero bits) is considered
 /// a weak bit area.  Returns (has_any, weak_mask) where weak_mask has 1-bits at
-/// positions that should be randomized on read.
+/// positions that should be randomized on read.  The mask is empty when the
+/// track has no weak areas (the common case), saving a track-sized copy.
 fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
     let byte_len = bits.len();
     let mut weak_mask = vec![0u8; byte_len];
@@ -1702,7 +1721,10 @@ fn detect_weak_bits(bits: &[u8], bit_count: u32) -> (bool, Vec<u8>) {
         }
     }
 
-    (has_any, weak_mask)
+    if !has_any {
+        return (false, Vec::new());
+    }
+    (true, weak_mask)
 }
 
 // ── Embedded 16-sector Disk II firmware (256 bytes) ──────────────────────────
@@ -2106,8 +2128,9 @@ mod tests {
     fn test_detect_weak_bits_short_run() {
         // Only 2 consecutive zero bytes = NOT weak
         let bits = vec![0xFF, 0x00, 0x00, 0xFF];
-        let (has_weak, _mask) = detect_weak_bits(&bits, 32);
+        let (has_weak, mask) = detect_weak_bits(&bits, 32);
         assert!(!has_weak);
+        assert!(mask.is_empty(), "no mask is allocated without weak areas");
     }
 
     #[test]
@@ -2250,46 +2273,23 @@ mod tests {
         assert_eq!(drive.last_cycle, 116);
     }
 
+    /// Polls that don't land on a bit-cell boundary must not lose the sub-bit
+    /// remainder: four polls 7 cycles apart cover 28 cycles = 7 bit cells.
+    #[test]
+    fn test_advance_bits_keeps_remainder_across_polls() {
+        let mut drive = Drive::new();
+        drive.last_cycle = 100;
+        let bits: u32 = (1..=4).map(|i| drive.advance_bits(100 + 7 * i)).sum();
+        assert_eq!(bits, 7);
+        assert_eq!(drive.last_cycle, 128);
+    }
+
     #[test]
     fn test_advance_bits_no_time() {
         let mut drive = Drive::new();
         drive.last_cycle = 100;
         assert_eq!(drive.advance_bits(100), 0);
         assert_eq!(drive.advance_bits(50), 0); // backwards = 0
-    }
-
-    // ── Track wrap-around test ───────────────────────────────────────────
-
-    #[test]
-    fn test_bit_position_wraps() {
-        let track = WozTrack {
-            bits: vec![0xFF, 0x00], // 16 bits
-            bit_count: 16,
-            has_weak_bits: false,
-            weak_mask: vec![0, 0],
-        };
-
-        let woz = WozImage {
-            version: 1,
-            tracks: vec![Some(track)],
-            tmap: {
-                let mut t = [0xFFu8; 160];
-                t[0] = 0;
-                t
-            },
-            write_protected: false,
-            disk_type: 1,
-            synchronized: false,
-        };
-
-        let mut drive = Drive::new();
-        drive.woz = Some(woz);
-        drive.loaded = true;
-        drive.bit_pos = 15; // at last bit
-
-        // Read one bit, should wrap to position 0
-        let _bit = drive.woz_read_bit();
-        assert_eq!(drive.bit_pos, 0); // wrapped around
     }
 
     // ── IWM compatibility (Apple IIc boot ROM) ──────────────────────────

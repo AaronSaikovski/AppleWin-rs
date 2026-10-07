@@ -224,10 +224,57 @@ fn snapshot_round_trip() {
     emu.bus.main_ram[0x50] = 0x00;
 
     // Restore
-    emu.restore_snapshot(&snap);
+    emu.restore_snapshot(&snap).expect("same model");
     assert_eq!(emu.cpu.a, 0x42);
     assert_eq!(emu.cpu.x, 0x10);
     assert_eq!(emu.bus.main_ram[0x50], 0xDE);
+}
+
+/// A save state from another model must be refused, leaving the running
+/// machine untouched — the snapshot carries no ROM or model wiring, so
+/// applying it would build a hybrid machine.
+#[test]
+fn snapshot_from_another_model_is_rejected() {
+    let mut iie = Emulator::new(
+        build_rom(0x0200, 0, &[]),
+        Apple2Model::AppleIIeEnh,
+        CpuType::Cpu65C02,
+    );
+    let iic = Emulator::new(
+        build_iic_rom(0x0200, 0, &[]),
+        Apple2Model::AppleIIc,
+        CpuType::Cpu65C02,
+    );
+    let mut snap = iic.take_snapshot();
+    snap.memory.main_ram[0x50] = 0xAB;
+    iie.bus.main_ram[0x50] = 0x11;
+
+    assert!(iie.restore_snapshot(&snap).is_err());
+    assert_eq!(iie.model, Apple2Model::AppleIIeEnh);
+    assert_eq!(iie.bus.main_ram[0x50], 0x11, "RAM untouched");
+}
+
+/// `execute_until` stops right after the instruction the predicate flags —
+/// the debugger's step-over relies on halting at the JSR's return address
+/// instead of running out the whole cycle budget.
+#[test]
+fn execute_until_stops_after_the_flagged_instruction() {
+    // $0300: JSR $0310 ; INC $50 ; JMP $0303     $0310: INC $51 ; RTS
+    let rom = build_rom(0x0300, 0, &[]);
+    let mut emu = Emulator::new(rom, Apple2Model::AppleIIeEnh, CpuType::Cpu65C02);
+    let main = [0x20, 0x10, 0x03, 0xE6, 0x50, 0x4C, 0x03, 0x03];
+    emu.bus.main_ram[0x0300..0x0308].copy_from_slice(&main);
+    emu.bus.main_ram[0x0310..0x0313].copy_from_slice(&[0xE6, 0x51, 0x60]);
+
+    // Run until the subroutine has returned to $0303.
+    let ran = emu.execute_until(1_000_000, |cpu, _, _| cpu.pc == 0x0303);
+    assert_eq!(emu.cpu.pc, 0x0303);
+    assert_eq!(emu.bus.main_ram[0x51], 1, "subroutine body ran once");
+    assert_eq!(
+        emu.bus.main_ram[0x50], 0,
+        "stopped before the next instruction"
+    );
+    assert_eq!(ran, 6 + 5 + 6, "JSR + INC zp + RTS");
 }
 
 // ===========================================================================

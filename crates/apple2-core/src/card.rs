@@ -101,8 +101,26 @@ pub trait Card: Send + 'static {
     /// Reset the card (power cycle if `power_cycle` is true, else warm reset).
     fn reset(&mut self, power_cycle: bool);
 
-    /// Periodic update — called once per emulator quantum (~1ms / ~17030 cycles).
+    /// Periodic update — called once per emulator quantum (~17030 cycles), and
+    /// additionally whenever `cycles` reaches this card's
+    /// [`next_event_cycle`](Self::next_event_cycle).  Implementations must
+    /// tolerate being called at arbitrary (monotonic) cycle counts.
     fn update(&mut self, cycles: u64);
+
+    /// True for cards with on-board timers that can raise interrupts on their
+    /// own (6522 VIA based sound cards).  The bus only re-polls the event
+    /// schedule and IRQ line after $Cnxx accesses to such cards, keeping ROM
+    /// fetches from other cards' $Cn pages cheap.  Must not change at runtime.
+    fn has_timers(&self) -> bool {
+        false
+    }
+
+    /// Absolute CPU cycle of this card's next self-timed interrupt, or
+    /// `u64::MAX` if none is scheduled.  The emulator calls `update` once the
+    /// CPU reaches it, so timer IRQs fire on time without per-cycle polling.
+    fn next_event_cycle(&self) -> u64 {
+        u64::MAX
+    }
 
     /// Serialize state to a writer.
     fn save_state(&self, out: &mut dyn Write) -> Result<()>;
@@ -225,6 +243,12 @@ pub struct DriveActivity {
 pub struct CardManager {
     slots: [Option<Box<dyn Card>>; NUM_SLOTS],
     aux: Option<Box<dyn Card>>,
+    /// Cached `next_event_cycle()` per slot (`u64::MAX` when empty).
+    events: [u64; NUM_SLOTS],
+    /// Minimum of `events` — compared against the CPU cycle each instruction.
+    next_event: u64,
+    /// Cached `has_timers()` per slot.
+    timers: [bool; NUM_SLOTS],
 }
 
 impl CardManager {
@@ -232,6 +256,9 @@ impl CardManager {
         Self {
             slots: std::array::from_fn(|_| None),
             aux: None,
+            events: [u64::MAX; NUM_SLOTS],
+            next_event: u64::MAX,
+            timers: [false; NUM_SLOTS],
         }
     }
 
@@ -239,7 +266,10 @@ impl CardManager {
     pub fn insert(&mut self, card: Box<dyn Card>) -> Option<Box<dyn Card>> {
         let slot = card.slot();
         assert!(slot < NUM_SLOTS, "slot out of range: {slot}");
-        self.slots[slot].replace(card)
+        self.timers[slot] = card.has_timers();
+        let prev = self.slots[slot].replace(card);
+        self.refresh_event(slot);
+        prev
     }
 
     /// Install a card in the aux slot.
@@ -250,7 +280,10 @@ impl CardManager {
     /// Remove a card from a slot.
     pub fn remove(&mut self, slot: usize) -> Option<Box<dyn Card>> {
         assert!(slot < NUM_SLOTS);
-        self.slots[slot].take()
+        self.timers[slot] = false;
+        let prev = self.slots[slot].take();
+        self.refresh_event(slot);
+        prev
     }
 
     /// Immutable access to a slot.
@@ -288,6 +321,7 @@ impl CardManager {
         if let Some(aux) = self.aux.as_deref_mut() {
             aux.reset(power_cycle);
         }
+        self.refresh_all_events();
     }
 
     /// Returns true if any card (slot 0–7 or aux) currently asserts an IRQ.
@@ -307,6 +341,46 @@ impl CardManager {
         }
         if let Some(aux) = self.aux.as_deref_mut() {
             aux.update(cycles);
+        }
+        self.refresh_all_events();
+    }
+
+    /// Earliest self-timed card event across all slots (`u64::MAX` if none).
+    #[inline]
+    pub fn next_event_cycle(&self) -> u64 {
+        self.next_event
+    }
+
+    /// True if the card in `slot` has on-board timers (see [`Card::has_timers`]).
+    #[inline]
+    pub fn has_timers(&self, slot: usize) -> bool {
+        slot < NUM_SLOTS && self.timers[slot]
+    }
+
+    /// Re-read `slot`'s next event after an access that may have changed it.
+    pub fn refresh_event(&mut self, slot: usize) {
+        self.events[slot] = self.slots[slot]
+            .as_deref()
+            .map_or(u64::MAX, |c| c.next_event_cycle());
+        self.next_event = self.events.iter().copied().min().unwrap_or(u64::MAX);
+    }
+
+    fn refresh_all_events(&mut self) {
+        for (event, card) in self.events.iter_mut().zip(&self.slots) {
+            *event = card.as_deref().map_or(u64::MAX, |c| c.next_event_cycle());
+        }
+        self.next_event = self.events.iter().copied().min().unwrap_or(u64::MAX);
+    }
+
+    /// Run `update` on every card whose event is due at `cycles`.
+    pub fn service_events(&mut self, cycles: u64) {
+        for slot in 0..NUM_SLOTS {
+            if self.events[slot] <= cycles {
+                if let Some(card) = self.slots[slot].as_deref_mut() {
+                    card.update(cycles);
+                }
+                self.refresh_event(slot);
+            }
         }
     }
 }

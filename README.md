@@ -3,7 +3,7 @@
 ![CI](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/ci.yml/badge.svg)
 ![Release](https://github.com/AaronSaikovski/AppleWin-rs/actions/workflows/release.yml/badge.svg)
 ![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)
-![Version](https://img.shields.io/badge/version-1.1.5-green.svg)
+![Version](https://img.shields.io/badge/version-1.1.6-green.svg)
 
 A Rust rewrite of [AppleWin](https://github.com/AppleWin/AppleWin) — a fully-featured Apple II emulator originally written for Windows. This port provides cross-platform support (Windows, macOS, Linux) while maintaining cycle-accurate emulation.
 
@@ -53,7 +53,7 @@ xattr -d com.apple.quarantine AppleWin.app
 - Apple II+ (`][+`)
 - Apple IIe (`//e`)
 - Apple IIe Enhanced (`//e Enhanced`) — default
-- Apple IIc (`//c`) — 32KB "3.5 ROM" (ROM 0, 342-0033-A), built-in peripherals, 128KB RAM; boots DOS 3.3 and ProDOS, and renders double hi-res (DHGR) software correctly
+- Apple IIc (`//c`) — 32KB ROM 4 (341-0445-B), built-in peripherals, 128KB RAM; boots DOS 3.3 and ProDOS, and renders double hi-res (DHGR) software correctly
 - **Apple IIgs** (`//gs`) — 65C816 CPU, Super Hi-Res graphics, Ensoniq audio _(temporarily disabled in the UI; see note below)_
 
 > No support currently for the //c+, Laser 128, or Laser 128EX/EX2.
@@ -80,7 +80,7 @@ The Apple IIgs emulation includes:
 | Shadowing        | Bank $00/$01 to $E0/$E1 display memory mirroring                 |
 | BRAM             | 256-byte battery-backed parameter RAM with factory defaults      |
 
-> **ROM files:** IIgs ROMs are not included. Place your ROM file in `roms/Apple_IIgs/` next to the executable. ROM 03 (256KB) is recommended. The emulator auto-detects the ROM version.
+> **ROM files:** IIgs ROMs are loaded at runtime (not compiled in) from `roms/Apple_IIgs/`, searched next to the executable and in the working directory, or from the `iigs_rom_path` setting. ROM 03 (256KB) is recommended. The emulator auto-detects the ROM version.
 
 ---
 
@@ -91,7 +91,7 @@ and dual-bank firmware, rather than as a IIe with cards:
 
 | Feature            | Description                                                                          |
 | ------------------ | ----------------------------------------------------------------------------------- |
-| 32KB "3.5 ROM"     | ROM version 0 (342-0033-A) — first 32KB //c firmware, adds UniDisk 3.5 support, the Mini-Assembler, and the self-test diagnostic |
+| 32KB ROM 4         | ROM version 4 (341-0445-B) — the last and most software-compatible 32KB //c firmware, with Memory Expansion Card support and the mouse-interrupt and disk-firmware fixes of the earlier ROMs |
 | Dual-bank ROM      | Lower 16KB standard bank + upper 16KB alternate bank, switched via the `$C028` ROM switch |
 | Forced internal ROM| `INTCXROM` is forced so the //c always runs its own built-in slot firmware          |
 | IWM disk controller| Built-in Integrated Wozniak Machine drives the disk port (enable-latch status semantics), rather than a discrete Disk II card |
@@ -110,7 +110,7 @@ and dual-bank firmware, rather than as a IIe with cards:
   directly, so //c software such as Broderbund's *Airheart* — which enables DHGR
   with a bare `$C05E` and never touches `IOUDIS` — renders in correct double
   hi-res colour instead of garbled single hi-res.
-- **Correct 32K ROM bank mapping.** The dual-bank 3.5 ROM maps the standard bank
+- **Correct 32K ROM bank mapping.** The dual-bank ROM maps the standard bank
   to the lower 16KB and the alternate bank to the upper 16KB, switched via `$C028`.
 
 ---
@@ -123,7 +123,7 @@ and dual-bank firmware, rather than as a IIe with cards:
 | -------------------- | ---------------------------------------------------------------- |
 | Disk II              | 5.25" floppy controller (DSK/DO/PO/NIB/WOZ v1 & v2/D13)          |
 | Hard Disk Controller | ProDOS block device (HDV/PO/2MG), up to 8 drives                 |
-| Mockingboard         | Dual 6522 VIA + 2x AY-3-8910 PSG sound card                      |
+| Mockingboard         | Dual 6522 VIA + 2x AY-3-8910 PSG sound card at `$Cn00`/`$Cn80`, timer IRQs |
 | Phasor               | Mockingboard superset with native dual-mode                      |
 | MegaAudio            | Mockingboard-compatible with enhanced 3rd PSG                    |
 | SD Music             | Mockingboard-compatible with SD card music streaming             |
@@ -249,21 +249,21 @@ Or run the compiled binary directly:
 ### Testing
 
 ```sh
-cargo test
+cargo test --workspace --no-default-features --features headless
 ```
 
-Runs 479 tests across all crates:
+This is what CI runs (the `applewin` GUI crate has no tests). It runs 514 tests across all crates:
 
-| Crate                       | Tests | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apple2-core`               | 294   | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller, IWM compatibility (handshake/ready/status-register reads), Apple IIc model (INTCXROM, 32K ROM banking, AN3-driven double hi-res), Via6522 (register read/write, timers, IRQ, state serialization), performance regression guards (dispatch-table equivalence, speaker toggle cap, card slot range checks) |
-| `apple2-core` (integration) | 15    | Boot sequence, program execution, snapshots, Fibonacci, Apple IIc boot/reset/ROM execution, Apple //c 3.5-ROM disk boot (title banner, DOS 3.3, and ProDOS)                                                                                                                                                                                                                                                                                                                             |
-| `apple2-iigs`               | 89    | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP                                                                                                                                                                                                                                                                                                                                              |
-| `apple2-iigs` (integration) | 15    | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches                                                                                                                                                                                                                                                                                                                                                                                               |
-| `apple2-iigs` (peripherals) | 35    | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path)                                                                                                                                                                                                                                                                                                             |
-| `apple2-audio`              | 10    | Speaker interpolation, DC filter, amplitude, WAV recording                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `apple2-video`              | 19    | NTSC tables, text/lores/hires/dlores rendering, mixed mode, double hi-res (DHGR) palette remap and composite signal-chain rendering                                                                                                                                                                                                                                                                                                                                                     |
-| `apple2-debugger`           | 2     | Disassembly                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Crate                          | Tests | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apple2-core`                  | 305   | CPU opcodes (6502/65C02/undocumented), addressing modes, BCD arithmetic, interrupts, soft switches, language card, ALTZP memory routing, expansion cards, Disk II controller (incl. WOZ bit timing), IWM compatibility (handshake/ready/status-register reads), Apple IIc model (INTCXROM, 32K ROM banking, AN3-driven double hi-res), Via6522 (registers, IER/IFR semantics, timers, free-running period, IRQ scheduling, state serialization), performance regression guards (dispatch-table equivalence, speaker toggle cap, card slot range checks) |
+| `apple2-core` (integration)    | 23    | Boot sequence, program execution, snapshots (incl. model mismatch and //c VBL state), `execute_until`, Fibonacci, Apple IIc boot/reset/ROM execution, Apple //c ROM 4 disk boot (title banner, DOS 3.3, and ProDOS), Mockingboard at `$Cn00`/`$Cn80` with self-timed VIA interrupts                                                                                                                                                                                                     |
+| `apple2-iigs`                  | 89    | 65C816 CPU: all addressing modes, 8/16-bit arithmetic, BCD, mode switching (XCE/REP/SEP), block moves, interrupts, stack ops, TSB/TRB, COP                                                                                                                                                                                                                                                                                                                                              |
+| `apple2-iigs` (integration)    | 15    | ROM boot, RAM programs, native mode 16-bit, bus banking, shadowing, Mega II soft-switches                                                                                                                                                                                                                                                                                                                                                                                               |
+| `apple2-iigs` (peripherals)    | 35    | Memory/ROM mapping, BRAM checksums, ADB protocol, SHR rendering, Ensoniq registers, SmartPort disk I/O (incl. firmware stub, READ BLOCK via WDM trap, NO DEVICE error path)                                                                                                                                                                                                                                                                                                             |
+| `apple2-audio`                 | 19    | Speaker interpolation, DC filter, amplitude, WAV recording, source mixing and resampling                                                                                                                                                                                                                                                                                                                                                                                               |
+| `apple2-video`                 | 19    | NTSC tables, text/lores/hires/dlores rendering, mixed mode, full-framebuffer coverage in NTSC/idealized/TV modes, double hi-res (DHGR) palette remap and composite signal-chain rendering                                                                                                                                                                                                                                                                                              |
+| `apple2-debugger`              | 9     | Disassembly, step-over/step-out, PC and memory breakpoints, trace                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ---
 
@@ -284,7 +284,7 @@ Runs 479 tests across all crates:
 ## Features
 
 - **Drag-and-drop** disk image loading
-- **Clipboard** copy/paste (Ctrl+C copies text screen, Ctrl+V pastes as keystrokes)
+- **Clipboard** paste (Ctrl+V pastes as keystrokes)
 - **Screenshot** capture (F12, saves PNG to screenshots directory)
 - **WAV recording** of emulator audio (F9 toggle)
 - **Disk activity indicators** — drive LEDs with real-time track numbers and HDD activity in the status bar
@@ -313,7 +313,7 @@ Runs 479 tests across all crates:
 | Shift+F11 | Load state                    |
 | F12       | Screenshot (PNG)              |
 | Ctrl+Esc  | Quit                          |
-| Ctrl+C    | Copy text screen to clipboard |
+| Ctrl+C    | Ctrl-C to the Apple II (break) |
 | Ctrl+V    | Paste clipboard as keystrokes |
 | Ctrl+0    | Speed 40x                     |
 | Ctrl+1    | Speed 10x (normal)            |
@@ -403,7 +403,7 @@ These ports allow building the original C++ AppleWin on non-Windows platforms:
 
 - `cargo fmt --all --check` — code formatting
 - `cargo clippy --workspace --all-targets -- -D warnings` — lint (all platforms)
-- `cargo test` — test suite (all platforms)
+- `cargo test --workspace --no-default-features --features headless` — test suite (all platforms)
 - `cargo build --release` — GUI and headless builds (all platforms)
 
 **Release builds** are triggered by version tags (`v*.*.*`) and produce archives for:

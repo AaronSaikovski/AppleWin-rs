@@ -10,7 +10,6 @@ apple2-core  = { path = "../apple2-core" }
 apple2-audio = { path = "../apple2-audio" }
 apple2-video = { path = "../apple2-video" }
 bitflags     = { workspace = true }
-tracing      = { workspace = true }
 serde        = { workspace = true }
 serde_bytes  = { workspace = true }
 

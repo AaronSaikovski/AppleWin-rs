@@ -5,13 +5,169 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.3] - 2026-05-08
+## [Unreleased]
 
 ### Fixed
 
-- **GitHub Actions: Publish macOS DMG to Releases.** Added a `publish-dmg-macos` job
-  to the CI workflow that signs the app with `codesign` and packages a notarized
-  `.dmg` into GitHub Releases artifacts.
+- **applewin: Mockingboard/Phasor/SAM audio is now mixed with the speaker
+  instead of appended after it.** Both sources were pushed into the audio ring
+  buffer back-to-back, so with a sound card installed each frame queued ~2×
+  real time: latency climbed to the 2 s buffer cap and samples were dropped.
+  Card output is now summed sample-by-sample into the speaker frame (and two
+  cards are summed with each other) before a single push. Cards also render
+  the emulated cycles actually run this frame rather than the fixed
+  `cycles_per_frame()`, so they stay in step with the speaker and fall silent
+  while the debugger is paused.
+
+- **apple2-core: WOZ disks no longer spin ~1.75× too slowly.** `advance_bits`
+  reset the drive clock to the poll cycle, discarding the sub-bit remainder on
+  every read; a `LDA $C08C,X / BPL` loop polling every ~7 cycles advanced 1 bit
+  instead of 1.75. The remainder now carries into the next poll.
+
+- **apple2-core: Mockingboard, Phasor, MegaAudio and SD Music are reachable at
+  their real addresses.** The VIAs were wired to the slot I/O range
+  `$C0n0–$C0nF` with only 8 registers each, while `$Cnxx` returned
+  Mockingboard-D ROM bytes, so standard Mockingboard software (which talks to
+  `$Cn00`/`$Cn80`) produced no sound, and IER/IFR/ACR were unreachable. VIA 1 is
+  now at `$Cn00–$Cn0F` and VIA 2 at `$Cn80–$Cn8F` (A4–A6 undecoded, as on the
+  real card), with all 16 registers. SD Music keeps its control registers at
+  `$CnF0–$CnFF`; Phasor keeps its mode switch at `$C0n9`. The unused
+  `mb_firmware` module (and its `unsafe` cast) is removed.
+
+- **apple2-core: VIA timer interrupts fire on their own.** Timers only
+  advanced when the program touched the card, and the IRQ line was never
+  refreshed after periodic card updates, so IRQ-driven music players never
+  received timer interrupts. Cards now report their next timer expiry
+  (`Card::next_event_cycle`); `Emulator::execute` services it at that cycle and
+  refreshes the IRQ line. The IRQ line is also refreshed after every
+  `update_all` and after `$Cnxx` accesses to timer cards.
+
+- **apple2-core: 6522 register semantics.** IER writes now set or clear the
+  selected bits according to bit 7 (and IER reads return bit 7 set); reading
+  T1C-L / T2C-L acknowledges the T1 / T2 interrupt; register `$F` aliases ORA;
+  timer counters no longer underflow (a debug-build panic) one cycle before
+  expiry; long idle gaps saturate instead of truncating.
+
+- **apple2-core: SSI263 speech timing.** `MockingboardCard::update` passed the
+  absolute cycle count to `Ssi263::tick`, which expects elapsed cycles, so every
+  phoneme finished at the next update. The card now tracks elapsed cycles
+  (synchronising before each phoneme write) and schedules the READY interrupt.
+
+- **applewin: Ctrl+C and Ctrl+X reach the emulated machine again.** Since the
+  egui 0.30 upgrade, egui-winit turns Ctrl/Cmd+C and Ctrl/Cmd+X into
+  `Event::Copy`/`Event::Cut` and drops the key press, so BASIC/monitor break
+  (Ctrl-C) and cancel-line (Ctrl-X) were lost. Those events now send `$03` /
+  `$18`, except while the debugger or an egui text field has the keyboard.
+
+- **apple2-core: loading a save state keeps //c VBL interrupts.** Restore
+  re-seeded the VBL schedule via `reset_vbl`, which also cleared the VBL
+  interrupt enable and latched flag (neither was saved), so programs that had
+  enabled VBL interrupts stopped receiving them. `BusSnapshot` now stores both
+  (`#[serde(default)]`, so older save states still load) and restore only
+  re-seeds the schedule (`Bus::reseed_vbl_schedule`).
+
+- **apple2-core: free-running VIA T1 period is latch + 2 cycles.** After each
+  expiry the counter was reloaded with the cycles left *until* the next expiry,
+  which `tick` then treated as a count that expires 2 cycles later, so every
+  period ran 2 cycles long (latch + 4).
+
+- **apple2-video: hi-res and double hi-res NTSC frames are fully drawn.** The
+  last odd framebuffer row of hi-res (row 383, or 319 in mixed mode) was never
+  written, and in TV mode the -2 pixel composite offset left the 2 right-hand
+  columns unwritten; both showed stale pixels from the previous mode. The
+  render-coverage test now checks every row in NTSC, idealized and TV modes.
+
+- **applewin: debugger step-over and step-out work.** The handlers set
+  `step_over_target`/`step_out_sp` and then called `deactivate()`, which
+  cleared them, and nothing checked them during execution — both just resumed
+  the program. `DebuggerState::begin_step_over`/`begin_step_out` now arm the
+  target after resuming, and the GUI runs `Emulator::execute_until` (full
+  card/VBL/IRQ servicing) until the JSR's return address is reached or an
+  RTS/RTI pops above the starting stack level. Full-speed disk mode keeps
+  working during a step (it runs through the same hook).
+
+- **applewin: debugger breakpoints and trace work.** `BP <addr>` and
+  `BPM <addr> [R|W]` added breakpoints that nothing ever checked, and `T <n>`
+  set a counter nothing read. `DebuggerState::after_instruction` now runs after
+  every instruction whenever a breakpoint is enabled or a trace/step is active
+  (otherwise the emulator keeps its unhooked fast path): PC breakpoints halt
+  before the instruction at their address, memory breakpoints halt after the
+  instruction that read/wrote the address (via the bus `mem_trace` log, which
+  is only enabled while a memory breakpoint exists; opcode fetches count as
+  reads), and `T <n>` records `n` instructions in the trace buffer and halts.
+  A stop opens the debugger view.
+
+- **apple2-core: save states from another machine model are refused.**
+  `Emulator::restore_snapshot` set `emu.model` from the file but kept the
+  running ROM and bus wiring, so loading e.g. a //c state on a IIe built a
+  hybrid machine. It now returns `Error::ModelMismatch` and leaves the machine
+  untouched; F11 load shows the reason in the status bar, and the
+  restore-on-launch state is skipped.
+
+### Performance
+
+- **applewin: the paused debugger no longer redraws at full frame rate.**
+  Continuous repaint was gated on `AppMode::Stepping`, which is never set, and
+  was forced on whenever the debugger was shown. It now stops while the
+  debugger has halted execution; input still triggers repaints.
+
+- **applewin: framebuffer → texture conversion ~12× cheaper.** The texture is
+  built with `ColorImage::from_rgba_premultiplied` (all pixels are opaque, so
+  the result is identical), skipping epaint's per-pixel unmultiply: ~10 µs vs
+  ~126 µs per frame.
+
+- **applewin: lock-free audio output.** The `Arc<Mutex<VecDeque>>` ring is
+  replaced by an `rtrb` single-producer/single-consumer ring buffer, so the
+  cpal realtime callback never blocks on the GUI thread; it reads samples in
+  chunks. Discarding queued audio (after full-speed bursts, resets and machine
+  changes) is a flush request the callback honours. WAV recording now captures
+  exactly the samples queued to the device. The per-frame Mockingboard sample
+  `Vec` is replaced by a reused scratch buffer.
+
+- **applewin: no audio over-production above 1× speed.** Speaker samples are
+  sized by `CPU_HZ × speed / sample_rate`, so faster emulation packs more
+  cycles into each sample instead of generating 40× real time at 40× speed and
+  dropping the excess at the buffer cap. Card output is resampled to the
+  speaker frame length (`apple2_audio::mix::mix_resampled_into`). Synthesis is
+  skipped while the ring is full. Output at 1× is unchanged.
+
+- **applewin: static screens skip rendering and texture upload.** A frame
+  cache keyed on the memory mode, flash phase and every video setting, plus a
+  snapshot of the displayed text/hi-res pages (main and aux), skips
+  `render_apple2`, `ColorImage` construction and the GPU upload when nothing
+  changed. The debugger view and the IIgs always render.
+
+- **apple2-core: WOZ bit reads resolve the track once per latch read** instead
+  of per bit, and wrap the bit position with a compare instead of two `%`
+  divisions.
+
+- **apple2-core: paging switches only rebuild the page tables when the mode
+  changes.** `$C000–$C00B` writes and language-card `$C080–$C08F` accesses
+  previously rebuilt all 512 entries unconditionally; ProDOS re-selects the
+  same LC state on every MLI call.
+
+- **apple2-core: less duplicate disk-image memory.** The raw image copy is kept
+  only for DOS 3.3 / ProDOS order images (the formats written back from it);
+  WOZ, NIB and 13-sector images no longer hold a second copy. WOZ tracks
+  without weak-bit areas no longer allocate a track-sized zeroed weak mask.
+
+### Removed
+
+- **apple2-debugger: never-compiled modules.** `assembler.rs`, `markup.rs` and
+  `watch.rs` were not declared in `lib.rs`, so they never built and their tests
+  never ran (`watch.rs` also duplicated the live `watches.rs`). They remain in
+  git history if a mini-assembler or data markup is wired up later.
+- **apple2-core: unused `AppMode::Stepping` and `AppMode::Benchmark`** (never
+  set; the debugger tracks halting itself).
+- **All crates: the unused `tracing` dependency.**
+- **roms/Mockingboard-D.rom**, no longer referenced since the Mockingboard
+  family has no slot ROM.
+
+### Changed
+
+- **Docs:** README version badge, //c ROM 4, IIgs ROM loading, test command
+  and per-crate counts, Ctrl+C behaviour; CHANGELOG versions reordered newest
+  first.
 
 ## [1.1.6] - 2026-07-21
 
@@ -356,6 +512,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Bus::new()` now accepts an `Apple2Model` parameter for model-aware memory
   initialization and soft-switch behavior.
 - Custom ROM loading accepts 32KB ROMs in addition to 12KB and 16KB.
+
+## [1.1.3] - 2026-05-08
+
+### Fixed
+
+- **GitHub Actions: Publish macOS DMG to Releases.** Added a `publish-dmg-macos` job
+  to the CI workflow that signs the app with `codesign` and packages a notarized
+  `.dmg` into GitHub Releases artifacts.
 
 ## [1.1.0] - 2026-04-13
 

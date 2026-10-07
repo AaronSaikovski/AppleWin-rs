@@ -7,6 +7,24 @@
 use crate::error::Result;
 use std::io::{Read, Write};
 
+/// Decode a Mockingboard-family `$Cn00–$CnFF` offset into `(via, register)`.
+///
+/// Matches the Sweet Micro Systems wiring (and AppleWin's `MB_Read`/`MB_Write`):
+/// A7 selects the VIA (0 = `$Cn00`, 1 = `$Cn80`) and A3–A0 the register; A4–A6
+/// are not decoded, so each VIA mirrors through its half of the page.
+#[inline]
+pub fn mb_decode(offset: u8) -> (usize, u8) {
+    ((offset >> 7) as usize, offset & 0x0F)
+}
+
+/// Earliest enabled timer interrupt across a card's VIAs.
+pub fn next_irq_cycle(vias: &[Via6522]) -> u64 {
+    vias.iter()
+        .map(Via6522::next_irq_cycle)
+        .min()
+        .unwrap_or(u64::MAX)
+}
+
 /// Minimal 6522 VIA model — registers needed for AY control and timer IRQs.
 pub struct Via6522 {
     pub ora: u8,  // Output Register A (data bus to AY)
@@ -66,7 +84,9 @@ impl Via6522 {
         if current_cycles <= self.last_cycles {
             return;
         }
-        let delta = (current_cycles - self.last_cycles) as u32;
+        // Saturate rather than truncate: a timer idle for > 2^32 cycles has
+        // expired regardless, and truncation could make it look un-expired.
+        let delta = (current_cycles - self.last_cycles).min(u32::MAX as u64) as u32;
         self.last_cycles = current_cycles;
 
         if self.t1_running {
@@ -76,15 +96,17 @@ impl Via6522 {
                 self.ifr |= 0x40; // bit 6 = T1 timeout
                 let continuous = self.acr & 0x40 != 0; // ACR bit 6
                 if continuous {
-                    // Reload from latch and continue
+                    // Reload from latch and continue.  The real 6522 period is
+                    // latch + 2 cycles.  `remaining` cycles have run since the
+                    // expiry, i.e. `r = remaining % period` into the current
+                    // period, so the counter now reads `latch - r` — which
+                    // expires (at count + 2) exactly one period after the last
+                    // expiry.  r == latch + 1 is the reload cycle itself; the
+                    // counter holds at 0 there (expiry then lands 1 cycle late).
                     let latch = ((self.t1lh as u32) << 8) | (self.t1ll as u32);
                     let remaining = delta - (t1 + 2);
-                    let period = latch + 2;
-                    let new_count = if period > 0 {
-                        period - (remaining % period)
-                    } else {
-                        0
-                    };
+                    let r = remaining % (latch + 2);
+                    let new_count = latch.saturating_sub(r);
                     self.t1cl = (new_count & 0xFF) as u8;
                     self.t1ch = ((new_count >> 8) & 0xFF) as u8;
                 } else {
@@ -94,7 +116,10 @@ impl Via6522 {
                     self.t1_running = false;
                 }
             } else {
-                let new_t1 = t1 - delta;
+                // delta == t1 + 1 lands in the cycle between reaching 0 and the
+                // expiry; hold at 0 (expiry then follows within 2 cycles)
+                // instead of underflowing.
+                let new_t1 = t1.saturating_sub(delta);
                 self.t1cl = (new_t1 & 0xFF) as u8;
                 self.t1ch = ((new_t1 >> 8) & 0xFF) as u8;
             }
@@ -108,24 +133,52 @@ impl Via6522 {
                 self.t2cl = 0xFF;
                 self.t2ch = 0xFF;
             } else {
-                let new_t2 = t2 - delta;
+                let new_t2 = t2.saturating_sub(delta);
                 self.t2cl = (new_t2 & 0xFF) as u8;
                 self.t2ch = ((new_t2 >> 8) & 0xFF) as u8;
             }
         }
     }
 
-    pub fn read(&self, reg: u8) -> u8 {
+    /// Absolute CPU cycle at which a timer will next raise an *enabled*
+    /// interrupt, or `u64::MAX` if none is pending.
+    ///
+    /// Mirrors the expiry condition in [`tick`](Self::tick) (`delta >= count + 2`),
+    /// so ticking at the returned cycle sets the IFR flag.  Timers whose flag is
+    /// already set are skipped: their IRQ is asserted until software clears it.
+    pub fn next_irq_cycle(&self) -> u64 {
+        let mut next = u64::MAX;
+        if self.t1_running && self.ier & 0x40 != 0 && self.ifr & 0x40 == 0 {
+            let t1 = ((self.t1ch as u64) << 8) | self.t1cl as u64;
+            next = next.min(self.last_cycles + t1 + 2);
+        }
+        if self.t2_running && self.ier & 0x20 != 0 && self.ifr & 0x20 == 0 {
+            let t2 = ((self.t2ch as u64) << 8) | self.t2cl as u64;
+            next = next.min(self.last_cycles + t2 + 2);
+        }
+        next
+    }
+
+    /// Read a register.  Like the real 6522, reading T1C-L clears the T1
+    /// interrupt flag and reading T2C-L clears the T2 flag — IRQ handlers rely
+    /// on this to acknowledge timer interrupts.
+    pub fn read(&mut self, reg: u8) -> u8 {
         match reg & 0x0F {
             0x0 => self.orb,
-            0x1 => self.ora,
+            0x1 | 0xF => self.ora,
             0x2 => self.ddrb,
             0x3 => self.ddra,
-            0x4 => self.t1cl,
+            0x4 => {
+                self.ifr &= !0x40;
+                self.t1cl
+            }
             0x5 => self.t1ch,
             0x6 => self.t1ll,
             0x7 => self.t1lh,
-            0x8 => self.t2cl,
+            0x8 => {
+                self.ifr &= !0x20;
+                self.t2cl
+            }
             0x9 => self.t2ch,
             0xA => self.sr,
             0xB => self.acr,
@@ -139,15 +192,15 @@ impl Via6522 {
                         0x00
                     }
             }
-            0xE => self.ier,
-            _ => 0xFF,
+            // IER bit 7 always reads back as 1.
+            _ => self.ier | 0x80,
         }
     }
 
     pub fn write(&mut self, reg: u8, val: u8) {
         match reg & 0x0F {
             0x0 => self.orb = val,
-            0x1 => self.ora = val,
+            0x1 | 0xF => self.ora = val,
             0x2 => self.ddrb = val,
             0x3 => self.ddra = val,
             // T1CL: update latch and counter low byte
@@ -177,8 +230,14 @@ impl Via6522 {
             0xC => self.pcr = val,
             // IFR: writing 1s to bits CLEARS them (6522 behavior)
             0xD => self.ifr &= !(val & 0x7F),
-            0xE => self.ier = val,
-            _ => {}
+            // IER: bit 7 selects set (1) or clear (0) for the bits written as 1.
+            _ => {
+                if val & 0x80 != 0 {
+                    self.ier |= val & 0x7F;
+                } else {
+                    self.ier &= !(val & 0x7F);
+                }
+            }
         }
     }
 
@@ -544,9 +603,82 @@ mod tests {
     }
 
     #[test]
-    fn read_unknown_register_returns_0xff() {
-        let via = Via6522::new();
-        assert_eq!(via.read(0xF), 0xFF);
+    fn reg_f_is_ora_without_handshake() {
+        let mut via = Via6522::new();
+        via.write(0xF, 0x5A);
+        assert_eq!(via.ora, 0x5A);
+        assert_eq!(via.read(0xF), 0x5A);
+    }
+
+    #[test]
+    fn ier_write_bit7_sets_or_clears_selected_bits() {
+        let mut via = Via6522::new();
+        via.write(0xE, 0xC0); // set T1
+        via.write(0xE, 0xA0); // set T2
+        assert_eq!(via.ier, 0x60);
+        via.write(0xE, 0x40); // clear T1 only
+        assert_eq!(via.ier, 0x20);
+        via.write(0xE, 0x7F); // clear all
+        assert_eq!(via.ier, 0x00);
+        assert_eq!(via.read(0xE), 0x80, "IER bit 7 reads as 1");
+    }
+
+    #[test]
+    fn reading_t1cl_acknowledges_t1_interrupt() {
+        let mut via = Via6522::new();
+        via.ifr = 0x60;
+        via.read(0x4);
+        assert_eq!(via.ifr, 0x20, "T1C-L read clears only the T1 flag");
+        via.read(0x8);
+        assert_eq!(via.ifr, 0x00, "T2C-L read clears the T2 flag");
+    }
+
+    #[test]
+    fn next_irq_cycle_is_where_tick_raises_the_flag() {
+        let mut via = Via6522::new();
+        via.last_cycles = 1000;
+        via.write(0xE, 0xC0); // enable T1 IRQ
+        via.write(0x4, 0x10);
+        via.write(0x5, 0x00); // T1 = 16, armed
+        let due = via.next_irq_cycle();
+        assert_eq!(due, 1000 + 16 + 2);
+
+        via.tick(due - 2);
+        assert!(!via.irq_active(), "counter at 0 but not yet expired");
+        via.tick(due);
+        assert!(via.irq_active(), "expired exactly at next_irq_cycle");
+        assert_eq!(via.next_irq_cycle(), u64::MAX, "no event while flag set");
+    }
+
+    /// Free-running T1 must interrupt every latch + 2 cycles, however late
+    /// after each expiry the timer is next ticked (lazy evaluation).
+    #[test]
+    fn t1_free_running_period_is_latch_plus_two() {
+        let mut via = Via6522::new();
+        via.write(0xB, 0x40); // ACR: continuous
+        via.write(0xE, 0xC0); // IER: T1
+        via.write(0x4, 100);
+        via.write(0x5, 0x00); // latch = counter = 100
+        let mut expiries = Vec::new();
+        for late in [0u64, 7, 99, 3] {
+            let due = via.next_irq_cycle();
+            via.tick(due + late); // observe the expiry `late` cycles after it
+            assert!(via.irq_active());
+            expiries.push(due);
+            via.read(0x4); // acknowledge
+        }
+        let periods: Vec<u64> = expiries.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(periods, vec![102, 102, 102]);
+    }
+
+    #[test]
+    fn next_irq_cycle_ignores_disabled_or_stopped_timers() {
+        let mut via = Via6522::new();
+        via.write(0x4, 0x10);
+        via.write(0x5, 0x00); // armed, but IER clear
+        assert_eq!(via.next_irq_cycle(), u64::MAX);
+        via.write(0xE, 0xA0); // T2 enabled, T2 not running
+        assert_eq!(via.next_irq_cycle(), u64::MAX);
     }
 
     #[test]

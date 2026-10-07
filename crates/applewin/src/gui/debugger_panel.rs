@@ -165,16 +165,15 @@ impl EmulatorApp {
             if do_step_over && paused {
                 let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
                 if opcode == 0x20 {
-                    self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
-                    self.debugger.deactivate();
+                    self.debugger
+                        .begin_step_over(self.emu.cpu.pc.wrapping_add(3));
                 } else {
                     self.emu.step();
                     self.debugger.stop_reason = apple2_debugger::state::StopReason::StepOver;
                 }
             }
             if do_step_out && paused {
-                self.debugger.step_out_sp = Some(self.emu.cpu.sp);
-                self.debugger.deactivate();
+                self.debugger.begin_step_out(self.emu.cpu.sp);
             }
 
             // Execute console command
@@ -213,19 +212,17 @@ impl EmulatorApp {
                     CmdResult::StepOver => {
                         let opcode = self.emu.bus.read_raw(self.emu.cpu.pc);
                         if opcode == 0x20 {
-                            self.debugger.step_over_target = Some(self.emu.cpu.pc.wrapping_add(3));
-                            self.debugger.deactivate();
+                            self.debugger
+                                .begin_step_over(self.emu.cpu.pc.wrapping_add(3));
                         } else {
                             self.emu.step();
                         }
                     }
                     CmdResult::StepOut => {
-                        self.debugger.step_out_sp = Some(self.emu.cpu.sp);
-                        self.debugger.deactivate();
+                        self.debugger.begin_step_out(self.emu.cpu.sp);
                     }
                     CmdResult::Trace(n) => {
-                        self.debugger.trace.enabled = true;
-                        self.debugger.trace_remaining = n;
+                        self.debugger.begin_trace(n);
                     }
                     CmdResult::SetPC(addr) => {
                         self.emu.cpu.pc = addr;

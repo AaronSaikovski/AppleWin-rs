@@ -17,10 +17,6 @@ pub enum AppMode {
     Logo,
     /// Normal execution.
     Running,
-    /// Single-step / debugger active.
-    Stepping,
-    /// Benchmark mode.
-    Benchmark,
 }
 
 /// The complete emulator state.
@@ -49,7 +45,23 @@ impl Emulator {
     /// Execute exactly `cycles` clock cycles.
     /// Returns the number of cycles actually executed (may overshoot by up to
     /// the longest instruction — 7 cycles for BRK).
+    #[inline]
     pub fn execute(&mut self, cycles: u64) -> u64 {
+        self.execute_until(cycles, |_, _, _| false)
+    }
+
+    /// Like [`execute`](Self::execute), but after every instruction calls
+    /// `stop(cpu, bus, pc_before)` — `pc_before` is the address the
+    /// instruction was fetched from — and returns early when it yields `true`.
+    /// Used by the debugger (step-over/out, trace, breakpoints), which must
+    /// run with full card, VBL and interrupt servicing; `bus` is mutable so
+    /// the hook can drain `bus.mem_trace`.  `execute` passes a constant-false
+    /// closure, which compiles away.
+    pub fn execute_until(
+        &mut self,
+        cycles: u64,
+        mut stop: impl FnMut(&Cpu, &mut Bus, u16) -> bool,
+    ) -> u64 {
         // Jammed CPUs just advance time — check once, outside the hot loop.
         if self.cpu.jammed {
             self.cpu.cycles += cycles;
@@ -75,6 +87,11 @@ impl Emulator {
             if self.cpu.cycles >= self.bus.next_vbl_cycle {
                 self.bus.vbl_tick(self.cpu.cycles);
             }
+            // Self-timed card events (Mockingboard VIA timer IRQs).  Also a
+            // single always-false compare when no timer is armed.
+            if self.cpu.cycles >= self.bus.cards.next_event_cycle() {
+                self.bus.service_card_events(self.cpu.cycles);
+            }
             // 65C02 WAI: CPU is halted until an interrupt arrives.
             // Advance time by 1 cycle per iteration and check for pending IRQ/NMI.
             if self.cpu.waiting {
@@ -85,7 +102,7 @@ impl Emulator {
                     // Still waiting — consume one cycle and continue polling.
                     self.cpu.cycles += 1;
                     if self.cpu.cycles >= next_update {
-                        self.bus.cards.update_all(self.cpu.cycles);
+                        self.bus.update_cards(self.cpu.cycles);
                         next_update += 17_030;
                     }
                     continue;
@@ -113,6 +130,7 @@ impl Emulator {
                 self.cpu.irq_defer = false;
             }
 
+            let pc_before = self.cpu.pc;
             dispatch::step_with_table(&mut self.cpu, &mut self.bus, table);
 
             // If IRQ was NOT asserted before but IS asserted after, it appeared on
@@ -123,8 +141,11 @@ impl Emulator {
                 self.cpu.irq_defer = true;
             }
             if self.cpu.cycles >= next_update {
-                self.bus.cards.update_all(self.cpu.cycles);
+                self.bus.update_cards(self.cpu.cycles);
                 next_update += 17_030;
+            }
+            if stop(&self.cpu, &mut self.bus, pc_before) {
+                break;
             }
         }
         self.cpu.cycles - start
@@ -134,6 +155,9 @@ impl Emulator {
     pub fn step(&mut self) -> u8 {
         if self.cpu.cycles >= self.bus.next_vbl_cycle {
             self.bus.vbl_tick(self.cpu.cycles);
+        }
+        if self.cpu.cycles >= self.bus.cards.next_event_cycle() {
+            self.bus.service_card_events(self.cpu.cycles);
         }
         dispatch::step(&mut self.cpu, &mut self.bus)
     }
@@ -252,12 +276,24 @@ impl Emulator {
         }
     }
 
-    pub fn restore_snapshot(&mut self, snap: &EmulatorSnapshot) {
-        self.model = snap.model;
+    /// Restore a save state.  The snapshot holds only CPU, RAM and soft-switch
+    /// state — not the ROM, model-specific bus wiring or cards — so a state
+    /// saved on a different model would produce a hybrid machine (e.g. //c
+    /// paging flags over a IIe ROM).  Such snapshots are rejected and the
+    /// running machine is left untouched.
+    pub fn restore_snapshot(&mut self, snap: &EmulatorSnapshot) -> crate::error::Result<()> {
+        if snap.model != self.model {
+            return Err(crate::error::Error::ModelMismatch {
+                saved: format!("{:?}", snap.model),
+                running: format!("{:?}", self.model),
+            });
+        }
         self.cpu.restore_snapshot(&snap.cpu);
         self.bus.restore_snapshot(&snap.memory);
         // The restored cycle counter may be behind `next_vbl_cycle`; re-seed the
-        // //c VBL schedule so VBL flags/interrupts keep firing after a load.
-        self.bus.reset_vbl(self.cpu.cycles);
+        // //c VBL schedule (keeping the restored flag/enable) so VBL flags and
+        // interrupts keep firing after a load.
+        self.bus.reseed_vbl_schedule(self.cpu.cycles);
+        Ok(())
     }
 }

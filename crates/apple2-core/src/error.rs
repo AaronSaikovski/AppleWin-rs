@@ -8,6 +8,9 @@ pub enum Error {
     #[error("invalid save-state version {0}")]
     InvalidVersion(u32),
 
+    #[error("save state is for {saved}, but the running machine is {running}")]
+    ModelMismatch { saved: String, running: String },
+
     #[error("ROM load error: {0}")]
     RomLoad(String),
 

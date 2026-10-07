@@ -4,17 +4,16 @@
 //! Architecture: 2 × 6522 VIA + 2 × AY-3-8910, plus an additional register
 //! range for SD card control (stubbed — no real SD card attached).
 //!
-//! The base Mockingboard functionality is identical:
-//!   $C0x0–$C0x7  VIA 1 (AY chip A)
-//!   $C0x8–$C0xF  VIA 2 (AY chip B)
+//! The base Mockingboard functionality is identical (no ROM):
+//!   $Cn00–$Cn0F  VIA 1 (AY chip A), mirrored through $Cn7F
+//!   $Cn80–$Cn8F  VIA 2 (AY chip B), mirrored through $CnEF
 //!
-//! The SD card control interface is exposed via VIA 2 port B auxiliary bits
-//! and directly through the $Cn00 ROM page I/O area.  Since no real SD card
-//! is present, SD reads return 0xFF (card not present).
+//! $CnF0–$CnFF is the SD card control interface, taking precedence over the
+//! VIA 2 mirror.  Since no real SD card is present, SD reads return 0xFF
+//! (card not present).
 
 use crate::card::{Card, CardType};
-use crate::cards::mb_firmware::MB_FIRMWARE;
-use crate::cards::via6522::Via6522;
+use crate::cards::via6522::{self, Via6522, mb_decode};
 use crate::error::Result;
 use apple2_audio::ay8910::Ay8910;
 use std::io::{Read, Write};
@@ -74,34 +73,12 @@ impl Card for SdMusicCard {
         self.slot
     }
 
-    fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
-        // Offsets 0x00–0xEF: firmware ROM.
-        // Offsets 0xF0–0xFF: SD card status (stubbed — return 0xFF = no card).
+    fn io_read(&mut self, offset: u8, cycles: u64) -> u8 {
+        // $CnF0–$CnFF: SD card status (stubbed — 0xFF = no card).
         if offset >= 0xF0 {
-            0xFF
-        } else {
-            *MB_FIRMWARE.get(offset as usize).unwrap_or(&0xFF)
+            return 0xFF;
         }
-    }
-
-    fn io_write(&mut self, offset: u8, value: u8, _cycles: u64) {
-        // SD card control writes via ROM-page I/O space.
-        if offset >= 0xF0 {
-            match offset {
-                0xF0 => self.sd_ctrl = value,
-                0xF1 => self.sd_data = value,
-                _ => {}
-            }
-        }
-    }
-
-    fn cx_rom(&self) -> Option<&[u8; 256]> {
-        Some(MB_FIRMWARE)
-    }
-
-    fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         if via_reg == 0x01 && self.via[via_idx].orb & 0x01 != 0 {
             self.strobe_ay(via_idx);
@@ -109,14 +86,29 @@ impl Card for SdMusicCard {
         self.via[via_idx].read(via_reg)
     }
 
-    fn slot_io_write(&mut self, reg: u8, val: u8, cycles: u64) {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_write(&mut self, offset: u8, value: u8, cycles: u64) {
+        if offset >= 0xF0 {
+            match offset {
+                0xF0 => self.sd_ctrl = value,
+                0xF1 => self.sd_data = value,
+                _ => {}
+            }
+            return;
+        }
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
-        self.via[via_idx].write(via_reg, val);
+        self.via[via_idx].write(via_reg, value);
         if via_reg == 0x00 {
             self.strobe_ay(via_idx);
         }
+    }
+
+    fn has_timers(&self) -> bool {
+        true
+    }
+
+    fn next_event_cycle(&self) -> u64 {
+        via6522::next_irq_cycle(&self.via)
     }
 
     fn fill_audio(&mut self, out: &mut Vec<f32>, cycles_elapsed: u64, sample_rate: u32) {
@@ -151,7 +143,11 @@ impl Card for SdMusicCard {
         self.sd_data = 0;
     }
 
-    fn update(&mut self, _cycles: u64) {}
+    fn update(&mut self, cycles: u64) {
+        for via in &mut self.via {
+            via.tick(cycles);
+        }
+    }
 
     fn irq_active(&self) -> bool {
         self.via.iter().any(|v| v.irq_active())

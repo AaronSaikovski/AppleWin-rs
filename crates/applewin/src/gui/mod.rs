@@ -54,9 +54,7 @@ use eframe::egui::{
     self, Align, Color32, ColorImage, FontId, Key, Layout, Pos2, Rect, RichText, Sense, Stroke,
     TextureOptions, Vec2,
 };
-use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use crate::EmuCore;
 use crate::config::{
@@ -154,6 +152,9 @@ struct EmulatorApp {
     renderer: NtscRenderer,
     fb: Framebuffer,
     texture: Option<egui::TextureHandle>,
+    /// Inputs of the last rendered Apple II frame; lets unchanged screens
+    /// skip rendering and texture upload.
+    frame_cache: FrameCache,
     logo_texture: Option<egui::TextureHandle>,
     icons: Option<Icons>,
     frame_no: u32,
@@ -172,7 +173,7 @@ struct EmulatorApp {
     /// None=no pending.  Set when confirm_reboot is true.
     pending_reset: Option<bool>,
     // Audio
-    audio_buf: Option<AudioBuf>,
+    audio_out: Option<AudioOut>,
     _audio_stream: Option<cpal::Stream>,
     speaker_state: bool,
     last_audio_cycle: u64,
@@ -209,14 +210,18 @@ struct EmulatorApp {
     /// Reusable 640x400 scratch buffer for SHR rendering (IIgs).
     /// Allocated once to avoid per-frame 1MB allocations.
     shr_scratch: Vec<u32>,
-    /// Reusable scratch for WAV recorder sample chunks.
-    wav_scratch: Vec<f32>,
     /// Reusable scratch for draining speaker_toggles without dropping
     /// the Vec's preallocated capacity every frame.
     speaker_toggles_scratch: Vec<u64>,
-    /// Reusable scratch for speaker PCM samples — synthesized without the
-    /// ring-buffer mutex held, then bulk-pushed under a single lock.
+    /// Reusable scratch for speaker PCM samples; card audio is mixed into it
+    /// and the result is queued on the audio ring buffer in one push.
     speaker_scratch: Vec<f32>,
+    /// Per-card scratch for Mockingboard/Phasor/SAM samples, mixed into
+    /// `speaker_scratch` before the frame is pushed to the ring buffer.
+    card_audio_scratch: Vec<f32>,
+    /// Emulated cycles covered by this frame's speaker samples; cards render
+    /// the same span so their output lines up with the speaker's.
+    audio_frame_cycles: u64,
     /// Reusable scratch for Ensoniq DOC PCM samples (IIgs).
     ensoniq_scratch: Vec<f32>,
 }
@@ -262,8 +267,8 @@ impl EmulatorApp {
         let rgb_renderer = apple2_video::rgb::RgbRenderer::new(char_rom, config.scanlines);
 
         // Initialise audio output (best-effort; silent if unavailable)
-        let (audio_buf, _audio_stream, audio_sample_rate) = match init_audio() {
-            Some((sr, buf, stream)) => (Some(buf), Some(stream), sr),
+        let (audio_out, _audio_stream, audio_sample_rate) = match init_audio() {
+            Some((sr, out, stream)) => (Some(out), Some(stream), sr),
             None => {
                 eprintln!("Warning: audio output unavailable");
                 (None, None, 44100)
@@ -318,8 +323,9 @@ impl EmulatorApp {
             && let Some(path) = config.save_state_path()
             && let Ok(yaml) = std::fs::read_to_string(&path)
             && let Ok(snap) = serde_yaml::from_str::<apple2_core::emulator::EmulatorSnapshot>(&yaml)
+            // A state from another machine model is ignored (keeps the logo).
+            && emu.restore_snapshot(&snap).is_ok()
         {
-            emu.restore_snapshot(&snap);
             emu.mode = apple2_core::emulator::AppMode::Running;
         }
 
@@ -355,6 +361,7 @@ impl EmulatorApp {
             renderer,
             fb: Framebuffer::new(),
             texture: None,
+            frame_cache: FrameCache::new(),
             logo_texture: None,
             icons: None,
             frame_no: 0,
@@ -368,7 +375,7 @@ impl EmulatorApp {
             settings_tab: 0,
             disk_slot,
             pending_reset: None,
-            audio_buf,
+            audio_out,
             _audio_stream,
             speaker_state: false,
             last_audio_cycle: initial_cycle,
@@ -392,9 +399,10 @@ impl EmulatorApp {
             gilrs: gilrs_inst,
             active_gamepad,
             shr_scratch: vec![0u32; 640 * 400],
-            wav_scratch: Vec::with_capacity(1024),
             speaker_toggles_scratch: Vec::with_capacity(65536),
             speaker_scratch: Vec::with_capacity(2048),
+            card_audio_scratch: Vec::with_capacity(2048),
+            audio_frame_cycles: 0,
             ensoniq_scratch: Vec::with_capacity(2048),
         }
     }
@@ -423,8 +431,7 @@ impl eframe::App for EmulatorApp {
 
         self.synth_speaker_audio();
         self.synth_ensoniq_audio();
-        self.synth_mockingboard_audio();
-        self.tap_wav_recording();
+        self.synth_card_audio();
 
         if self.handle_input(ctx, in_logo_mode) {
             request_close(ctx);
@@ -456,14 +463,11 @@ impl eframe::App for EmulatorApp {
         self.track_window_state(ctx);
 
         // Drive continuous animation at the display refresh rate — but skip
-        // when the debugger has halted execution (Stepping). In that state
-        // nothing is advancing on-screen, so egui can rely on input-driven
-        // repaints, saving CPU while the user inspects state.
-        let needs_repaint = self.emu.mode != apple2_core::emulator::AppMode::Stepping
-            || self.show_settings
-            || self.show_about
-            || self.show_debugger;
-        if needs_repaint {
+        // while the debugger has halted execution. Nothing advances on-screen
+        // then, so egui's input-driven repaints suffice (keys, clicks and
+        // pointer moves still trigger update()), saving the full-rate
+        // disassembly redraw and texture upload while the user inspects state.
+        if !self.debugger.active {
             ctx.request_repaint();
         }
     }

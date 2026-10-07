@@ -8,5 +8,4 @@ description = "Apple II video rendering: NTSC, RGB monitor, framebuffer"
 [dependencies]
 apple2-core = { workspace = true }
 thiserror   = { workspace = true }
-tracing     = { workspace = true }
 serde       = { workspace = true }

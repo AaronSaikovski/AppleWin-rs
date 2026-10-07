@@ -3,11 +3,14 @@
 //! Contains two 6522 VIAs, each controlling one AY-3-8910 PSG via BDIR/BC1
 //! lines encoded in the VIA's ORB register.
 //!
-//! Memory map (slot IO space, $C0x0–$C0xF):
-//!   $C0x0–$C0x3  VIA 1 (AY chip A):  ORB, ORA, DDRB, DDRA
-//!   $C0x4–$C0x7  VIA 1 timer regs (not used in audio; pass-through)
-//!   $C0x8–$C0xB  VIA 2 (AY chip B):  ORB, ORA, DDRB, DDRA
-//!   $C0xC–$C0xF  VIA 2 timer regs
+//! Memory map ($Cn00–$CnFF, the card's slot page — there is no ROM):
+//!   $Cn00–$Cn0F  VIA 1 (AY chip A, SSI263 A), all 16 6522 registers
+//!   $Cn80–$Cn8F  VIA 2 (AY chip B, SSI263 B)
+//!   A4–A6 are not decoded, so each VIA mirrors through its half page.
+//!
+//! VIA timers run against the CPU clock and can raise IRQs on their own; the
+//! card reports the next expiry via `next_event_cycle` so the emulator
+//! services it on time.
 //!
 //! BDIR/BC1 encoding (bits 1:0 of ORB after write):
 //!   %00  INACTIVE
@@ -18,9 +21,8 @@
 //! Reference: source/Mockingboard.cpp, source/AY8910.cpp
 
 use crate::card::{Card, CardType};
-use crate::cards::mb_firmware::MB_FIRMWARE;
 use crate::cards::ssi263::Ssi263;
-use crate::cards::via6522::Via6522;
+use crate::cards::via6522::{self, Via6522, mb_decode};
 use crate::error::Result;
 use apple2_audio::ay8910::Ay8910;
 use std::io::{Read, Write};
@@ -39,6 +41,8 @@ pub struct MockingboardCard {
 
     /// Accumulated cycles since last audio drain.
     cycles_pending: u64,
+    /// CPU cycle of the last `update`, for SSI263 elapsed-time ticks.
+    last_update_cycle: u64,
 }
 
 impl MockingboardCard {
@@ -49,6 +53,18 @@ impl MockingboardCard {
             ay: [Ay8910::new(), Ay8910::new()],
             ssi: std::array::from_fn(|_| Ssi263::new()),
             cycles_pending: 0,
+            last_update_cycle: 0,
+        }
+    }
+
+    /// Advance both SSI263 chips to `cycles`; READY sets CA1 (IFR bit 1).
+    fn sync_ssi(&mut self, cycles: u64) {
+        let delta = cycles.saturating_sub(self.last_update_cycle);
+        self.last_update_cycle = cycles;
+        for i in 0..2 {
+            if self.ssi[i].tick(delta) {
+                self.via[i].ifr |= 0x02;
+            }
         }
     }
 
@@ -84,19 +100,8 @@ impl Card for MockingboardCard {
         self.slot
     }
 
-    fn io_read(&mut self, offset: u8, _cycles: u64) -> u8 {
-        *MB_FIRMWARE.get(offset as usize).unwrap_or(&0xFF)
-    }
-
-    fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
-
-    fn cx_rom(&self) -> Option<&[u8; 256]> {
-        Some(MB_FIRMWARE)
-    }
-
-    fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_read(&mut self, offset: u8, cycles: u64) -> u8 {
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         // If reading ORA (reg 1) and BC1=1 (read mode), latch AY value first
         if via_reg == 0x01 && self.via[via_idx].orb & 0x01 != 0 {
@@ -105,9 +110,8 @@ impl Card for MockingboardCard {
         self.via[via_idx].read(via_reg)
     }
 
-    fn slot_io_write(&mut self, reg: u8, val: u8, cycles: u64) {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_write(&mut self, offset: u8, val: u8, cycles: u64) {
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         self.via[via_idx].write(via_reg, val);
         // A write to ORB triggers the AY bus cycle
@@ -116,8 +120,28 @@ impl Card for MockingboardCard {
         }
         // SSI263: detect ORA writes with CB2 as output strobe (PCR[7:5] != 0b000)
         if via_reg == 0x01 && self.via[via_idx].pcr & 0xE0 != 0 {
+            // Bring the speech timer up to date first, so a phoneme started
+            // now isn't charged for time that passed before the write.
+            self.sync_ssi(cycles);
             self.ssi[via_idx].write(val);
         }
+    }
+
+    fn has_timers(&self) -> bool {
+        true
+    }
+
+    fn next_event_cycle(&self) -> u64 {
+        // SSI263 READY (end of phoneme) raises CA1; schedule it when enabled.
+        let speech = self
+            .ssi
+            .iter()
+            .zip(&self.via)
+            .filter(|(ssi, via)| ssi.powered && ssi.ready_countdown > 0 && via.ier & 0x02 != 0)
+            .map(|(ssi, _)| self.last_update_cycle + ssi.ready_countdown)
+            .min()
+            .unwrap_or(u64::MAX);
+        via6522::next_irq_cycle(&self.via).min(speech)
     }
 
     fn fill_audio(&mut self, out: &mut Vec<f32>, cycles_elapsed: u64, sample_rate: u32) {
@@ -161,15 +185,14 @@ impl Card for MockingboardCard {
             ssi.reset();
         }
         self.cycles_pending = 0;
+        self.last_update_cycle = 0;
     }
 
     fn update(&mut self, cycles: u64) {
-        for i in 0..2 {
-            if self.ssi[i].tick(cycles) {
-                // READY asserted — set CA1 in IFR (bit 1)
-                self.via[i].ifr |= 0x02;
-            }
+        for via in &mut self.via {
+            via.tick(cycles);
         }
+        self.sync_ssi(cycles);
     }
 
     fn irq_active(&self) -> bool {

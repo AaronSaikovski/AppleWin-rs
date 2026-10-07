@@ -283,59 +283,26 @@ impl Bus {
 
     pub(super) fn soft_switch_write(&mut self, reg: u8, val: u8, cycles: u64) {
         match reg {
-            0x00 => {
-                self.mode.remove(MemMode::MF_80STORE);
-                self.rebuild_page_tables();
-            }
-            0x01 => {
-                self.mode.insert(MemMode::MF_80STORE);
-                self.rebuild_page_tables();
-            }
+            // $C000–$C00B: paging switches.  Programs hit these constantly
+            // (e.g. STA $C005 around every aux copy); only rebuild the page
+            // tables when the flag actually changes.
+            0x00 => self.set_paging_flag(MemMode::MF_80STORE, false),
+            0x01 => self.set_paging_flag(MemMode::MF_80STORE, true),
             // $C010: KBDSTRB — writing clears the keyboard strobe (same as reading it).
             // Many programs use STA $C010 rather than LDA $C010 to clear the strobe.
             0x10 => {
                 self.keyboard_data &= 0x7F;
             }
-            0x02 => {
-                self.mode.remove(MemMode::MF_AUXREAD);
-                self.rebuild_page_tables();
-            }
-            0x03 => {
-                self.mode.insert(MemMode::MF_AUXREAD);
-                self.rebuild_page_tables();
-            }
-            0x04 => {
-                self.mode.remove(MemMode::MF_AUXWRITE);
-                self.rebuild_page_tables();
-            }
-            0x05 => {
-                self.mode.insert(MemMode::MF_AUXWRITE);
-                self.rebuild_page_tables();
-            }
-            0x06 if !self.model.is_iic() => {
-                self.mode.remove(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
-            }
-            0x07 if !self.model.is_iic() => {
-                self.mode.insert(MemMode::MF_INTCXROM);
-                self.rebuild_page_tables();
-            }
-            0x08 => {
-                self.mode.remove(MemMode::MF_ALTZP);
-                self.rebuild_page_tables();
-            }
-            0x09 => {
-                self.mode.insert(MemMode::MF_ALTZP);
-                self.rebuild_page_tables();
-            }
-            0x0A if !self.model.is_iic() => {
-                self.mode.remove(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
-            }
-            0x0B if !self.model.is_iic() => {
-                self.mode.insert(MemMode::MF_SLOTC3ROM);
-                self.rebuild_page_tables();
-            }
+            0x02 => self.set_paging_flag(MemMode::MF_AUXREAD, false),
+            0x03 => self.set_paging_flag(MemMode::MF_AUXREAD, true),
+            0x04 => self.set_paging_flag(MemMode::MF_AUXWRITE, false),
+            0x05 => self.set_paging_flag(MemMode::MF_AUXWRITE, true),
+            0x06 if !self.model.is_iic() => self.set_paging_flag(MemMode::MF_INTCXROM, false),
+            0x07 if !self.model.is_iic() => self.set_paging_flag(MemMode::MF_INTCXROM, true),
+            0x08 => self.set_paging_flag(MemMode::MF_ALTZP, false),
+            0x09 => self.set_paging_flag(MemMode::MF_ALTZP, true),
+            0x0A if !self.model.is_iic() => self.set_paging_flag(MemMode::MF_SLOTC3ROM, false),
+            0x0B if !self.model.is_iic() => self.set_paging_flag(MemMode::MF_SLOTC3ROM, true),
             // $C00C/$C00D: CLR/SET80VID — 80-column display mode
             0x0C => {
                 self.mode.remove(MemMode::MF_VID80);

@@ -17,7 +17,6 @@ apple2-debugger = { workspace = true }
 apple2-iigs     = { workspace = true }
 
 thiserror  = { workspace = true }
-tracing    = { workspace = true }
 serde      = { workspace = true }
 serde_yaml = { workspace = true }
 png        = { workspace = true }
@@ -28,6 +27,7 @@ rfd    = { version = "0.15", optional = true }
 cpal   = { version = "0.15", optional = true }
 gilrs  = { version = "0.10", optional = true }
 toml   = { version = "0.8",  optional = true }
+rtrb   = { version = "0.3",  optional = true }
 # eframe transitively needs these winapi features on Windows
 winapi = { version = "0.3", features = ["winuser", "windef"], optional = true }
 
@@ -36,5 +36,5 @@ winres = "0.1"
 
 [features]
 default  = ["gui"]
-gui      = ["dep:eframe", "dep:rfd", "dep:cpal", "dep:gilrs", "dep:toml", "dep:winapi"]
+gui      = ["dep:eframe", "dep:rfd", "dep:cpal", "dep:gilrs", "dep:toml", "dep:winapi", "dep:rtrb"]
 headless = []

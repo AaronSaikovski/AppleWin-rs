@@ -8,7 +8,6 @@ description = "Apple II core emulation: CPU, memory bus, card trait, disk — no
 [dependencies]
 bitflags    = { workspace = true }
 thiserror   = { workspace = true }
-tracing     = { workspace = true }
 serde       = { workspace = true }
 serde_bytes = { workspace = true }
 flate2      = { workspace = true }

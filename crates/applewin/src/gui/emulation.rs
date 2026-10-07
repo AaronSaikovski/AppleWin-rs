@@ -19,6 +19,9 @@ impl EmulatorApp {
         self.speaker_state = false;
         self.dc_filter_ctr = 0;
         self.spkr_cycle_rem = 0.0;
+        if let Some(out) = &self.audio_out {
+            out.flush();
+        }
         self.last_frame_time = std::time::Instant::now();
     }
 
@@ -152,8 +155,11 @@ impl EmulatorApp {
                 const BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
                 const BATCH: u64 = 100_000; // batch size between motor & timer checks
                 let full_start = std::time::Instant::now();
-                while self.emu.bus.disk_motor_on() && full_start.elapsed() < BUDGET {
-                    self.emu.execute(BATCH);
+                while self.emu.bus.disk_motor_on()
+                    && !self.debugger.active
+                    && full_start.elapsed() < BUDGET
+                {
+                    self.run_cycles(BATCH);
                 }
                 // Reset timer so the next frame doesn't try to "catch up" for
                 // the real time spent in the full-speed loop.
@@ -167,19 +173,55 @@ impl EmulatorApp {
                 self.dc_filter_ctr = 0;
                 self.speaker_state = false;
                 self.spkr_cycle_rem = 0.0;
-                if let Some(buf) = &self.audio_buf {
-                    buf.lock().unwrap().clear();
+                if let Some(out) = &self.audio_out {
+                    out.flush();
                 }
             } else {
                 let cycles = (elapsed_secs * base_hz) as u64;
                 if cycles > 0 {
-                    self.emu.execute(cycles);
+                    self.run_cycles(cycles);
                 }
+            }
+            // A breakpoint, trace or step-over/out may have halted execution:
+            // bring the debugger up so the stop is visible.
+            if self.debugger.active && !debugger_paused {
+                self.show_debugger = true;
             }
         } else {
             // Keep last_frame_time current so we don't burst when logo exits.
             self.last_frame_time = frame_now;
         }
+    }
+
+    /// Run the IIe/IIc core for `cycles`, through the debugger's
+    /// per-instruction hook only when something needs it (breakpoints,
+    /// trace, step-over/out); otherwise the plain fast path.
+    fn run_cycles(&mut self, cycles: u64) {
+        if !self.debugger.needs_instruction_hook() {
+            self.emu.execute(cycles);
+            return;
+        }
+        let debugger = &mut self.debugger;
+        self.emu.bus.mem_trace_enabled = debugger.needs_mem_trace();
+        self.emu.execute_until(cycles, |cpu, bus, pc_before| {
+            let regs = apple2_debugger::commands::CpuRegs {
+                a: cpu.a,
+                x: cpu.x,
+                y: cpu.y,
+                sp: cpu.sp,
+                pc: cpu.pc,
+                flags: cpu.flags.bits(),
+                cycles: cpu.cycles,
+            };
+            let mem = std::mem::take(&mut bus.mem_trace);
+            let stop = debugger.after_instruction(pc_before, regs, &mem, |a| bus.read_raw(a));
+            // Hand the (cleared) buffer back so its capacity is reused.
+            bus.mem_trace = mem;
+            bus.mem_trace.clear();
+            stop
+        });
+        self.emu.bus.mem_trace_enabled = false;
+        self.emu.bus.mem_trace.clear();
     }
 }
 // ── Slot helpers ──────────────────────────────────────────────────────────

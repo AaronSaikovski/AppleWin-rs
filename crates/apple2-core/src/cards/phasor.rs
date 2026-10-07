@@ -3,11 +3,10 @@
 //! The Phasor is a super-set of the Mockingboard. In native mode it
 //! contains four AY-3-8910 PSGs (chips 0–3) controlled by two 6522 VIAs.
 //!
-//! Memory map (slot IO $C0x0–$C0xF):
-//!   $C0x0–$C0x3  VIA 0: ORB, ORA, DDRB, DDRA
-//!   $C0x4–$C0x7  VIA 0 timer regs (stubs)
-//!   $C0x8–$C0xB  VIA 1: ORB, ORA, DDRB, DDRA
-//!   $C0xC–$C0xF  VIA 1 timer regs (stubs)
+//! Memory map:
+//!   $Cn00–$Cn0F  VIA 0 (all 16 6522 registers), mirrored through $Cn00–$Cn7F
+//!   $Cn80–$Cn8F  VIA 1, mirrored through $Cn80–$CnFF
+//!   $C0x9 write  mode select (bit 0: 1 = Phasor native, 0 = Mockingboard)
 //!
 //! ORB bit encoding per VIA:
 //!   bits 1:0  BDIR/BC1 (AY command lines)
@@ -17,7 +16,7 @@
 //! Reference: source/Mockingboard.cpp (Phasor section)
 
 use crate::card::{Card, CardType};
-use crate::cards::via6522::Via6522;
+use crate::cards::via6522::{self, Via6522, mb_decode};
 use crate::error::Result;
 use apple2_audio::ay8910::Ay8910;
 use std::io::{Read, Write};
@@ -94,14 +93,8 @@ impl Card for PhasorCard {
         self.slot
     }
 
-    fn io_read(&mut self, _offset: u8, _cycles: u64) -> u8 {
-        0xFF
-    }
-    fn io_write(&mut self, _offset: u8, _value: u8, _cycles: u64) {}
-
-    fn slot_io_read(&mut self, reg: u8, cycles: u64) -> u8 {
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_read(&mut self, offset: u8, cycles: u64) -> u8 {
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         if via_reg == 0x01 && self.via[via_idx].orb & 0x01 != 0 {
             self.strobe_ay(via_idx);
@@ -109,18 +102,29 @@ impl Card for PhasorCard {
         self.via[via_idx].read(via_reg)
     }
 
-    fn slot_io_write(&mut self, reg: u8, val: u8, cycles: u64) {
-        // Mode register: writing $C0x9 (reg 9 relative to slot base) selects Phasor mode
-        if reg == 0x09 {
-            self.phasor_mode = val & 0x01 != 0;
-        }
-        let via_idx = if reg < 8 { 0 } else { 1 };
-        let via_reg = reg & 0x07;
+    fn io_write(&mut self, offset: u8, val: u8, cycles: u64) {
+        let (via_idx, via_reg) = mb_decode(offset);
         self.via[via_idx].tick(cycles);
         self.via[via_idx].write(via_reg, val);
         if via_reg == 0x00 {
             self.strobe_ay(via_idx);
         }
+    }
+
+    fn slot_io_write(&mut self, reg: u8, val: u8, _cycles: u64) {
+        // Mode register: writing $C0x9 selects Phasor (bit 0 = 1) or
+        // Mockingboard-compatible mode.
+        if reg == 0x09 {
+            self.phasor_mode = val & 0x01 != 0;
+        }
+    }
+
+    fn has_timers(&self) -> bool {
+        true
+    }
+
+    fn next_event_cycle(&self) -> u64 {
+        via6522::next_irq_cycle(&self.via)
     }
 
     fn fill_audio(&mut self, out: &mut Vec<f32>, cycles_elapsed: u64, sample_rate: u32) {
@@ -157,7 +161,11 @@ impl Card for PhasorCard {
         self.phasor_mode = true;
     }
 
-    fn update(&mut self, _cycles: u64) {}
+    fn update(&mut self, cycles: u64) {
+        for via in &mut self.via {
+            via.tick(cycles);
+        }
+    }
 
     fn irq_active(&self) -> bool {
         self.via.iter().any(|v| v.irq_active())

@@ -132,3 +132,25 @@ fn iic_vbl_flag_latched_by_execute_and_acked_by_c070() {
     emu.execute(17_030);
     assert_eq!(emu.bus.read(0xC019, emu.cpu.cycles) & 0x80, 0x80);
 }
+
+/// Loading a save state must keep the //c VBL interrupt enable and latched
+/// flag: a program that enabled VBL interrupts ($C05B) before saving would
+/// otherwise stop receiving them after the load.
+#[test]
+fn iic_snapshot_restore_keeps_vbl_interrupt_state() {
+    let mut emu = make_iic(None);
+    emu.execute(20_000); // past the first VBL boundary → flag latched
+    let cyc = emu.cpu.cycles;
+    emu.bus.read(0xC05B, cyc); // ENVBL
+    assert!(emu.bus.irq_line, "enabled + latched VBL asserts IRQ");
+    let snap = emu.take_snapshot();
+
+    // Change the live state, then load the save.
+    emu.bus.read(0xC05A, cyc); // DISVBL
+    emu.bus.read(0xC070, cyc); // ack
+    emu.restore_snapshot(&snap).expect("same model");
+
+    assert!(emu.bus.vbl_irq_enabled, "VBL interrupt enable restored");
+    assert!(emu.bus.vbl_flag, "latched VBL flag restored");
+    assert!(emu.bus.irq_line, "IRQ line recomputed from restored state");
+}

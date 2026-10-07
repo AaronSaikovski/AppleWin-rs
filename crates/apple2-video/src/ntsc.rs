@@ -866,6 +866,9 @@ impl NtscRenderer {
                     phase = (phase + 1) & 3;
                 }
             }
+            if self.tv_mode {
+                blank_tv_mode_tail(pixels, row0);
+            }
         }
 
         // Pass 2: scanline-double by duplicating each even row into the odd row.
@@ -985,6 +988,9 @@ impl NtscRenderer {
                     phase = (phase + 1) & 3;
                 }
             }
+            if self.tv_mode {
+                blank_tv_mode_tail(pixels, row0);
+            }
         }
 
         // Pass 2: vertical blending for odd rows.
@@ -1002,6 +1008,11 @@ impl NtscRenderer {
                 pixels[odd_row + x] = 0xFF000000 | (b | g | r);
             }
         }
+        // The last odd row has no hi-res row below it to blend with (the
+        // screen ends, or mixed-mode text starts): repeat the even row so it
+        // never shows stale pixels from the previous frame or mode.
+        let last_even = (scan_lines - 1) * 2 * FB_WIDTH;
+        pixels.copy_within(last_even..last_even + FB_WIDTH, last_even + FB_WIDTH);
     }
 
     // ── Monochrome hi-res ──────────────────────────────────────────────────
@@ -1199,6 +1210,14 @@ pub fn hgr_row_offset(y: usize) -> usize {
     (y & 7) * 0x0400 + ((y >> 3) & 7) * 0x80 + (y >> 6) * 0x28
 }
 
+/// TV mode shifts each NTSC scanline left by 2 pixels (the pre-render
+/// region), so the last 2 framebuffer columns receive no signal.  Blank them
+/// instead of leaving whatever the previous frame or mode drew there.
+#[inline]
+fn blank_tv_mode_tail(pixels: &mut [u32], row0: usize) {
+    pixels[row0 + FB_WIDTH - 2..row0 + FB_WIDTH].fill(0xFF000000);
+}
+
 /// Blend each pair of adjacent rendered rows (colour vertical blend).
 ///
 /// Each Apple II scanline k renders to 2 identical FB rows (2k and 2k+1).
@@ -1326,13 +1345,13 @@ mod tests {
 
     #[test]
     fn all_video_modes_render_without_oob_and_cover_framebuffer() {
-        // Drive every mode-flag combination through both the NTSC and the
-        // idealized entry points.  In debug builds an out-of-bounds framebuffer
-        // index panics, so reaching the assertions proves no path overruns the
-        // 560×384 buffer.  With tv_mode off (offset 0) every path must also cover
-        // the framebuffer: we pre-fill with a transparent sentinel and require
-        // every directly-rendered even row (each Apple scanline → fb row 2y) to
-        // be fully written.  (Odd rows are vertical-blend fills.)
+        // Drive every mode-flag combination through the NTSC, idealized and
+        // TV-mode paths.  In debug builds an out-of-bounds framebuffer index
+        // panics, so reaching the assertions proves no path overruns the
+        // 560×384 buffer.  Every path must also cover the whole framebuffer:
+        // we pre-fill with a transparent sentinel and require every row
+        // (including the last odd row and, in TV mode, the 2 right-hand
+        // columns the -2 offset leaves) to be written.
         use MemMode as M;
         let g = M::MF_GRAPHICS;
         let modes = [
@@ -1365,20 +1384,28 @@ mod tests {
             aux_ram[i] = ((i >> 3) & 0xFF) as u8;
         }
         let renderer = NtscRenderer::new(CharRom::new(vec![0x3Cu8; 1024]), false, false);
+        // tv_mode on applies the -2 composite offset, which must neither panic
+        // nor leave the right-hand columns unwritten.
+        let tv = NtscRenderer::new(CharRom::new(vec![0x3Cu8; 1024]), false, true);
 
         for (name, mode) in modes {
-            for idealized in [false, true] {
+            for (variant, r, idealized) in [
+                ("ntsc", &renderer, false),
+                ("idealized", &renderer, true),
+                ("tv", &tv, false),
+            ] {
                 let mut fb = Framebuffer::new();
                 // Transparent sentinel: every render path writes alpha 0xFF.
                 fb.pixels_mut().fill(0x0000_0000);
                 if idealized {
-                    renderer.render_idealized(&main_ram, &aux_ram, mode, 0, &mut fb);
+                    r.render_idealized(&main_ram, &aux_ram, mode, 0, &mut fb);
                 } else {
-                    renderer.render(&main_ram, &aux_ram, mode, 0, &mut fb);
+                    r.render(&main_ram, &aux_ram, mode, 0, &mut fb);
                 }
-                // Every even fb row (a directly-rendered Apple scanline) must be
-                // fully written across all 560 columns.
-                for fb_y in (0..FB_HEIGHT).step_by(2) {
+                // Every framebuffer row — rendered scanlines and their
+                // doubled/blended odd rows alike — must be fully written, or
+                // stale pixels from the previous frame or mode show through.
+                for fb_y in 0..FB_HEIGHT {
                     let row = fb_y * FB_WIDTH;
                     let unwritten = fb.pixels()[row..row + FB_WIDTH]
                         .iter()
@@ -1386,18 +1413,10 @@ mod tests {
                         .count();
                     assert_eq!(
                         unwritten, 0,
-                        "mode {name} (idealized={idealized}) row {fb_y}: \
-                         {unwritten} columns unwritten"
+                        "mode {name} ({variant}) row {fb_y}: {unwritten} columns unwritten"
                     );
                 }
             }
-        }
-
-        // tv_mode on (the -2 composite offset) must not panic for any mode.
-        let tv = NtscRenderer::new(CharRom::new(vec![0x3Cu8; 1024]), false, true);
-        for (_name, mode) in modes {
-            let mut fb = Framebuffer::new();
-            tv.render(&main_ram, &aux_ram, mode, 0, &mut fb);
         }
     }
 
